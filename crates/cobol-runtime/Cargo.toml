@@ -1,0 +1,31 @@
+[package]
+name = "cobol-runtime"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "COBOL runtime: program lifecycle, prelude, special registers"
+
+[lints]
+workspace = true
+
+[features]
+default = ["full"]
+full = ["io", "sort"]
+io = ["dep:cobol-io"]
+sort = ["dep:cobol-sort"]
+
+[dependencies]
+cobol-core = { workspace = true }
+cobol-types = { workspace = true }
+cobol-move = { workspace = true }
+cobol-arithmetic = { workspace = true }
+cobol-io = { workspace = true, optional = true }
+cobol-sort = { workspace = true, optional = true }
+rust_decimal = { workspace = true }
+rust_decimal_macros = { workspace = true }
+serde = { workspace = true }
+toml = { workspace = true }
+
+[dev-dependencies]

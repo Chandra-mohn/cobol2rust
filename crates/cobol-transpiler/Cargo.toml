@@ -1,0 +1,22 @@
+[package]
+name = "cobol-transpiler"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "COBOL-to-Rust transpiler: ANTLR4 parser, AST, symbol table, code generation"
+
+[lints]
+workspace = true
+
+[dependencies]
+antlr-rust = { workspace = true }
+thiserror = { workspace = true }
+miette = { workspace = true }
+
+[features]
+compile_tests = []
+
+[dev-dependencies]
+tempfile = { workspace = true }

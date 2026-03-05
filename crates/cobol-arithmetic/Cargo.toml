@@ -1,0 +1,20 @@
+[package]
+name = "cobol-arithmetic"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "COBOL arithmetic verbs: ADD, SUBTRACT, MULTIPLY, DIVIDE, COMPUTE"
+
+[lints]
+workspace = true
+
+[dependencies]
+cobol-core = { workspace = true }
+cobol-types = { workspace = true }
+rust_decimal = { workspace = true }
+
+[dev-dependencies]
+rust_decimal_macros = { workspace = true }
+cobol-types = { workspace = true }

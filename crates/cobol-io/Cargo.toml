@@ -1,0 +1,25 @@
+[package]
+name = "cobol-io"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "COBOL file I/O: sequential, indexed (SQLite), relative, print files"
+
+[lints]
+workspace = true
+
+[features]
+default = ["sqlite"]
+sqlite = ["dep:rusqlite"]
+
+[dependencies]
+cobol-core = { workspace = true }
+cobol-types = { workspace = true }
+cobol-move = { workspace = true }
+rusqlite = { workspace = true, optional = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

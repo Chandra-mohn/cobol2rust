@@ -1,0 +1,19 @@
+[package]
+name = "cobol-sort"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "COBOL SORT/MERGE: in-memory and external merge sort, collating sequences"
+
+[lints]
+workspace = true
+
+[dependencies]
+cobol-core = { workspace = true }
+cobol-types = { workspace = true }
+cobol-io = { workspace = true }
+tempfile = { workspace = true }
+
+[dev-dependencies]

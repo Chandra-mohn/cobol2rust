@@ -1,0 +1,24 @@
+# .cargo/config.toml -- Build acceleration settings
+#
+# RAM disk target created by: scripts/rust-dev-setup.sh
+# sccache installed by same script
+
+[build]
+# Use RAM disk for build artifacts (comment out if not mounted)
+target-dir = "/Volumes/RustBuild/cobol2rust-target"
+
+# Use sccache as the Rust compiler wrapper
+rustc-wrapper = "sccache"
+
+[profile.dev]
+# Split debug info to speed up linking
+split-debuginfo = "unpacked"
+
+[profile.dev.package."*"]
+# Don't optimize dependencies in dev (faster compile)
+opt-level = 0
+
+[profile.release]
+# Thin LTO for release (faster link than fat LTO, still optimized)
+lto = "thin"
+codegen-units = 1
