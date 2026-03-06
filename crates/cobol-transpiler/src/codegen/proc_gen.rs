@@ -1434,28 +1434,59 @@ fn data_ref_expr(dr: &DataReference) -> String {
     }
 }
 
-/// Format an arithmetic expression as a Rust expression.
+/// Format an arithmetic expression as a Rust expression evaluating to `Decimal`.
+///
+/// Converts all operands to `Decimal` via `.to_decimal()` so that standard
+/// Rust arithmetic operators work. `Decimal` implements `std::ops` traits,
+/// while `PackedDecimal` and other `CobolNumeric` types do not.
 fn arith_expr_str(expr: &ArithExpr) -> String {
     match expr {
-        ArithExpr::Operand(op) => operand_expr(op),
+        ArithExpr::Operand(op) => operand_to_decimal_expr(op),
         ArithExpr::Negate(inner) => format!("-({})", arith_expr_str(inner)),
         ArithExpr::BinaryOp { left, op, right } => {
             let l = arith_expr_str(left);
             let r = arith_expr_str(right);
-            let op_str = match op {
-                ArithOp::Add => "+",
-                ArithOp::Subtract => "-",
-                ArithOp::Multiply => "*",
-                ArithOp::Divide => "/",
-                ArithOp::Power => ".pow",
-            };
-            if *op == ArithOp::Power {
-                format!("({l}){op_str}({r})")
-            } else {
-                format!("({l} {op_str} {r})")
+            match op {
+                ArithOp::Add => format!("({l} + {r})"),
+                ArithOp::Subtract => format!("({l} - {r})"),
+                ArithOp::Multiply => format!("({l} * {r})"),
+                ArithOp::Divide => format!("({l} / {r})"),
+                ArithOp::Power => {
+                    // Power via f64 since Decimal has no built-in pow
+                    format!(
+                        "Decimal::from_f64_retain(({l}).to_f64().unwrap_or(0.0).powf(({r}).to_f64().unwrap_or(0.0))).unwrap_or(Decimal::ZERO)"
+                    )
+                }
             }
         }
         ArithExpr::Paren(inner) => format!("({})", arith_expr_str(inner)),
+    }
+}
+
+/// Convert an operand to a `Decimal` expression for use in COMPUTE.
+///
+/// Field references get `.to_decimal()`, numeric literals get `dec!()`,
+/// and intrinsic function calls are passed through (they already return `Decimal`).
+fn operand_to_decimal_expr(op: &Operand) -> String {
+    match op {
+        Operand::Literal(Literal::Numeric(n)) => format!("dec!({n})"),
+        Operand::Literal(_) => {
+            // Non-numeric literals in arithmetic context -- fall back to operand_expr
+            operand_expr(op)
+        }
+        Operand::DataRef(dr) => {
+            let base = data_ref_expr(dr);
+            format!("{base}.to_decimal()")
+        }
+        Operand::Function(f) => {
+            // Intrinsic functions already return Decimal
+            let args: Vec<String> = f.arguments.iter().map(operand_expr).collect();
+            format!(
+                "cobol_function_{}({})",
+                f.name.to_lowercase().replace('-', "_"),
+                args.join(", ")
+            )
+        }
     }
 }
 
@@ -2132,7 +2163,7 @@ mod tests {
                 "1".to_string(),
             )))),
         };
-        assert_eq!(arith_expr_str(&expr), "(ws.ws_a + dec!(1))");
+        assert_eq!(arith_expr_str(&expr), "(ws.ws_a.to_decimal() + dec!(1))");
     }
 
     #[test]

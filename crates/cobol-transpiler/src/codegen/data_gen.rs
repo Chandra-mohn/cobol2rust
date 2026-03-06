@@ -161,13 +161,11 @@ fn generate_field(w: &mut RustWriter, entry: &DataEntry, prefix: &str) {
 }
 
 /// Generate flattened fields for a group record.
-fn generate_group_fields(w: &mut RustWriter, entry: &DataEntry, prefix: &str) {
-    let new_prefix = if prefix.is_empty() {
-        entry.name.clone()
-    } else {
-        format!("{prefix}_{}", entry.name)
-    };
-
+///
+/// Children use their own COBOL name without parent group prefix.
+/// proc_gen references fields by COBOL name directly via
+/// `cobol_to_rust_name(name, "")`, so Rust field names must match.
+fn generate_group_fields(w: &mut RustWriter, entry: &DataEntry, _prefix: &str) {
     for child in &entry.children {
         if child.level == 88 || child.level == 66 {
             continue;
@@ -175,13 +173,13 @@ fn generate_group_fields(w: &mut RustWriter, entry: &DataEntry, prefix: &str) {
         // REDEFINES group: emit a single RedefinesGroup field
         // (don't recurse into children -- they access via byte offsets)
         if child.redefines.is_some() {
-            generate_field(w, child, &new_prefix);
+            generate_field(w, child, "");
             continue;
         }
         if child.children.is_empty() {
-            generate_field(w, child, &new_prefix);
+            generate_field(w, child, "");
         } else {
-            generate_group_fields(w, child, &new_prefix);
+            generate_group_fields(w, child, "");
         }
     }
 }
@@ -220,26 +218,22 @@ fn generate_field_init(w: &mut RustWriter, entry: &DataEntry, prefix: &str) {
 }
 
 /// Generate field initializations for a group.
-fn generate_group_field_inits(w: &mut RustWriter, entry: &DataEntry, prefix: &str) {
-    let new_prefix = if prefix.is_empty() {
-        entry.name.clone()
-    } else {
-        format!("{prefix}_{}", entry.name)
-    };
-
+///
+/// Matches `generate_group_fields`: children use their own name, no parent prefix.
+fn generate_group_field_inits(w: &mut RustWriter, entry: &DataEntry, _prefix: &str) {
     for child in &entry.children {
         if child.level == 88 || child.level == 66 {
             continue;
         }
         // REDEFINES group: single RedefinesGroup init
         if child.redefines.is_some() {
-            generate_field_init(w, child, &new_prefix);
+            generate_field_init(w, child, "");
             continue;
         }
         if child.children.is_empty() {
-            generate_field_init(w, child, &new_prefix);
+            generate_field_init(w, child, "");
         } else {
-            generate_group_field_inits(w, child, &new_prefix);
+            generate_group_field_inits(w, child, "");
         }
     }
 }
@@ -248,16 +242,10 @@ fn generate_group_field_inits(w: &mut RustWriter, entry: &DataEntry, prefix: &st
 ///
 /// RENAMES creates an alias for another field (or a byte range of fields).
 /// We emit a separate struct field with the resolved type from the symbol table.
-fn generate_renames_fields(w: &mut RustWriter, record: &DataEntry, prefix: &str) {
-    let record_prefix = if prefix.is_empty() {
-        record.name.clone()
-    } else {
-        format!("{prefix}_{}", record.name)
-    };
-
+fn generate_renames_fields(w: &mut RustWriter, record: &DataEntry, _prefix: &str) {
     for child in &record.children {
         if child.level == 66 {
-            let field_name = cobol_to_rust_name(&child.name, &record_prefix);
+            let field_name = cobol_to_rust_name(&child.name, "");
             let resolved = resolve_renames_type_from_entry(child, record);
             let rust_type = rust_type_string(&resolved.rust_type);
             let comment = if child.renames_thru.is_some() {
@@ -278,16 +266,10 @@ fn generate_renames_fields(w: &mut RustWriter, record: &DataEntry, prefix: &str)
 }
 
 /// Generate field initializations for level-66 RENAMES entries within a record.
-fn generate_renames_field_inits(w: &mut RustWriter, record: &DataEntry, prefix: &str) {
-    let record_prefix = if prefix.is_empty() {
-        record.name.clone()
-    } else {
-        format!("{prefix}_{}", record.name)
-    };
-
+fn generate_renames_field_inits(w: &mut RustWriter, record: &DataEntry, _prefix: &str) {
     for child in &record.children {
         if child.level == 66 {
-            let field_name = cobol_to_rust_name(&child.name, &record_prefix);
+            let field_name = cobol_to_rust_name(&child.name, "");
             let resolved = resolve_renames_type_from_entry(child, record);
             let init = field_init_expr(child, &resolved.rust_type);
             w.line(&format!("{field_name}: {init},"));
@@ -780,9 +762,9 @@ mod tests {
         let output = w.finish();
 
         // Should have WS-DATE as PicX and WS-DATE-PARTS as RedefinesGroup
-        assert!(output.contains("ws_record_ws_date: PicX"), "original field: {output}");
+        assert!(output.contains("ws_date: PicX"), "original field: {output}");
         assert!(
-            output.contains("ws_record_ws_date_parts: RedefinesGroup"),
+            output.contains("ws_date_parts: RedefinesGroup"),
             "redefines field: {output}"
         );
 
@@ -819,7 +801,7 @@ mod tests {
 
         // RENAMES field should appear in the struct
         assert!(
-            output.contains("ws_record_ws_alias: PicX"),
+            output.contains("ws_alias: PicX"),
             "RENAMES single should copy target type (PicX): {output}"
         );
         assert!(
@@ -850,7 +832,7 @@ mod tests {
 
         // RENAMES THRU should create a PicX spanning both fields
         assert!(
-            output.contains("ws_record_ws_range: PicX"),
+            output.contains("ws_range: PicX"),
             "RENAMES THRU should create PicX: {output}"
         );
         assert!(
@@ -879,7 +861,7 @@ mod tests {
 
         // Single RENAMES of numeric should copy the numeric type
         assert!(
-            output.contains("ws_record_ws_amt_alias: PackedDecimal"),
+            output.contains("ws_amt_alias: PackedDecimal"),
             "RENAMES numeric target should produce PackedDecimal: {output}"
         );
         assert!(
@@ -905,7 +887,7 @@ mod tests {
 
         // Should still compile and produce valid output without level-66
         assert!(output.contains("pub struct WorkingStorage"));
-        assert!(output.contains("ws_record_ws_name: PicX"));
+        assert!(output.contains("ws_name: PicX"));
         assert!(!output.contains("RENAMES"), "no RENAMES comment expected: {output}");
     }
 

@@ -1395,7 +1395,7 @@ fn e2e_renames_single() {
 
     // RENAMES alias should appear as a struct field
     assert!(
-        rust_code.contains("ws_record_ws_alias"),
+        rust_code.contains("ws_alias"),
         "missing RENAMES alias field: {rust_code}"
     );
     // Should contain a RENAMES comment
@@ -1430,7 +1430,7 @@ fn e2e_renames_thru() {
 
     // RENAMES THRU should generate a PicX field spanning the range
     assert!(
-        rust_code.contains("ws_record_ws_date_range"),
+        rust_code.contains("ws_date_range"),
         "missing RENAMES THRU field: {rust_code}"
     );
     assert!(
@@ -1466,7 +1466,7 @@ fn e2e_renames_numeric_target() {
 
     // RENAMES of numeric should copy the numeric type (PackedDecimal)
     assert!(
-        rust_code.contains("ws_record_ws_amt"),
+        rust_code.contains("ws_amt"),
         "missing RENAMES numeric alias field: {rust_code}"
     );
     assert!(
@@ -1501,11 +1501,11 @@ fn e2e_renames_multiple() {
     let rust_code = transpile(cobol).expect("transpile failed");
 
     assert!(
-        rust_code.contains("ws_employee_ws_name_alias"),
+        rust_code.contains("ws_name_alias"),
         "missing first RENAMES alias: {rust_code}"
     );
     assert!(
-        rust_code.contains("ws_employee_ws_id_alias"),
+        rust_code.contains("ws_id_alias"),
         "missing second RENAMES alias: {rust_code}"
     );
 }
@@ -1537,7 +1537,7 @@ fn e2e_renames_none_unchanged() {
         "no RENAMES expected: {rust_code}"
     );
     assert!(
-        rust_code.contains("ws_record_ws_name"),
+        rust_code.contains("ws_name"),
         "normal fields should still work: {rust_code}"
     );
 }
@@ -1572,7 +1572,7 @@ fn e2e_alpha_edited_display() {
         "should reference AlphaEditSymbol: {rust_code}"
     );
     assert!(
-        rust_code.contains("ws_record_ws_date_fmt"),
+        rust_code.contains("ws_date_fmt"),
         "should have field name: {rust_code}"
     );
 }
@@ -1783,11 +1783,11 @@ fn e2e_payroll_structure() {
         "missing WorkingStorage struct: {rust_code}"
     );
     assert!(
-        rust_code.contains("ws_employee_ws_emp_id"),
+        rust_code.contains("ws_emp_id"),
         "missing WS-EMP-ID field: {rust_code}"
     );
     assert!(
-        rust_code.contains("ws_employee_ws_emp_pay"),
+        rust_code.contains("ws_emp_pay"),
         "missing WS-EMP-PAY field: {rust_code}"
     );
 
@@ -2611,5 +2611,151 @@ fn e2e_regression_compute_with_parens() {
     assert!(
         rust_code.contains("(") && rust_code.contains(")"),
         "missing parentheses in compute expression: {rust_code}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Test: Group child fields use unprefixed names matching proc_gen references
+// ---------------------------------------------------------------------------
+#[test]
+fn e2e_group_child_field_names_match() {
+    let cobol = concat!(
+        "IDENTIFICATION DIVISION.\n",
+        "PROGRAM-ID. GRPTEST.\n",
+        "DATA DIVISION.\n",
+        "WORKING-STORAGE SECTION.\n",
+        "01  WS-RECORD.\n",
+        "    05  WS-NAME PIC X(20).\n",
+        "    05  WS-AGE PIC 9(3).\n",
+        "PROCEDURE DIVISION.\n",
+        "MAIN-PARA.\n",
+        "    DISPLAY WS-NAME.\n",
+        "    DISPLAY WS-AGE.\n",
+        "    STOP RUN.\n",
+    );
+
+    let rust_code = transpile(cobol).expect("transpile failed");
+
+    // Struct fields should use child's own name (no group prefix)
+    assert!(
+        rust_code.contains("pub ws_name: PicX"),
+        "field should be ws_name not ws_record_ws_name: {rust_code}"
+    );
+    assert!(
+        rust_code.contains("pub ws_age: PackedDecimal"),
+        "field should be ws_age not ws_record_ws_age: {rust_code}"
+    );
+
+    // Procedure division references should match struct field names
+    assert!(
+        rust_code.contains("ws.ws_name"),
+        "proc_gen should reference ws.ws_name: {rust_code}"
+    );
+    assert!(
+        rust_code.contains("ws.ws_age"),
+        "proc_gen should reference ws.ws_age: {rust_code}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Test: COMPUTE uses .to_decimal() for field operands (not raw operators)
+// ---------------------------------------------------------------------------
+#[test]
+fn e2e_compute_uses_decimal_conversion() {
+    let cobol = concat!(
+        "IDENTIFICATION DIVISION.\n",
+        "PROGRAM-ID. COMPFIX.\n",
+        "DATA DIVISION.\n",
+        "WORKING-STORAGE SECTION.\n",
+        "01  WS-A PIC 9(5) VALUE 10.\n",
+        "01  WS-B PIC 9(5) VALUE 20.\n",
+        "01  WS-RESULT PIC 9(7).\n",
+        "PROCEDURE DIVISION.\n",
+        "MAIN-PARA.\n",
+        "    COMPUTE WS-RESULT = WS-A * WS-B.\n",
+        "    STOP RUN.\n",
+    );
+
+    let rust_code = transpile(cobol).expect("transpile failed");
+
+    // Operands should use .to_decimal() for Decimal arithmetic
+    assert!(
+        rust_code.contains(".to_decimal()"),
+        "COMPUTE operands should call .to_decimal(): {rust_code}"
+    );
+    // Should still call cobol_compute
+    assert!(
+        rust_code.contains("cobol_compute"),
+        "should generate cobol_compute call: {rust_code}"
+    );
+    // Should NOT have raw ws.ws_a * ws.ws_b (without .to_decimal())
+    assert!(
+        !rust_code.contains("ws.ws_a *") || rust_code.contains("ws.ws_a.to_decimal()"),
+        "should not use raw operators on PackedDecimal: {rust_code}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Test: COMPUTE with literal operands uses dec!() (not PackedDecimal wrapper)
+// ---------------------------------------------------------------------------
+#[test]
+fn e2e_compute_literal_uses_decimal_macro() {
+    let cobol = concat!(
+        "IDENTIFICATION DIVISION.\n",
+        "PROGRAM-ID. COMPFIX2.\n",
+        "DATA DIVISION.\n",
+        "WORKING-STORAGE SECTION.\n",
+        "01  WS-A PIC 9(5) VALUE 10.\n",
+        "01  WS-RESULT PIC 9(7).\n",
+        "PROCEDURE DIVISION.\n",
+        "MAIN-PARA.\n",
+        "    COMPUTE WS-RESULT = WS-A + 5.\n",
+        "    STOP RUN.\n",
+    );
+
+    let rust_code = transpile(cobol).expect("transpile failed");
+
+    // Literal 5 in COMPUTE should become dec!(5), not a PackedDecimal temp
+    assert!(
+        rust_code.contains("dec!(5)"),
+        "literal in COMPUTE should use dec!(): {rust_code}"
+    );
+    // Field should use .to_decimal()
+    assert!(
+        rust_code.contains("ws.ws_a.to_decimal()"),
+        "field in COMPUTE should call .to_decimal(): {rust_code}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Test: Nested group children also use unprefixed names
+// ---------------------------------------------------------------------------
+#[test]
+fn e2e_nested_group_field_names() {
+    let cobol = concat!(
+        "IDENTIFICATION DIVISION.\n",
+        "PROGRAM-ID. NESTGRP.\n",
+        "DATA DIVISION.\n",
+        "WORKING-STORAGE SECTION.\n",
+        "01  WS-OUTER.\n",
+        "    05  WS-INNER.\n",
+        "        10  WS-VALUE PIC 9(5) VALUE 42.\n",
+        "PROCEDURE DIVISION.\n",
+        "MAIN-PARA.\n",
+        "    DISPLAY WS-VALUE.\n",
+        "    STOP RUN.\n",
+    );
+
+    let rust_code = transpile(cobol).expect("transpile failed");
+
+    // Deeply nested field should use its own name
+    assert!(
+        rust_code.contains("pub ws_value: PackedDecimal"),
+        "nested field should be ws_value: {rust_code}"
+    );
+    // Reference in procedure division should match
+    assert!(
+        rust_code.contains("ws.ws_value"),
+        "proc reference should be ws.ws_value: {rust_code}"
     );
 }
