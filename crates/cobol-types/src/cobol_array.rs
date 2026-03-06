@@ -64,7 +64,7 @@ impl<T: CobolField> CobolArray<T> {
 impl<T: CobolField + Clone> CobolArray<T> {
     /// Concatenate all element bytes into a contiguous vector.
     ///
-    /// Use this for I/O serialization. The `as_bytes()` method on CobolField
+    /// Use this for I/O serialization. The `as_bytes()` method on `CobolField`
     /// cannot return a contiguous slice for arrays, so this method provides
     /// the correct byte representation.
     pub fn to_bytes_vec(&self) -> Vec<u8> {

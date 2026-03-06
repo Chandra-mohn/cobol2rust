@@ -40,7 +40,7 @@ impl std::fmt::Debug for ZonedDecimal {
 }
 
 impl ZonedDecimal {
-    /// Create a new ZonedDecimal initialized to zero.
+    /// Create a new `ZonedDecimal` initialized to zero.
     ///
     /// - `precision`: total digit count from PIC clause
     /// - `scale`: decimal places (digits after V)
@@ -61,7 +61,7 @@ impl ZonedDecimal {
         }
     }
 
-    /// Create a ZonedDecimal from a Decimal value.
+    /// Create a `ZonedDecimal` from a Decimal value.
     pub fn from_decimal(precision: u32, scale: u32, signed: bool, value: Decimal) -> Self {
         let mut zd = Self::new(precision, scale, signed);
         zd.set_decimal(value);

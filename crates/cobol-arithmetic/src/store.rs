@@ -17,7 +17,7 @@ use crate::result::ArithResult;
 ///
 /// If size error occurs and is detected:
 /// - Destination is NOT modified (COBOL standard behavior)
-/// - ArithResult::size_error is returned
+/// - `ArithResult::size_error` is returned
 pub fn store_arithmetic_result(
     value: Decimal,
     dest: &mut dyn CobolNumeric,
@@ -47,10 +47,10 @@ pub fn store_arithmetic_result(
             decimal_ext::left_truncate_to_precision(rounded_value, dest_precision, dest_scale);
 
         // Handle sign for unsigned destinations
-        let final_value = if !dest.is_signed() {
-            truncated.abs()
-        } else {
+        let final_value = if dest.is_signed() {
             truncated
+        } else {
+            truncated.abs()
         };
 
         dest.set_decimal(final_value);
@@ -58,10 +58,10 @@ pub fn store_arithmetic_result(
     }
 
     // Step 3: No overflow -- store directly
-    let final_value = if !dest.is_signed() {
-        rounded_value.abs()
-    } else {
+    let final_value = if dest.is_signed() {
         rounded_value
+    } else {
+        rounded_value.abs()
     };
 
     dest.set_decimal(final_value);

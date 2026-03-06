@@ -211,10 +211,10 @@ fn run_validation_walk(source: &str) -> Result<()> {
 #[derive(Debug, Default)]
 struct ValidationListener;
 
-impl<'input> ParseTreeListener<'input, Cobol85ParserContextType> for ValidationListener {}
+impl ParseTreeListener<'_, Cobol85ParserContextType> for ValidationListener {}
 
 #[allow(unused_variables)]
-impl<'input> Cobol85Listener<'input> for ValidationListener {}
+impl Cobol85Listener<'_> for ValidationListener {}
 
 /// Wrap standalone copybook content in a minimal COBOL program skeleton
 /// so the ANTLR4 `startRule` entry point can parse it.

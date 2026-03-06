@@ -23,7 +23,7 @@ pub struct CompBinary {
     signed: bool,
     /// COMP (true) vs COMP-5 (false): PIC-limited vs full binary range
     pic_limited: bool,
-    /// Cached big-endian byte representation for as_bytes() support.
+    /// Cached big-endian byte representation for `as_bytes()` support.
     /// Only the first `storage_bytes()` bytes are valid.
     byte_cache: [u8; 8],
 }

@@ -106,7 +106,7 @@ impl<'input> Cobol85Listener<'input> for ProcedureDivisionListener {
         for sentence_ctx in ctx.sentence_all() {
             let mut statements = Vec::new();
             for stmt_ctx in sentence_ctx.statement_all() {
-                if let Some(stmt) = extract_statement(&*stmt_ctx) {
+                if let Some(stmt) = extract_statement(&stmt_ctx) {
                     statements.push(stmt);
                 }
             }
@@ -129,61 +129,61 @@ impl<'input> Cobol85Listener<'input> for ProcedureDivisionListener {
 // Statement extraction (recursive)
 // ---------------------------------------------------------------------------
 
-/// Extract a Statement from a StatementContext by checking which child rule matched.
-fn extract_statement<'input>(ctx: &StatementContext<'input>) -> Option<Statement> {
+/// Extract a Statement from a `StatementContext` by checking which child rule matched.
+fn extract_statement(ctx: &StatementContext<'_>) -> Option<Statement> {
     if let Some(c) = ctx.moveStatement() {
-        return Some(extract_move(&*c));
+        return Some(extract_move(&c));
     }
     if let Some(c) = ctx.displayStatement() {
-        return Some(extract_display(&*c));
+        return Some(extract_display(&c));
     }
     if let Some(c) = ctx.addStatement() {
-        return Some(extract_add(&*c));
+        return Some(extract_add(&c));
     }
     if let Some(c) = ctx.subtractStatement() {
-        return Some(extract_subtract(&*c));
+        return Some(extract_subtract(&c));
     }
     if let Some(c) = ctx.multiplyStatement() {
-        return Some(extract_multiply(&*c));
+        return Some(extract_multiply(&c));
     }
     if let Some(c) = ctx.divideStatement() {
-        return Some(extract_divide(&*c));
+        return Some(extract_divide(&c));
     }
     if let Some(c) = ctx.computeStatement() {
-        return Some(extract_compute(&*c));
+        return Some(extract_compute(&c));
     }
     if let Some(c) = ctx.ifStatement() {
-        return Some(extract_if(&*c));
+        return Some(extract_if(&c));
     }
     if let Some(c) = ctx.evaluateStatement() {
-        return Some(extract_evaluate(&*c));
+        return Some(extract_evaluate(&c));
     }
     if let Some(c) = ctx.performStatement() {
-        return Some(extract_perform(&*c));
+        return Some(extract_perform(&c));
     }
     if let Some(c) = ctx.goToStatement() {
-        return Some(extract_goto(&*c));
+        return Some(extract_goto(&c));
     }
     if let Some(c) = ctx.stopStatement() {
-        return Some(extract_stop(&*c));
+        return Some(extract_stop(&c));
     }
     if ctx.gobackStatement().is_some() {
         return Some(Statement::GoBack);
     }
     if let Some(c) = ctx.initializeStatement() {
-        return Some(extract_initialize(&*c));
+        return Some(extract_initialize(&c));
     }
     if ctx.continueStatement().is_some() {
         return Some(Statement::Continue);
     }
     if let Some(c) = ctx.callStatement() {
-        return Some(extract_call(&*c));
+        return Some(extract_call(&c));
     }
     if let Some(c) = ctx.cancelStatement() {
-        return Some(extract_cancel(&*c));
+        return Some(extract_cancel(&c));
     }
     if let Some(c) = ctx.acceptStatement() {
-        return Some(extract_accept(&*c));
+        return Some(extract_accept(&c));
     }
     if let Some(c) = ctx.exitStatement() {
         let text = c.get_text().to_uppercase();
@@ -198,49 +198,49 @@ fn extract_statement<'input>(ctx: &StatementContext<'input>) -> Option<Statement
         return Some(Statement::ExitParagraph);
     }
     if let Some(c) = ctx.setStatement() {
-        return Some(extract_set(&*c));
+        return Some(extract_set(&c));
     }
     if let Some(c) = ctx.startStatement() {
-        return Some(extract_start(&*c));
+        return Some(extract_start(&c));
     }
     if let Some(c) = ctx.openStatement() {
-        return Some(extract_open(&*c));
+        return Some(extract_open(&c));
     }
     if let Some(c) = ctx.closeStatement() {
-        return Some(extract_close(&*c));
+        return Some(extract_close(&c));
     }
     if let Some(c) = ctx.readStatement() {
-        return Some(extract_read(&*c));
+        return Some(extract_read(&c));
     }
     if let Some(c) = ctx.writeStatement() {
-        return Some(extract_write(&*c));
+        return Some(extract_write(&c));
     }
     if let Some(c) = ctx.rewriteStatement() {
-        return Some(extract_rewrite(&*c));
+        return Some(extract_rewrite(&c));
     }
     if let Some(c) = ctx.deleteStatement() {
-        return Some(extract_delete(&*c));
+        return Some(extract_delete(&c));
     }
     if let Some(c) = ctx.sortStatement() {
-        return Some(extract_sort(&*c));
+        return Some(extract_sort(&c));
     }
     if let Some(c) = ctx.mergeStatement() {
-        return Some(extract_merge(&*c));
+        return Some(extract_merge(&c));
     }
     if let Some(c) = ctx.releaseStatement() {
-        return Some(extract_release(&*c));
+        return Some(extract_release(&c));
     }
     if let Some(c) = ctx.returnStatement() {
-        return Some(extract_return(&*c));
+        return Some(extract_return(&c));
     }
     if let Some(c) = ctx.inspectStatement() {
-        return Some(extract_inspect(&*c));
+        return Some(extract_inspect(&c));
     }
     if let Some(c) = ctx.stringStatement() {
-        return Some(extract_string(&*c));
+        return Some(extract_string(&c));
     }
     if let Some(c) = ctx.unstringStatement() {
-        return Some(extract_unstring(&*c));
+        return Some(extract_unstring(&c));
     }
     // Unsupported statement -- skip
     None
@@ -250,16 +250,14 @@ fn extract_statement<'input>(ctx: &StatementContext<'input>) -> Option<Statement
 // Individual statement extractors
 // ---------------------------------------------------------------------------
 
-fn extract_move<'input>(ctx: &MoveStatementContext<'input>) -> Statement {
+fn extract_move(ctx: &MoveStatementContext<'_>) -> Statement {
     if let Some(corr_ctx) = ctx.moveCorrespondingToStatement() {
         let source = corr_ctx
-            .moveCorrespondingToSendingArea()
-            .map(|s| extract_identifier_or_literal_from_text(&s.get_text()))
-            .unwrap_or_else(|| Operand::Literal(Literal::Alphanumeric(String::new())));
+            .moveCorrespondingToSendingArea().map_or_else(|| Operand::Literal(Literal::Alphanumeric(String::new())), |s| extract_identifier_or_literal_from_text(&s.get_text()));
         let destinations: Vec<DataReference> = corr_ctx
             .identifier_all()
             .iter()
-            .map(|id| extract_data_ref_from_identifier(&**id))
+            .map(|id| extract_data_ref_from_identifier(id))
             .collect();
         Statement::Move(MoveStatement {
             corresponding: true,
@@ -268,13 +266,11 @@ fn extract_move<'input>(ctx: &MoveStatementContext<'input>) -> Statement {
         })
     } else if let Some(move_to) = ctx.moveToStatement() {
         let source = move_to
-            .moveToSendingArea()
-            .map(|s| extract_operand_from_sending_area(&*s))
-            .unwrap_or_else(|| Operand::Literal(Literal::Alphanumeric(String::new())));
+            .moveToSendingArea().map_or_else(|| Operand::Literal(Literal::Alphanumeric(String::new())), |s| extract_operand_from_sending_area(&s));
         let destinations: Vec<DataReference> = move_to
             .identifier_all()
             .iter()
-            .map(|id| extract_data_ref_from_identifier(&**id))
+            .map(|id| extract_data_ref_from_identifier(id))
             .collect();
         Statement::Move(MoveStatement {
             corresponding: false,
@@ -291,15 +287,15 @@ fn extract_move<'input>(ctx: &MoveStatementContext<'input>) -> Statement {
     }
 }
 
-fn extract_display<'input>(ctx: &DisplayStatementContext<'input>) -> Statement {
+fn extract_display(ctx: &DisplayStatementContext<'_>) -> Statement {
     let items: Vec<Operand> = ctx
         .displayOperand_all()
         .iter()
         .map(|op| {
             if let Some(id) = op.identifier() {
-                Operand::DataRef(extract_data_ref_from_identifier(&*id))
+                Operand::DataRef(extract_data_ref_from_identifier(&id))
             } else if let Some(lit) = op.literal() {
-                extract_literal_operand(&*lit)
+                extract_literal_operand(&lit)
             } else {
                 Operand::Literal(Literal::Alphanumeric(op.get_text()))
             }
@@ -328,7 +324,7 @@ fn extract_display<'input>(ctx: &DisplayStatementContext<'input>) -> Statement {
     })
 }
 
-fn extract_add<'input>(ctx: &AddStatementContext<'input>) -> Statement {
+fn extract_add(ctx: &AddStatementContext<'_>) -> Statement {
     let on_size_error = extract_size_error_stmts(ctx.onSizeErrorPhrase().as_deref());
     let not_on_size_error = extract_not_size_error_stmts(ctx.notOnSizeErrorPhrase().as_deref());
 
@@ -336,7 +332,7 @@ fn extract_add<'input>(ctx: &AddStatementContext<'input>) -> Statement {
         let operands: Vec<Operand> = giving_ctx
             .addFrom_all()
             .iter()
-            .map(|f| extract_operand_from_add_from(&**f))
+            .map(|f| extract_operand_from_add_from(f))
             .collect();
         let to: Vec<ArithTarget> = giving_ctx
             .addToGiving_all()
@@ -366,7 +362,7 @@ fn extract_add<'input>(ctx: &AddStatementContext<'input>) -> Statement {
         let operands: Vec<Operand> = to_ctx
             .addFrom_all()
             .iter()
-            .map(|f| extract_operand_from_add_from(&**f))
+            .map(|f| extract_operand_from_add_from(f))
             .collect();
         let to: Vec<ArithTarget> = to_ctx
             .addTo_all()
@@ -406,7 +402,7 @@ fn extract_add<'input>(ctx: &AddStatementContext<'input>) -> Statement {
     }
 }
 
-fn extract_subtract<'input>(ctx: &SubtractStatementContext<'input>) -> Statement {
+fn extract_subtract(ctx: &SubtractStatementContext<'_>) -> Statement {
     let on_size_error = extract_size_error_stmts(ctx.onSizeErrorPhrase().as_deref());
     let not_on_size_error = extract_not_size_error_stmts(ctx.notOnSizeErrorPhrase().as_deref());
 
@@ -474,11 +470,11 @@ fn extract_subtract<'input>(ctx: &SubtractStatementContext<'input>) -> Statement
     }
 }
 
-fn extract_multiply<'input>(ctx: &MultiplyStatementContext<'input>) -> Statement {
+fn extract_multiply(ctx: &MultiplyStatementContext<'_>) -> Statement {
     let multiplicand = if let Some(id) = ctx.identifier() {
-        Operand::DataRef(extract_data_ref_from_identifier(&*id))
+        Operand::DataRef(extract_data_ref_from_identifier(&id))
     } else if let Some(lit) = ctx.literal() {
-        extract_literal_operand(&*lit)
+        extract_literal_operand(&lit)
     } else {
         Operand::Literal(Literal::Numeric("0".to_string()))
     };
@@ -537,11 +533,11 @@ fn extract_multiply<'input>(ctx: &MultiplyStatementContext<'input>) -> Statement
     }
 }
 
-fn extract_divide<'input>(ctx: &DivideStatementContext<'input>) -> Statement {
+fn extract_divide(ctx: &DivideStatementContext<'_>) -> Statement {
     let operand = if let Some(id) = ctx.identifier() {
-        Operand::DataRef(extract_data_ref_from_identifier(&*id))
+        Operand::DataRef(extract_data_ref_from_identifier(&id))
     } else if let Some(lit) = ctx.literal() {
-        extract_literal_operand(&*lit)
+        extract_literal_operand(&lit)
     } else {
         Operand::Literal(Literal::Numeric("0".to_string()))
     };
@@ -628,15 +624,13 @@ fn extract_divide<'input>(ctx: &DivideStatementContext<'input>) -> Statement {
     }
 }
 
-fn extract_compute<'input>(ctx: &ComputeStatementContext<'input>) -> Statement {
+fn extract_compute(ctx: &ComputeStatementContext<'_>) -> Statement {
     let targets: Vec<ArithTarget> = ctx
         .computeStore_all()
         .iter()
         .map(|cs| {
             let field = cs
-                .identifier()
-                .map(|id| extract_data_ref_from_identifier(&*id))
-                .unwrap_or_else(|| make_data_ref(&cs.get_text()));
+                .identifier().map_or_else(|| make_data_ref(&cs.get_text()), |id| extract_data_ref_from_identifier(&id));
             ArithTarget {
                 field,
                 rounded: cs.ROUNDED().is_some(),
@@ -646,10 +640,9 @@ fn extract_compute<'input>(ctx: &ComputeStatementContext<'input>) -> Statement {
 
     let expression = ctx
         .arithmeticExpression()
-        .map(|expr| extract_arith_expr(&*expr))
-        .unwrap_or(ArithExpr::Operand(Operand::Literal(Literal::Numeric(
+        .map_or(ArithExpr::Operand(Operand::Literal(Literal::Numeric(
             "0".to_string(),
-        ))));
+        ))), |expr| extract_arith_expr(&expr));
 
     let on_size_error = extract_size_error_stmts(ctx.onSizeErrorPhrase().as_deref());
     let not_on_size_error = extract_not_size_error_stmts(ctx.notOnSizeErrorPhrase().as_deref());
@@ -662,11 +655,10 @@ fn extract_compute<'input>(ctx: &ComputeStatementContext<'input>) -> Statement {
     })
 }
 
-fn extract_if<'input>(ctx: &IfStatementContext<'input>) -> Statement {
+fn extract_if(ctx: &IfStatementContext<'_>) -> Statement {
     let condition = ctx
         .condition()
-        .map(|c| extract_condition(&*c))
-        .unwrap_or(Condition::ConditionName(make_data_ref("TRUE")));
+        .map_or(Condition::ConditionName(make_data_ref("TRUE")), |c| extract_condition(&c));
 
     let then_body: Vec<Statement> = ctx
         .ifThen()
@@ -678,7 +670,7 @@ fn extract_if<'input>(ctx: &IfStatementContext<'input>) -> Statement {
             then_ctx
                 .statement_all()
                 .iter()
-                .filter_map(|s| extract_statement(&**s))
+                .filter_map(|s| extract_statement(s))
                 .collect()
         })
         .unwrap_or_default();
@@ -692,7 +684,7 @@ fn extract_if<'input>(ctx: &IfStatementContext<'input>) -> Statement {
             else_ctx
                 .statement_all()
                 .iter()
-                .filter_map(|s| extract_statement(&**s))
+                .filter_map(|s| extract_statement(s))
                 .collect()
         })
         .unwrap_or_default();
@@ -704,15 +696,15 @@ fn extract_if<'input>(ctx: &IfStatementContext<'input>) -> Statement {
     })
 }
 
-fn extract_evaluate<'input>(ctx: &EvaluateStatementContext<'input>) -> Statement {
+fn extract_evaluate(ctx: &EvaluateStatementContext<'_>) -> Statement {
     // Extract subjects
     let mut subjects = Vec::new();
     if let Some(sel) = ctx.evaluateSelect() {
-        subjects.push(extract_evaluate_subject(&*sel));
+        subjects.push(extract_evaluate_subject(&sel));
     }
     for also in ctx.evaluateAlsoSelect_all() {
         if let Some(sel) = also.evaluateSelect() {
-            subjects.push(extract_evaluate_subject(&*sel));
+            subjects.push(extract_evaluate_subject(&sel));
         }
     }
 
@@ -739,7 +731,7 @@ fn extract_evaluate<'input>(ctx: &EvaluateStatementContext<'input>) -> Statement
             let body: Vec<Statement> = wp
                 .statement_all()
                 .iter()
-                .filter_map(|s| extract_statement(&**s))
+                .filter_map(|s| extract_statement(s))
                 .collect();
             WhenBranch { values, body }
         })
@@ -751,7 +743,7 @@ fn extract_evaluate<'input>(ctx: &EvaluateStatementContext<'input>) -> Statement
         .map(|wo| {
             wo.statement_all()
                 .iter()
-                .filter_map(|s| extract_statement(&**s))
+                .filter_map(|s| extract_statement(s))
                 .collect()
         })
         .unwrap_or_default();
@@ -763,16 +755,15 @@ fn extract_evaluate<'input>(ctx: &EvaluateStatementContext<'input>) -> Statement
     })
 }
 
-fn extract_perform<'input>(ctx: &PerformStatementContext<'input>) -> Statement {
+fn extract_perform(ctx: &PerformStatementContext<'_>) -> Statement {
     if let Some(inline) = ctx.performInlineStatement() {
         let loop_type = inline
             .performType()
-            .map(|pt| extract_perform_type(&*pt))
-            .unwrap_or(PerformLoopType::Once);
+            .map_or(PerformLoopType::Once, |pt| extract_perform_type(&pt));
         let body: Vec<Statement> = inline
             .statement_all()
             .iter()
-            .filter_map(|s| extract_statement(&**s))
+            .filter_map(|s| extract_statement(s))
             .collect();
         Statement::Perform(PerformStatement {
             target: None,
@@ -794,8 +785,7 @@ fn extract_perform<'input>(ctx: &PerformStatementContext<'input>) -> Statement {
         };
         let loop_type = proc
             .performType()
-            .map(|pt| extract_perform_type(&*pt))
-            .unwrap_or(PerformLoopType::Once);
+            .map_or(PerformLoopType::Once, |pt| extract_perform_type(&pt));
         Statement::Perform(PerformStatement {
             target,
             thru,
@@ -812,7 +802,7 @@ fn extract_perform<'input>(ctx: &PerformStatementContext<'input>) -> Statement {
     }
 }
 
-fn extract_goto<'input>(ctx: &GoToStatementContext<'input>) -> Statement {
+fn extract_goto(ctx: &GoToStatementContext<'_>) -> Statement {
     if let Some(simple) = ctx.goToStatementSimple() {
         let target = simple
             .procedureName()
@@ -833,7 +823,7 @@ fn extract_goto<'input>(ctx: &GoToStatementContext<'input>) -> Statement {
         // Extract the DEPENDING ON identifier
         let depending = dep
             .identifier()
-            .map(|id| extract_data_ref_from_identifier(&*id));
+            .map(|id| extract_data_ref_from_identifier(&id));
 
         Statement::GoTo(GoToStatement { targets, depending })
     } else {
@@ -844,7 +834,7 @@ fn extract_goto<'input>(ctx: &GoToStatementContext<'input>) -> Statement {
     }
 }
 
-fn extract_stop<'input>(ctx: &StopStatementContext<'input>) -> Statement {
+fn extract_stop(ctx: &StopStatementContext<'_>) -> Statement {
     if ctx.RUN().is_some() {
         Statement::StopRun
     } else {
@@ -852,11 +842,11 @@ fn extract_stop<'input>(ctx: &StopStatementContext<'input>) -> Statement {
     }
 }
 
-fn extract_initialize<'input>(ctx: &InitializeStatementContext<'input>) -> Statement {
+fn extract_initialize(ctx: &InitializeStatementContext<'_>) -> Statement {
     let targets: Vec<DataReference> = ctx
         .identifier_all()
         .iter()
-        .map(|id| extract_data_ref_from_identifier(&**id))
+        .map(|id| extract_data_ref_from_identifier(id))
         .collect();
 
     Statement::Initialize(InitializeStatement {
@@ -865,18 +855,18 @@ fn extract_initialize<'input>(ctx: &InitializeStatementContext<'input>) -> State
     })
 }
 
-fn extract_call<'input>(ctx: &CallStatementContext<'input>) -> Statement {
+fn extract_call(ctx: &CallStatementContext<'_>) -> Statement {
     let program = if let Some(id) = ctx.identifier() {
-        Operand::DataRef(extract_data_ref_from_identifier(&*id))
+        Operand::DataRef(extract_data_ref_from_identifier(&id))
     } else if let Some(lit) = ctx.literal() {
-        extract_literal_operand(&*lit)
+        extract_literal_operand(&lit)
     } else {
         Operand::Literal(Literal::Alphanumeric(String::new()))
     };
 
     // Extract USING parameters
     let using = if let Some(using_phrase) = ctx.callUsingPhrase() {
-        extract_call_using_params(&*using_phrase)
+        extract_call_using_params(&using_phrase)
     } else {
         Vec::new()
     };
@@ -884,7 +874,7 @@ fn extract_call<'input>(ctx: &CallStatementContext<'input>) -> Statement {
     // Extract RETURNING / GIVING field
     let returning = ctx.callGivingPhrase().and_then(|gp| {
         gp.identifier()
-            .map(|id| extract_data_ref_from_identifier(&*id))
+            .map(|id| extract_data_ref_from_identifier(&id))
     });
 
     // ON EXCEPTION / ON OVERFLOW (synonym in CALL context)
@@ -906,8 +896,8 @@ fn extract_call<'input>(ctx: &CallStatementContext<'input>) -> Statement {
     })
 }
 
-fn extract_call_using_params<'input>(
-    ctx: &CallUsingPhraseContext<'input>,
+fn extract_call_using_params(
+    ctx: &CallUsingPhraseContext<'_>,
 ) -> Vec<CallParam> {
     let mut params = Vec::new();
 
@@ -924,13 +914,13 @@ fn extract_call_using_params<'input>(
                     params.push(CallParam {
                         mode: PassingMode::ByReference,
                         operand: Some(Operand::DataRef(
-                            extract_data_ref_from_identifier(&*id),
+                            extract_data_ref_from_identifier(&id),
                         )),
                     });
                 } else if let Some(lit) = ref_item.literal() {
                     params.push(CallParam {
                         mode: PassingMode::ByReference,
-                        operand: Some(extract_literal_operand(&*lit)),
+                        operand: Some(extract_literal_operand(&lit)),
                     });
                 }
             }
@@ -948,13 +938,13 @@ fn extract_call_using_params<'input>(
                     params.push(CallParam {
                         mode: PassingMode::ByContent,
                         operand: Some(Operand::DataRef(
-                            extract_data_ref_from_identifier(&*id),
+                            extract_data_ref_from_identifier(&id),
                         )),
                     });
                 } else if let Some(lit) = content_item.literal() {
                     params.push(CallParam {
                         mode: PassingMode::ByContent,
-                        operand: Some(extract_literal_operand(&*lit)),
+                        operand: Some(extract_literal_operand(&lit)),
                     });
                 }
             }
@@ -967,13 +957,13 @@ fn extract_call_using_params<'input>(
                     params.push(CallParam {
                         mode: PassingMode::ByValue,
                         operand: Some(Operand::DataRef(
-                            extract_data_ref_from_identifier(&*id),
+                            extract_data_ref_from_identifier(&id),
                         )),
                     });
                 } else if let Some(lit) = value_item.literal() {
                     params.push(CallParam {
                         mode: PassingMode::ByValue,
-                        operand: Some(extract_literal_operand(&*lit)),
+                        operand: Some(extract_literal_operand(&lit)),
                     });
                 }
             }
@@ -983,39 +973,39 @@ fn extract_call_using_params<'input>(
     params
 }
 
-fn extract_on_exception_stmts<'input>(
-    ctx: Option<&OnExceptionClauseContext<'input>>,
+fn extract_on_exception_stmts(
+    ctx: Option<&OnExceptionClauseContext<'_>>,
 ) -> Vec<Statement> {
     ctx.map(|c| {
         c.statement_all()
             .iter()
-            .filter_map(|s| extract_statement(&**s))
+            .filter_map(|s| extract_statement(s))
             .collect()
     })
     .unwrap_or_default()
 }
 
-fn extract_not_on_exception_stmts<'input>(
-    ctx: Option<&NotOnExceptionClauseContext<'input>>,
+fn extract_not_on_exception_stmts(
+    ctx: Option<&NotOnExceptionClauseContext<'_>>,
 ) -> Vec<Statement> {
     ctx.map(|c| {
         c.statement_all()
             .iter()
-            .filter_map(|s| extract_statement(&**s))
+            .filter_map(|s| extract_statement(s))
             .collect()
     })
     .unwrap_or_default()
 }
 
-fn extract_cancel<'input>(ctx: &CancelStatementContext<'input>) -> Statement {
+fn extract_cancel(ctx: &CancelStatementContext<'_>) -> Statement {
     let programs: Vec<Operand> = ctx
         .cancelCall_all()
         .iter()
         .filter_map(|cc| {
             if let Some(id) = cc.identifier() {
-                Some(Operand::DataRef(extract_data_ref_from_identifier(&*id)))
+                Some(Operand::DataRef(extract_data_ref_from_identifier(&id)))
             } else if let Some(lit) = cc.literal() {
-                Some(extract_literal_operand(&*lit))
+                Some(extract_literal_operand(&lit))
             } else {
                 // libraryName fallback -- use text
                 cc.libraryName().map(|ln| {
@@ -1033,11 +1023,11 @@ fn extract_cancel<'input>(ctx: &CancelStatementContext<'input>) -> Statement {
 /// Extract a SET statement from the parse tree.
 ///
 /// Handles:
-/// - SET target TO value/identifier (SetAction::To)
-/// - SET condition TO TRUE/FALSE (SetAction::ToBool)
-/// - SET target UP BY value (SetAction::UpBy)
-/// - SET target DOWN BY value (SetAction::DownBy)
-fn extract_set<'input>(ctx: &SetStatementContext<'input>) -> Statement {
+/// - SET target TO value/identifier (`SetAction::To`)
+/// - SET condition TO TRUE/FALSE (`SetAction::ToBool`)
+/// - SET target UP BY value (`SetAction::UpBy`)
+/// - SET target DOWN BY value (`SetAction::DownBy`)
+fn extract_set(ctx: &SetStatementContext<'_>) -> Statement {
     // SET ... TO ... (one or more setToStatement children)
     let to_stmts = ctx.setToStatement_all();
     if !to_stmts.is_empty() {
@@ -1050,7 +1040,7 @@ fn extract_set<'input>(ctx: &SetStatementContext<'input>) -> Statement {
             .iter()
             .filter_map(|st| {
                 st.identifier()
-                    .map(|id| extract_data_ref_from_identifier(&*id))
+                    .map(|id| extract_data_ref_from_identifier(&id))
             })
             .collect();
 
@@ -1063,9 +1053,9 @@ fn extract_set<'input>(ctx: &SetStatementContext<'input>) -> Statement {
             } else if text == "FALSE" || val.OFF().is_some() {
                 SetAction::ToBool(false)
             } else if let Some(id) = val.identifier() {
-                SetAction::To(Operand::DataRef(extract_data_ref_from_identifier(&*id)))
+                SetAction::To(Operand::DataRef(extract_data_ref_from_identifier(&id)))
             } else if let Some(lit) = val.literal() {
-                SetAction::To(extract_literal_operand(&*lit))
+                SetAction::To(extract_literal_operand(&lit))
             } else {
                 // Fallback: parse text as identifier or literal
                 SetAction::To(extract_identifier_or_literal_from_text(&text))
@@ -1085,15 +1075,15 @@ fn extract_set<'input>(ctx: &SetStatementContext<'input>) -> Statement {
             .iter()
             .filter_map(|st| {
                 st.identifier()
-                    .map(|id| extract_data_ref_from_identifier(&*id))
+                    .map(|id| extract_data_ref_from_identifier(&id))
             })
             .collect();
 
         let value = if let Some(by_val) = updown.setByValue() {
             if let Some(id) = by_val.identifier() {
-                Operand::DataRef(extract_data_ref_from_identifier(&*id))
+                Operand::DataRef(extract_data_ref_from_identifier(&id))
             } else if let Some(lit) = by_val.literal() {
-                extract_literal_operand(&*lit)
+                extract_literal_operand(&lit)
             } else {
                 Operand::Literal(Literal::Numeric(by_val.get_text().trim().to_string()))
             }
@@ -1118,7 +1108,7 @@ fn extract_set<'input>(ctx: &SetStatementContext<'input>) -> Statement {
 }
 
 /// Extract a START statement from the parse tree.
-fn extract_start<'input>(ctx: &StartStatementContext<'input>) -> Statement {
+fn extract_start(ctx: &StartStatementContext<'_>) -> Statement {
     let file_name = ctx
         .fileName()
         .map(|f| f.get_text().trim().to_uppercase())
@@ -1126,9 +1116,7 @@ fn extract_start<'input>(ctx: &StartStatementContext<'input>) -> Statement {
 
     let key_condition = ctx.startKey().map(|sk| {
         let key = sk
-            .qualifiedDataName()
-            .map(|qdn| extract_data_ref_from_qualified(&*qdn))
-            .unwrap_or_else(|| make_data_ref("UNKNOWN-KEY"));
+            .qualifiedDataName().map_or_else(|| make_data_ref("UNKNOWN-KEY"), |qdn| extract_data_ref_from_qualified(&qdn));
 
         // Determine comparison operator from grammar tokens
         let op = if sk.EQUAL().is_some() || sk.EQUALCHAR().is_some() {
@@ -1165,12 +1153,11 @@ fn extract_start<'input>(ctx: &StartStatementContext<'input>) -> Statement {
     })
 }
 
-fn extract_accept<'input>(ctx: &AcceptStatementContext<'input>) -> Statement {
+fn extract_accept(ctx: &AcceptStatementContext<'_>) -> Statement {
     let text = ctx.get_text().to_uppercase();
     let name = text
         .strip_prefix("ACCEPT")
         .unwrap_or("")
-        .trim()
         .split_whitespace()
         .next()
         .unwrap_or("")
@@ -1185,7 +1172,7 @@ fn extract_accept<'input>(ctx: &AcceptStatementContext<'input>) -> Statement {
 // File I/O statement extractors
 // ---------------------------------------------------------------------------
 
-fn extract_open<'input>(ctx: &OpenStatementContext<'input>) -> Statement {
+fn extract_open(ctx: &OpenStatementContext<'_>) -> Statement {
     let mut files = Vec::new();
 
     // OPEN INPUT file-name ...
@@ -1235,7 +1222,7 @@ fn extract_open<'input>(ctx: &OpenStatementContext<'input>) -> Statement {
     Statement::Open(OpenStatement { files })
 }
 
-fn extract_close<'input>(ctx: &CloseStatementContext<'input>) -> Statement {
+fn extract_close(ctx: &CloseStatementContext<'_>) -> Statement {
     let files: Vec<String> = ctx
         .closeFile_all()
         .iter()
@@ -1244,7 +1231,7 @@ fn extract_close<'input>(ctx: &CloseStatementContext<'input>) -> Statement {
     Statement::Close(CloseStatement { files })
 }
 
-fn extract_read<'input>(ctx: &ReadStatementContext<'input>) -> Statement {
+fn extract_read(ctx: &ReadStatementContext<'_>) -> Statement {
     let file_name = ctx
         .fileName()
         .map(|f| f.get_text().trim().to_uppercase())
@@ -1252,12 +1239,12 @@ fn extract_read<'input>(ctx: &ReadStatementContext<'input>) -> Statement {
 
     let into = ctx.readInto().and_then(|ri| {
         ri.identifier()
-            .map(|id| extract_data_ref_from_identifier(&*id))
+            .map(|id| extract_data_ref_from_identifier(&id))
     });
 
     let key = ctx.readKey().and_then(|rk| {
         rk.qualifiedDataName()
-            .map(|qdn| extract_data_ref_from_qualified(&*qdn))
+            .map(|qdn| extract_data_ref_from_qualified(&qdn))
     });
 
     let at_end = ctx
@@ -1265,7 +1252,7 @@ fn extract_read<'input>(ctx: &ReadStatementContext<'input>) -> Statement {
         .map(|p| {
             p.statement_all()
                 .iter()
-                .filter_map(|s| extract_statement(&**s))
+                .filter_map(|s| extract_statement(s))
                 .collect()
         })
         .unwrap_or_default();
@@ -1275,7 +1262,7 @@ fn extract_read<'input>(ctx: &ReadStatementContext<'input>) -> Statement {
         .map(|p| {
             p.statement_all()
                 .iter()
-                .filter_map(|s| extract_statement(&**s))
+                .filter_map(|s| extract_statement(s))
                 .collect()
         })
         .unwrap_or_default();
@@ -1294,18 +1281,14 @@ fn extract_read<'input>(ctx: &ReadStatementContext<'input>) -> Statement {
     })
 }
 
-fn extract_write<'input>(ctx: &WriteStatementContext<'input>) -> Statement {
+fn extract_write(ctx: &WriteStatementContext<'_>) -> Statement {
     let record_name = ctx
         .recordName()
         .map(|rn| rn.get_text().trim().to_uppercase())
         .unwrap_or_default();
 
     let from = ctx.writeFromPhrase().and_then(|wfp| {
-        if let Some(id) = wfp.identifier() {
-            Some(extract_data_ref_from_identifier(&*id))
-        } else {
-            None
-        }
+        wfp.identifier().map(|id| extract_data_ref_from_identifier(&id))
     });
 
     let advancing = ctx.writeAdvancingPhrase().and_then(|wap| {
@@ -1317,7 +1300,7 @@ fn extract_write<'input>(ctx: &WriteStatementContext<'input>) -> Statement {
             let clean = text
                 .to_uppercase()
                 .replace("LINE", "")
-                .replace("S", "")
+                .replace('S', "")
                 .trim()
                 .to_string();
             let op = extract_identifier_or_literal_from_text(&clean);
@@ -1335,7 +1318,7 @@ fn extract_write<'input>(ctx: &WriteStatementContext<'input>) -> Statement {
         .map(|p| {
             p.statement_all()
                 .iter()
-                .filter_map(|s| extract_statement(&**s))
+                .filter_map(|s| extract_statement(s))
                 .collect()
         })
         .unwrap_or_default();
@@ -1345,7 +1328,7 @@ fn extract_write<'input>(ctx: &WriteStatementContext<'input>) -> Statement {
         .map(|p| {
             p.statement_all()
                 .iter()
-                .filter_map(|s| extract_statement(&**s))
+                .filter_map(|s| extract_statement(s))
                 .collect()
         })
         .unwrap_or_default();
@@ -1361,7 +1344,7 @@ fn extract_write<'input>(ctx: &WriteStatementContext<'input>) -> Statement {
     })
 }
 
-fn extract_rewrite<'input>(ctx: &RewriteStatementContext<'input>) -> Statement {
+fn extract_rewrite(ctx: &RewriteStatementContext<'_>) -> Statement {
     let record_name = ctx
         .recordName()
         .map(|rn| rn.get_text().trim().to_uppercase())
@@ -1369,7 +1352,7 @@ fn extract_rewrite<'input>(ctx: &RewriteStatementContext<'input>) -> Statement {
 
     let from = ctx.rewriteFrom().and_then(|rf| {
         rf.identifier()
-            .map(|id| extract_data_ref_from_identifier(&*id))
+            .map(|id| extract_data_ref_from_identifier(&id))
     });
 
     let invalid_key = extract_invalid_key_stmts(ctx.invalidKeyPhrase().as_deref());
@@ -1383,7 +1366,7 @@ fn extract_rewrite<'input>(ctx: &RewriteStatementContext<'input>) -> Statement {
     })
 }
 
-fn extract_delete<'input>(ctx: &DeleteStatementContext<'input>) -> Statement {
+fn extract_delete(ctx: &DeleteStatementContext<'_>) -> Statement {
     let file_name = ctx
         .fileName()
         .map(|f| f.get_text().trim().to_uppercase())
@@ -1399,25 +1382,25 @@ fn extract_delete<'input>(ctx: &DeleteStatementContext<'input>) -> Statement {
     })
 }
 
-fn extract_invalid_key_stmts<'input>(
-    ctx: Option<&InvalidKeyPhraseContext<'input>>,
+fn extract_invalid_key_stmts(
+    ctx: Option<&InvalidKeyPhraseContext<'_>>,
 ) -> Vec<Statement> {
     ctx.map(|c| {
         c.statement_all()
             .iter()
-            .filter_map(|s| extract_statement(&**s))
+            .filter_map(|s| extract_statement(s))
             .collect()
     })
     .unwrap_or_default()
 }
 
-fn extract_not_invalid_key_stmts<'input>(
-    ctx: Option<&NotInvalidKeyPhraseContext<'input>>,
+fn extract_not_invalid_key_stmts(
+    ctx: Option<&NotInvalidKeyPhraseContext<'_>>,
 ) -> Vec<Statement> {
     ctx.map(|c| {
         c.statement_all()
             .iter()
-            .filter_map(|s| extract_statement(&**s))
+            .filter_map(|s| extract_statement(s))
             .collect()
     })
     .unwrap_or_default()
@@ -1427,10 +1410,10 @@ fn extract_not_invalid_key_stmts<'input>(
 // Perform type extraction
 // ---------------------------------------------------------------------------
 
-fn extract_perform_type<'input>(ctx: &PerformTypeContext<'input>) -> PerformLoopType {
+fn extract_perform_type(ctx: &PerformTypeContext<'_>) -> PerformLoopType {
     if let Some(times_ctx) = ctx.performTimes() {
         let count = if let Some(id) = times_ctx.identifier() {
-            Operand::DataRef(extract_data_ref_from_identifier(&*id))
+            Operand::DataRef(extract_data_ref_from_identifier(&id))
         } else if let Some(int_lit) = times_ctx.integerLiteral() {
             Operand::Literal(Literal::Numeric(int_lit.get_text().trim().to_string()))
         } else {
@@ -1440,30 +1423,27 @@ fn extract_perform_type<'input>(ctx: &PerformTypeContext<'input>) -> PerformLoop
     } else if let Some(until_ctx) = ctx.performUntil() {
         let test_before = until_ctx
             .performTestClause()
-            .map(|tc| !tc.get_text().to_uppercase().contains("AFTER"))
-            .unwrap_or(true);
+            .is_none_or(|tc| !tc.get_text().to_uppercase().contains("AFTER"));
         let condition = until_ctx
             .condition()
-            .map(|c| extract_condition(&*c))
-            .unwrap_or(Condition::ConditionName(make_data_ref("TRUE")));
+            .map_or(Condition::ConditionName(make_data_ref("TRUE")), |c| extract_condition(&c));
         PerformLoopType::Until {
             test_before,
             condition,
         }
     } else if let Some(varying_ctx) = ctx.performVarying() {
-        extract_perform_varying(&*varying_ctx)
+        extract_perform_varying(&varying_ctx)
     } else {
         PerformLoopType::Once
     }
 }
 
-fn extract_perform_varying<'input>(
-    ctx: &PerformVaryingContext<'input>,
+fn extract_perform_varying(
+    ctx: &PerformVaryingContext<'_>,
 ) -> PerformLoopType {
     let test_before = ctx
         .performTestClause()
-        .map(|tc| !tc.get_text().to_uppercase().contains("AFTER"))
-        .unwrap_or(true);
+        .is_none_or(|tc| !tc.get_text().to_uppercase().contains("AFTER"));
 
     // Navigate the ANTLR parse tree properly:
     // performVarying -> performVaryingClause -> performVaryingPhrase
@@ -1474,9 +1454,7 @@ fn extract_perform_varying<'input>(
     // Extract counter name from the identifier child of performVaryingPhrase
     let counter_name = phrase
         .as_ref()
-        .and_then(|p| p.identifier())
-        .map(|id| id.get_text().to_uppercase())
-        .unwrap_or_else(|| "I".to_string());
+        .and_then(|p| p.identifier()).map_or_else(|| "I".to_string(), |id| id.get_text().to_uppercase());
 
     // Extract FROM value from performFrom child
     let from_text = phrase
@@ -1520,7 +1498,7 @@ fn extract_perform_varying<'input>(
         .and_then(|p| p.performUntil())
         .and_then(|pu| {
             if let Some(cond_ctx) = pu.condition() {
-                Some(extract_condition(&*cond_ctx))
+                Some(extract_condition(&cond_ctx))
             } else {
                 // Fallback: parse from text
                 let pu_text = pu.get_text().to_uppercase();
@@ -1548,11 +1526,10 @@ fn extract_perform_varying<'input>(
 // Condition extraction
 // ---------------------------------------------------------------------------
 
-fn extract_condition<'input>(ctx: &ConditionContext<'input>) -> Condition {
+fn extract_condition(ctx: &ConditionContext<'_>) -> Condition {
     let base = ctx
         .combinableCondition()
-        .map(|cc| extract_combinable_condition(&*cc))
-        .unwrap_or(Condition::ConditionName(make_data_ref("TRUE")));
+        .map_or(Condition::ConditionName(make_data_ref("TRUE")), |cc| extract_combinable_condition(&cc));
 
     // Process AND/OR chains
     let and_or_list = ctx.andOrCondition_all();
@@ -1564,8 +1541,7 @@ fn extract_condition<'input>(ctx: &ConditionContext<'input>) -> Condition {
     for ao in &and_or_list {
         let right = ao
             .combinableCondition()
-            .map(|cc| extract_combinable_condition(&*cc))
-            .unwrap_or(Condition::ConditionName(make_data_ref("TRUE")));
+            .map_or(Condition::ConditionName(make_data_ref("TRUE")), |cc| extract_combinable_condition(&cc));
         if ao.AND().is_some() {
             result = Condition::And(Box::new(result), Box::new(right));
         } else {
@@ -1575,14 +1551,13 @@ fn extract_condition<'input>(ctx: &ConditionContext<'input>) -> Condition {
     result
 }
 
-fn extract_combinable_condition<'input>(
-    ctx: &CombinableConditionContext<'input>,
+fn extract_combinable_condition(
+    ctx: &CombinableConditionContext<'_>,
 ) -> Condition {
     let negated = ctx.NOT().is_some();
     let cond = ctx
         .simpleCondition()
-        .map(|sc| extract_simple_condition(&*sc))
-        .unwrap_or(Condition::ConditionName(make_data_ref("TRUE")));
+        .map_or(Condition::ConditionName(make_data_ref("TRUE")), |sc| extract_simple_condition(&sc));
 
     if negated {
         Condition::Not(Box::new(cond))
@@ -1591,24 +1566,24 @@ fn extract_combinable_condition<'input>(
     }
 }
 
-fn extract_simple_condition<'input>(
-    ctx: &SimpleConditionContext<'input>,
+fn extract_simple_condition(
+    ctx: &SimpleConditionContext<'_>,
 ) -> Condition {
     // Parenthesized condition
     if ctx.LPARENCHAR().is_some() {
         if let Some(inner) = ctx.condition() {
-            return extract_condition(&*inner);
+            return extract_condition(&inner);
         }
     }
 
     // Relation condition
     if let Some(rel) = ctx.relationCondition() {
-        return extract_relation_condition(&*rel);
+        return extract_relation_condition(&rel);
     }
 
     // Class condition
     if let Some(cls) = ctx.classCondition() {
-        return extract_class_condition(&*cls);
+        return extract_class_condition(&cls);
     }
 
     // Condition name (88-level)
@@ -1621,23 +1596,20 @@ fn extract_simple_condition<'input>(
     Condition::ConditionName(make_data_ref("TRUE"))
 }
 
-fn extract_relation_condition<'input>(
-    ctx: &RelationConditionContext<'input>,
+fn extract_relation_condition(
+    ctx: &RelationConditionContext<'_>,
 ) -> Condition {
     if let Some(arith_cmp) = ctx.relationArithmeticComparison() {
         let exprs = arith_cmp.arithmeticExpression_all();
         let left = exprs
             .first()
-            .map(|e| arith_expr_to_operand(&extract_arith_expr(&**e)))
-            .unwrap_or(Operand::Literal(Literal::Numeric("0".to_string())));
+            .map_or(Operand::Literal(Literal::Numeric("0".to_string())), |e| arith_expr_to_operand(&extract_arith_expr(e)));
         let right = exprs
             .get(1)
-            .map(|e| arith_expr_to_operand(&extract_arith_expr(&**e)))
-            .unwrap_or(Operand::Literal(Literal::Numeric("0".to_string())));
+            .map_or(Operand::Literal(Literal::Numeric("0".to_string())), |e| arith_expr_to_operand(&extract_arith_expr(e)));
         let op = arith_cmp
             .relationalOperator()
-            .map(|ro| extract_relational_op(&*ro))
-            .unwrap_or(ComparisonOp::Equal);
+            .map_or(ComparisonOp::Equal, |ro| extract_relational_op(&ro));
         Condition::Comparison { left, op, right }
     } else if let Some(sign_cond) = ctx.relationSignCondition() {
         let text = sign_cond.get_text().to_uppercase();
@@ -1664,7 +1636,7 @@ fn extract_relation_condition<'input>(
     }
 }
 
-fn extract_relational_op<'input>(ctx: &RelationalOperatorContext<'input>) -> ComparisonOp {
+fn extract_relational_op(ctx: &RelationalOperatorContext<'_>) -> ComparisonOp {
     // Check for combined operators first
     if ctx.NOTEQUALCHAR().is_some() {
         return ComparisonOp::NotEqual;
@@ -1700,11 +1672,9 @@ fn extract_relational_op<'input>(ctx: &RelationalOperatorContext<'input>) -> Com
     }
 }
 
-fn extract_class_condition<'input>(ctx: &ClassConditionContext<'input>) -> Condition {
+fn extract_class_condition(ctx: &ClassConditionContext<'_>) -> Condition {
     let field = ctx
-        .identifier()
-        .map(|id| extract_data_ref_from_identifier(&*id))
-        .unwrap_or_else(|| make_data_ref("UNKNOWN"));
+        .identifier().map_or_else(|| make_data_ref("UNKNOWN"), |id| extract_data_ref_from_identifier(&id));
 
     let class = if ctx.NUMERIC().is_some() {
         ClassCondition::Numeric
@@ -1729,13 +1699,12 @@ fn extract_class_condition<'input>(ctx: &ClassConditionContext<'input>) -> Condi
 // Arithmetic expression extraction
 // ---------------------------------------------------------------------------
 
-fn extract_arith_expr<'input>(ctx: &ArithmeticExpressionContext<'input>) -> ArithExpr {
+fn extract_arith_expr(ctx: &ArithmeticExpressionContext<'_>) -> ArithExpr {
     let base = ctx
         .multDivs()
-        .map(|md| extract_mult_divs(&*md))
-        .unwrap_or(ArithExpr::Operand(Operand::Literal(Literal::Numeric(
+        .map_or(ArithExpr::Operand(Operand::Literal(Literal::Numeric(
             "0".to_string(),
-        ))));
+        ))), |md| extract_mult_divs(&md));
 
     let plus_minus_list = ctx.plusMinus_all();
     if plus_minus_list.is_empty() {
@@ -1746,10 +1715,9 @@ fn extract_arith_expr<'input>(ctx: &ArithmeticExpressionContext<'input>) -> Arit
     for pm in &plus_minus_list {
         let right = pm
             .multDivs()
-            .map(|md| extract_mult_divs(&*md))
-            .unwrap_or(ArithExpr::Operand(Operand::Literal(Literal::Numeric(
+            .map_or(ArithExpr::Operand(Operand::Literal(Literal::Numeric(
                 "0".to_string(),
-            ))));
+            ))), |md| extract_mult_divs(&md));
         let op = if pm.PLUSCHAR().is_some() {
             ArithOp::Add
         } else {
@@ -1764,13 +1732,12 @@ fn extract_arith_expr<'input>(ctx: &ArithmeticExpressionContext<'input>) -> Arit
     result
 }
 
-fn extract_mult_divs<'input>(ctx: &MultDivsContext<'input>) -> ArithExpr {
+fn extract_mult_divs(ctx: &MultDivsContext<'_>) -> ArithExpr {
     let base = ctx
         .powers()
-        .map(|p| extract_powers(&*p))
-        .unwrap_or(ArithExpr::Operand(Operand::Literal(Literal::Numeric(
+        .map_or(ArithExpr::Operand(Operand::Literal(Literal::Numeric(
             "0".to_string(),
-        ))));
+        ))), |p| extract_powers(&p));
 
     let md_list = ctx.multDiv_all();
     if md_list.is_empty() {
@@ -1781,10 +1748,9 @@ fn extract_mult_divs<'input>(ctx: &MultDivsContext<'input>) -> ArithExpr {
     for md in &md_list {
         let right = md
             .powers()
-            .map(|p| extract_powers(&*p))
-            .unwrap_or(ArithExpr::Operand(Operand::Literal(Literal::Numeric(
+            .map_or(ArithExpr::Operand(Operand::Literal(Literal::Numeric(
                 "0".to_string(),
-            ))));
+            ))), |p| extract_powers(&p));
         let text = md.get_text().to_uppercase();
         let op = if text.starts_with('*') || text.starts_with("MULT") {
             ArithOp::Multiply
@@ -1800,25 +1766,23 @@ fn extract_mult_divs<'input>(ctx: &MultDivsContext<'input>) -> ArithExpr {
     result
 }
 
-fn extract_powers<'input>(ctx: &PowersContext<'input>) -> ArithExpr {
+fn extract_powers(ctx: &PowersContext<'_>) -> ArithExpr {
     let has_negate = ctx.MINUSCHAR().is_some();
 
     let base = ctx
         .basis()
-        .map(|b| extract_basis(&*b))
-        .unwrap_or(ArithExpr::Operand(Operand::Literal(Literal::Numeric(
+        .map_or(ArithExpr::Operand(Operand::Literal(Literal::Numeric(
             "0".to_string(),
-        ))));
+        ))), |b| extract_basis(&b));
 
     let power_list = ctx.power_all();
     let mut result = base;
     for pw in &power_list {
         let right = pw
             .basis()
-            .map(|b| extract_basis(&*b))
-            .unwrap_or(ArithExpr::Operand(Operand::Literal(Literal::Numeric(
+            .map_or(ArithExpr::Operand(Operand::Literal(Literal::Numeric(
                 "0".to_string(),
-            ))));
+            ))), |b| extract_basis(&b));
         result = ArithExpr::BinaryOp {
             left: Box::new(result),
             op: ArithOp::Power,
@@ -1833,13 +1797,13 @@ fn extract_powers<'input>(ctx: &PowersContext<'input>) -> ArithExpr {
     }
 }
 
-fn extract_basis<'input>(ctx: &BasisContext<'input>) -> ArithExpr {
+fn extract_basis(ctx: &BasisContext<'_>) -> ArithExpr {
     if let Some(expr) = ctx.arithmeticExpression() {
-        ArithExpr::Paren(Box::new(extract_arith_expr(&*expr)))
+        ArithExpr::Paren(Box::new(extract_arith_expr(&expr)))
     } else if let Some(id) = ctx.identifier() {
-        ArithExpr::Operand(Operand::DataRef(extract_data_ref_from_identifier(&*id)))
+        ArithExpr::Operand(Operand::DataRef(extract_data_ref_from_identifier(&id)))
     } else if let Some(lit) = ctx.literal() {
-        ArithExpr::Operand(extract_literal_operand(&*lit))
+        ArithExpr::Operand(extract_literal_operand(&lit))
     } else {
         ArithExpr::Operand(Operand::Literal(Literal::Numeric(
             ctx.get_text().trim().to_string(),
@@ -1851,36 +1815,33 @@ fn extract_basis<'input>(ctx: &BasisContext<'input>) -> ArithExpr {
 // Helper functions: identifier/literal extraction
 // ---------------------------------------------------------------------------
 
-/// Extract a RefMod from a referenceModifier context.
-fn extract_ref_mod<'input>(ctx: &ReferenceModifierContext<'input>) -> RefMod {
+/// Extract a `RefMod` from a referenceModifier context.
+fn extract_ref_mod(ctx: &ReferenceModifierContext<'_>) -> RefMod {
     let offset = ctx
         .characterPosition()
         .and_then(|cp| cp.arithmeticExpression())
-        .map(|ae| extract_arith_expr(&*ae))
-        .unwrap_or(ArithExpr::Operand(Operand::Literal(Literal::Numeric(
+        .map_or(ArithExpr::Operand(Operand::Literal(Literal::Numeric(
             "1".to_string(),
-        ))));
+        ))), |ae| extract_arith_expr(&ae));
     let length = ctx
         .length()
         .and_then(|l| l.arithmeticExpression())
-        .map(|ae| Box::new(extract_arith_expr(&*ae)));
+        .map(|ae| Box::new(extract_arith_expr(&ae)));
     RefMod {
         offset: Box::new(offset),
         length,
     }
 }
 
-/// Extract a DataReference from an IdentifierContext.
-fn extract_data_ref_from_identifier<'input>(
-    ctx: &IdentifierContext<'input>,
+/// Extract a `DataReference` from an `IdentifierContext`.
+fn extract_data_ref_from_identifier(
+    ctx: &IdentifierContext<'_>,
 ) -> DataReference {
     if let Some(qdn) = ctx.qualifiedDataName() {
-        extract_data_ref_from_qualified(&*qdn)
+        extract_data_ref_from_qualified(&qdn)
     } else if let Some(tc) = ctx.tableCall() {
         let base = tc
-            .qualifiedDataName()
-            .map(|qdn| extract_data_ref_from_qualified(&*qdn))
-            .unwrap_or_else(|| make_data_ref(&tc.get_text()));
+            .qualifiedDataName().map_or_else(|| make_data_ref(&tc.get_text()), |qdn| extract_data_ref_from_qualified(&qdn));
         // Add subscripts from table call
         let subscripts: Vec<Subscript> = tc
             .subscript__all()
@@ -1895,7 +1856,7 @@ fn extract_data_ref_from_identifier<'input>(
             })
             .collect();
         // Extract reference modification if present
-        let ref_mod = tc.referenceModifier().map(|rm| extract_ref_mod(&*rm));
+        let ref_mod = tc.referenceModifier().map(|rm| extract_ref_mod(&rm));
         DataReference {
             subscripts,
             ref_mod,
@@ -1906,9 +1867,9 @@ fn extract_data_ref_from_identifier<'input>(
     }
 }
 
-/// Extract a DataReference from a QualifiedDataNameContext.
-fn extract_data_ref_from_qualified<'input>(
-    ctx: &QualifiedDataNameContext<'input>,
+/// Extract a `DataReference` from a `QualifiedDataNameContext`.
+fn extract_data_ref_from_qualified(
+    ctx: &QualifiedDataNameContext<'_>,
 ) -> DataReference {
     if let Some(fmt1) = ctx.qualifiedDataNameFormat1() {
         let name = fmt1
@@ -1943,8 +1904,8 @@ fn extract_data_ref_from_qualified<'input>(
     }
 }
 
-/// Extract an Operand from a LiteralContext.
-fn extract_literal_operand<'input>(ctx: &LiteralContext<'input>) -> Operand {
+/// Extract an Operand from a `LiteralContext`.
+fn extract_literal_operand(ctx: &LiteralContext<'_>) -> Operand {
     if let Some(num) = ctx.numericLiteral() {
         Operand::Literal(Literal::Numeric(num.get_text().trim().to_string()))
     } else if let Some(fig) = ctx.figurativeConstant() {
@@ -1974,33 +1935,33 @@ fn extract_literal_operand<'input>(ctx: &LiteralContext<'input>) -> Operand {
     }
 }
 
-/// Extract operand from MoveToSendingArea.
-fn extract_operand_from_sending_area<'input>(
-    ctx: &MoveToSendingAreaContext<'input>,
+/// Extract operand from `MoveToSendingArea`.
+fn extract_operand_from_sending_area(
+    ctx: &MoveToSendingAreaContext<'_>,
 ) -> Operand {
     if let Some(id) = ctx.identifier() {
-        Operand::DataRef(extract_data_ref_from_identifier(&*id))
+        Operand::DataRef(extract_data_ref_from_identifier(&id))
     } else if let Some(lit) = ctx.literal() {
-        extract_literal_operand(&*lit)
+        extract_literal_operand(&lit)
     } else {
         extract_identifier_or_literal_from_text(&ctx.get_text())
     }
 }
 
-/// Extract operand from AddFrom context.
-fn extract_operand_from_add_from<'input>(ctx: &AddFromContext<'input>) -> Operand {
+/// Extract operand from `AddFrom` context.
+fn extract_operand_from_add_from(ctx: &AddFromContext<'_>) -> Operand {
     if let Some(id) = ctx.identifier() {
-        Operand::DataRef(extract_data_ref_from_identifier(&*id))
+        Operand::DataRef(extract_data_ref_from_identifier(&id))
     } else if let Some(lit) = ctx.literal() {
-        extract_literal_operand(&*lit)
+        extract_literal_operand(&lit)
     } else {
         extract_identifier_or_literal_from_text(&ctx.get_text())
     }
 }
 
-/// Extract evaluate subject from EvaluateSelectContext.
-fn extract_evaluate_subject<'input>(
-    ctx: &EvaluateSelectContext<'input>,
+/// Extract evaluate subject from `EvaluateSelectContext`.
+fn extract_evaluate_subject(
+    ctx: &EvaluateSelectContext<'_>,
 ) -> EvaluateSubject {
     let text = ctx.get_text().to_uppercase();
     if text.trim() == "TRUE" {
@@ -2011,9 +1972,9 @@ fn extract_evaluate_subject<'input>(
     }
 
     if let Some(id) = ctx.identifier() {
-        EvaluateSubject::Expr(Operand::DataRef(extract_data_ref_from_identifier(&*id)))
+        EvaluateSubject::Expr(Operand::DataRef(extract_data_ref_from_identifier(&id)))
     } else if let Some(lit) = ctx.literal() {
-        EvaluateSubject::Expr(extract_literal_operand(&*lit))
+        EvaluateSubject::Expr(extract_literal_operand(&lit))
     } else {
         EvaluateSubject::Expr(extract_identifier_or_literal_from_text(&text))
     }
@@ -2023,25 +1984,25 @@ fn extract_evaluate_subject<'input>(
 // Size error phrase extraction
 // ---------------------------------------------------------------------------
 
-fn extract_size_error_stmts<'input>(
-    ctx: Option<&OnSizeErrorPhraseContext<'input>>,
+fn extract_size_error_stmts(
+    ctx: Option<&OnSizeErrorPhraseContext<'_>>,
 ) -> Vec<Statement> {
     ctx.map(|c| {
         c.statement_all()
             .iter()
-            .filter_map(|s| extract_statement(&**s))
+            .filter_map(|s| extract_statement(s))
             .collect()
     })
     .unwrap_or_default()
 }
 
-fn extract_not_size_error_stmts<'input>(
-    ctx: Option<&NotOnSizeErrorPhraseContext<'input>>,
+fn extract_not_size_error_stmts(
+    ctx: Option<&NotOnSizeErrorPhraseContext<'_>>,
 ) -> Vec<Statement> {
     ctx.map(|c| {
         c.statement_all()
             .iter()
-            .filter_map(|s| extract_statement(&**s))
+            .filter_map(|s| extract_statement(s))
             .collect()
     })
     .unwrap_or_default()
@@ -2051,16 +2012,16 @@ fn extract_not_size_error_stmts<'input>(
 // Text-based helper functions
 // ---------------------------------------------------------------------------
 
-/// Create a simple DataReference from a name string.
+/// Create a simple `DataReference` from a name string.
 fn make_data_ref(name: &str) -> DataReference {
     let clean = name.trim().to_uppercase();
     // Handle qualified names (X IN Y)
-    let parts: Vec<&str> = clean.split(|c| c == ' ').collect();
+    let parts: Vec<&str> = clean.split(' ').collect();
     let (data_name, qualifiers) = if parts.len() >= 3 {
         let mut quals = Vec::new();
         let mut i = 2;
         while i < parts.len() {
-            if parts.get(i.wrapping_sub(1)).map_or(false, |p| *p == "IN" || *p == "OF") {
+            if parts.get(i.wrapping_sub(1)).is_some_and(|p| *p == "IN" || *p == "OF") {
                 quals.push(parts[i].to_string());
             }
             i += 1;
@@ -2102,7 +2063,7 @@ fn extract_giving_phrase_targets(text: &str) -> Vec<ArithTarget> {
     let mut i = 0;
     while i < tokens.len() {
         let name = tokens[i];
-        let rounded = tokens.get(i + 1).map_or(false, |t| *t == "ROUNDED");
+        let rounded = tokens.get(i + 1).is_some_and(|t| *t == "ROUNDED");
         targets.push(ArithTarget {
             field: make_data_ref(name),
             rounded,
@@ -2162,7 +2123,7 @@ fn extract_operand_from_identifier_or_literal_ctx(text: &str) -> Operand {
     extract_identifier_or_literal_from_text(text)
 }
 
-/// Convert an ArithExpr to an Operand (for simple expressions).
+/// Convert an `ArithExpr` to an Operand (for simple expressions).
 fn arith_expr_to_operand(expr: &ArithExpr) -> Operand {
     match expr {
         ArithExpr::Operand(op) => op.clone(),
@@ -2249,7 +2210,7 @@ fn strip_cobol_quotes(s: &str) -> String {
 // Phase 3 statement extractors: SORT, MERGE, RELEASE, RETURN, INSPECT, STRING, UNSTRING
 // ---------------------------------------------------------------------------
 
-fn extract_sort<'input>(ctx: &SortStatementContext<'input>) -> Statement {
+fn extract_sort(ctx: &SortStatementContext<'_>) -> Statement {
     let file_name = ctx
         .fileName()
         .map(|f| f.get_text().trim().to_uppercase())
@@ -2308,7 +2269,7 @@ fn extract_sort<'input>(ctx: &SortStatementContext<'input>) -> Statement {
             .sortGivingPhrase_all()
             .iter()
             .flat_map(|sg| sg.sortGiving_all())
-            .flat_map(|g| g.fileName())
+            .filter_map(|g| g.fileName())
             .map(|f| f.get_text().trim().to_uppercase())
             .collect();
         SortOutput::Giving(files)
@@ -2324,7 +2285,7 @@ fn extract_sort<'input>(ctx: &SortStatementContext<'input>) -> Statement {
     })
 }
 
-fn extract_merge<'input>(ctx: &MergeStatementContext<'input>) -> Statement {
+fn extract_merge(ctx: &MergeStatementContext<'_>) -> Statement {
     let file_name = ctx
         .fileName()
         .map(|f| f.get_text().trim().to_uppercase())
@@ -2366,7 +2327,7 @@ fn extract_merge<'input>(ctx: &MergeStatementContext<'input>) -> Statement {
             .mergeGivingPhrase_all()
             .iter()
             .flat_map(|mg| mg.mergeGiving_all())
-            .flat_map(|g| g.fileName())
+            .filter_map(|g| g.fileName())
             .map(|f| f.get_text().trim().to_uppercase())
             .collect();
         SortOutput::Giving(files)
@@ -2381,7 +2342,7 @@ fn extract_merge<'input>(ctx: &MergeStatementContext<'input>) -> Statement {
     })
 }
 
-fn extract_release<'input>(ctx: &ReleaseStatementContext<'input>) -> Statement {
+fn extract_release(ctx: &ReleaseStatementContext<'_>) -> Statement {
     let record_name = ctx
         .recordName()
         .map(|r| r.get_text().trim().to_uppercase())
@@ -2394,7 +2355,7 @@ fn extract_release<'input>(ctx: &ReleaseStatementContext<'input>) -> Statement {
     Statement::Release(ReleaseStatement { record_name, from })
 }
 
-fn extract_return<'input>(ctx: &ReturnStatementContext<'input>) -> Statement {
+fn extract_return(ctx: &ReturnStatementContext<'_>) -> Statement {
     let file_name = ctx
         .fileName()
         .map(|f| f.get_text().trim().to_uppercase())
@@ -2415,57 +2376,55 @@ fn extract_return<'input>(ctx: &ReturnStatementContext<'input>) -> Statement {
     })
 }
 
-fn extract_at_end_stmts<'input>(ctx: Option<&AtEndPhraseContext<'input>>) -> Vec<Statement> {
+fn extract_at_end_stmts(ctx: Option<&AtEndPhraseContext<'_>>) -> Vec<Statement> {
     ctx.map(|c| {
         c.statement_all()
             .iter()
-            .filter_map(|s| extract_statement(&**s))
+            .filter_map(|s| extract_statement(s))
             .collect()
     })
     .unwrap_or_default()
 }
 
-fn extract_not_at_end_stmts<'input>(
-    ctx: Option<&NotAtEndPhraseContext<'input>>,
+fn extract_not_at_end_stmts(
+    ctx: Option<&NotAtEndPhraseContext<'_>>,
 ) -> Vec<Statement> {
     ctx.map(|c| {
         c.statement_all()
             .iter()
-            .filter_map(|s| extract_statement(&**s))
+            .filter_map(|s| extract_statement(s))
             .collect()
     })
     .unwrap_or_default()
 }
 
-fn extract_on_overflow_stmts<'input>(
-    ctx: Option<&OnOverflowPhraseContext<'input>>,
+fn extract_on_overflow_stmts(
+    ctx: Option<&OnOverflowPhraseContext<'_>>,
 ) -> Vec<Statement> {
     ctx.map(|c| {
         c.statement_all()
             .iter()
-            .filter_map(|s| extract_statement(&**s))
+            .filter_map(|s| extract_statement(s))
             .collect()
     })
     .unwrap_or_default()
 }
 
-fn extract_not_on_overflow_stmts<'input>(
-    ctx: Option<&NotOnOverflowPhraseContext<'input>>,
+fn extract_not_on_overflow_stmts(
+    ctx: Option<&NotOnOverflowPhraseContext<'_>>,
 ) -> Vec<Statement> {
     ctx.map(|c| {
         c.statement_all()
             .iter()
-            .filter_map(|s| extract_statement(&**s))
+            .filter_map(|s| extract_statement(s))
             .collect()
     })
     .unwrap_or_default()
 }
 
-fn extract_inspect<'input>(ctx: &InspectStatementContext<'input>) -> Statement {
+fn extract_inspect(ctx: &InspectStatementContext<'_>) -> Statement {
     let target = ctx
-        .identifier()
-        .map(|id| extract_data_ref_from_identifier(&*id))
-        .unwrap_or_else(|| make_data_ref(""));
+        .identifier().map_or_else(|| make_data_ref(""), |id| extract_data_ref_from_identifier(&id));
 
     let mut tallying = Vec::new();
     let mut replacing = Vec::new();
@@ -2496,23 +2455,22 @@ fn extract_inspect<'input>(ctx: &InspectStatementContext<'input>) -> Statement {
         let from_text = if let Some(id) = cp.identifier() {
             extract_operand_from_identifier_or_literal_ctx(&id.get_text())
         } else if let Some(lit) = cp.literal() {
-            extract_literal_operand(&*lit)
+            extract_literal_operand(&lit)
         } else {
             Operand::Literal(Literal::Alphanumeric(String::new()))
         };
 
         let to_text = cp
             .inspectTo()
-            .map(|to| {
+            .map_or(Operand::Literal(Literal::Alphanumeric(String::new())), |to| {
                 if let Some(id) = to.identifier() {
                     extract_operand_from_identifier_or_literal_ctx(&id.get_text())
                 } else if let Some(lit) = to.literal() {
-                    extract_literal_operand(&*lit)
+                    extract_literal_operand(&lit)
                 } else {
                     Operand::Literal(Literal::Alphanumeric(String::new()))
                 }
-            })
-            .unwrap_or(Operand::Literal(Literal::Alphanumeric(String::new())));
+            });
 
         converting = Some(InspectConverting {
             from: from_text,
@@ -2528,8 +2486,8 @@ fn extract_inspect<'input>(ctx: &InspectStatementContext<'input>) -> Statement {
     })
 }
 
-fn extract_inspect_tallying_items<'input>(
-    tp: &InspectTallyingPhraseContext<'input>,
+fn extract_inspect_tallying_items(
+    tp: &InspectTallyingPhraseContext<'_>,
 ) -> Vec<InspectTallying> {
     let mut items = Vec::new();
     for inspect_for in tp.inspectFor_all() {
@@ -2538,13 +2496,11 @@ fn extract_inspect_tallying_items<'input>(
     items
 }
 
-fn extract_inspect_for_items<'input>(
-    inspect_for: &InspectForContext<'input>,
+fn extract_inspect_for_items(
+    inspect_for: &InspectForContext<'_>,
 ) -> Vec<InspectTallying> {
     let counter = inspect_for
-        .identifier()
-        .map(|id| extract_data_ref_from_identifier(&*id))
-        .unwrap_or_else(|| make_data_ref(""));
+        .identifier().map_or_else(|| make_data_ref(""), |id| extract_data_ref_from_identifier(&id));
 
     let mut items = Vec::new();
 
@@ -2564,7 +2520,7 @@ fn extract_inspect_for_items<'input>(
             let pattern = if let Some(id) = al.identifier() {
                 extract_operand_from_identifier_or_literal_ctx(&id.get_text())
             } else if let Some(lit) = al.literal() {
-                extract_literal_operand(&*lit)
+                extract_literal_operand(&lit)
             } else {
                 Operand::Literal(Literal::Alphanumeric(String::new()))
             };
@@ -2585,8 +2541,8 @@ fn extract_inspect_for_items<'input>(
     items
 }
 
-fn extract_inspect_replacing_items<'input>(
-    rp: &InspectReplacingPhraseContext<'input>,
+fn extract_inspect_replacing_items(
+    rp: &InspectReplacingPhraseContext<'_>,
 ) -> Vec<InspectReplacing> {
     let mut items = Vec::new();
 
@@ -2594,16 +2550,15 @@ fn extract_inspect_replacing_items<'input>(
     for chars_ctx in rp.inspectReplacingCharacters_all() {
         let by = chars_ctx
             .inspectBy()
-            .map(|by| {
+            .map_or(Operand::Literal(Literal::Alphanumeric(String::new())), |by| {
                 if let Some(id) = by.identifier() {
                     extract_operand_from_identifier_or_literal_ctx(&id.get_text())
                 } else if let Some(lit) = by.literal() {
-                    extract_literal_operand(&*lit)
+                    extract_literal_operand(&lit)
                 } else {
                     Operand::Literal(Literal::Alphanumeric(String::new()))
                 }
-            })
-            .unwrap_or(Operand::Literal(Literal::Alphanumeric(String::new())));
+            });
 
         items.push(InspectReplacing {
             what: InspectWhat::Characters,
@@ -2620,23 +2575,22 @@ fn extract_inspect_replacing_items<'input>(
             let pattern = if let Some(id) = ral.identifier() {
                 extract_operand_from_identifier_or_literal_ctx(&id.get_text())
             } else if let Some(lit) = ral.literal() {
-                extract_literal_operand(&*lit)
+                extract_literal_operand(&lit)
             } else {
                 Operand::Literal(Literal::Alphanumeric(String::new()))
             };
 
             let by = ral
                 .inspectBy()
-                .map(|by| {
+                .map_or(Operand::Literal(Literal::Alphanumeric(String::new())), |by| {
                     if let Some(id) = by.identifier() {
                         extract_operand_from_identifier_or_literal_ctx(&id.get_text())
                     } else if let Some(lit) = by.literal() {
-                        extract_literal_operand(&*lit)
+                        extract_literal_operand(&lit)
                     } else {
                         Operand::Literal(Literal::Alphanumeric(String::new()))
                     }
-                })
-                .unwrap_or(Operand::Literal(Literal::Alphanumeric(String::new())));
+                });
 
             let what = if is_first {
                 InspectWhat::First(pattern)
@@ -2653,10 +2607,10 @@ fn extract_inspect_replacing_items<'input>(
     items
 }
 
-fn extract_string<'input>(ctx: &StringStatementContext<'input>) -> Statement {
+fn extract_string(ctx: &StringStatementContext<'_>) -> Statement {
     let into = ctx
         .stringIntoPhrase()
-        .and_then(|ip| ip.identifier().map(|id| extract_data_ref_from_identifier(&*id)))
+        .and_then(|ip| ip.identifier().map(|id| extract_data_ref_from_identifier(&id)))
         .unwrap_or_else(|| make_data_ref(""));
 
     let mut sources = Vec::new();
@@ -2664,7 +2618,7 @@ fn extract_string<'input>(ctx: &StringStatementContext<'input>) -> Statement {
         // Each sending phrase has sending items + a delimiter phrase
         let delimiter = sp
             .stringDelimitedByPhrase()
-            .map(|dp| {
+            .map_or(StringDelimiter::Size, |dp| {
                 if dp.SIZE().is_some() {
                     StringDelimiter::Size
                 } else if let Some(id) = dp.identifier() {
@@ -2672,18 +2626,17 @@ fn extract_string<'input>(ctx: &StringStatementContext<'input>) -> Statement {
                         &id.get_text(),
                     ))
                 } else if let Some(lit) = dp.literal() {
-                    StringDelimiter::Literal(extract_literal_operand(&*lit))
+                    StringDelimiter::Literal(extract_literal_operand(&lit))
                 } else {
                     StringDelimiter::Size
                 }
-            })
-            .unwrap_or(StringDelimiter::Size);
+            });
 
         for sending in sp.stringSending_all() {
             let operand = if let Some(id) = sending.identifier() {
                 extract_operand_from_identifier_or_literal_ctx(&id.get_text())
             } else if let Some(lit) = sending.literal() {
-                extract_literal_operand(&*lit)
+                extract_literal_operand(&lit)
             } else {
                 Operand::Literal(Literal::Alphanumeric(String::new()))
             };
@@ -2711,10 +2664,10 @@ fn extract_string<'input>(ctx: &StringStatementContext<'input>) -> Statement {
     })
 }
 
-fn extract_unstring<'input>(ctx: &UnstringStatementContext<'input>) -> Statement {
+fn extract_unstring(ctx: &UnstringStatementContext<'_>) -> Statement {
     let source = ctx
         .unstringSendingPhrase()
-        .and_then(|sp| sp.identifier().map(|id| extract_data_ref_from_identifier(&*id)))
+        .and_then(|sp| sp.identifier().map(|id| extract_data_ref_from_identifier(&id)))
         .unwrap_or_else(|| make_data_ref(""));
 
     // Extract delimiters
@@ -2725,7 +2678,7 @@ fn extract_unstring<'input>(ctx: &UnstringStatementContext<'input>) -> Statement
             let value = if let Some(id) = dbp.identifier() {
                 extract_operand_from_identifier_or_literal_ctx(&id.get_text())
             } else if let Some(lit) = dbp.literal() {
-                extract_literal_operand(&*lit)
+                extract_literal_operand(&lit)
             } else {
                 Operand::Literal(Literal::Alphanumeric(String::new()))
             };
@@ -2737,7 +2690,7 @@ fn extract_unstring<'input>(ctx: &UnstringStatementContext<'input>) -> Statement
                 let or_value = if let Some(id) = or_phrase.identifier() {
                     extract_operand_from_identifier_or_literal_ctx(&id.get_text())
                 } else if let Some(lit) = or_phrase.literal() {
-                    extract_literal_operand(&*lit)
+                    extract_literal_operand(&lit)
                 } else {
                     Operand::Literal(Literal::Alphanumeric(String::new()))
                 };
@@ -2754,17 +2707,15 @@ fn extract_unstring<'input>(ctx: &UnstringStatementContext<'input>) -> Statement
     if let Some(ip) = ctx.unstringIntoPhrase() {
         for ui in ip.unstringInto_all() {
             let target = ui
-                .identifier()
-                .map(|id| extract_data_ref_from_identifier(&*id))
-                .unwrap_or_else(|| make_data_ref(""));
+                .identifier().map_or_else(|| make_data_ref(""), |id| extract_data_ref_from_identifier(&id));
 
             let delimiter_in = ui
                 .unstringDelimiterIn()
-                .and_then(|di| di.identifier().map(|id| extract_data_ref_from_identifier(&*id)));
+                .and_then(|di| di.identifier().map(|id| extract_data_ref_from_identifier(&id)));
 
             let count_in = ui
                 .unstringCountIn()
-                .and_then(|ci| ci.identifier().map(|id| extract_data_ref_from_identifier(&*id)));
+                .and_then(|ci| ci.identifier().map(|id| extract_data_ref_from_identifier(&id)));
 
             into.push(UnstringInto {
                 target,

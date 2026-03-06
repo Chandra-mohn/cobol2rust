@@ -1151,7 +1151,7 @@ fn e2e_set_to_literal() {
     let rust_code = transpile(cobol).expect("transpile failed");
     // SET TO should produce an assignment
     assert!(
-        rust_code.contains("ws.ws_index") && rust_code.contains("5"),
+        rust_code.contains("ws.ws_index") && rust_code.contains('5'),
         "missing SET TO assignment: {rust_code}"
     );
 }
@@ -2386,7 +2386,7 @@ fn e2e_control_features() {
 fn e2e_copybook_structure() {
     use cobol_transpiler::transpile::{transpile_with_config, TranspileConfig};
     use std::collections::HashMap;
-    use std::path::PathBuf;
+    
 
     let temp_dir = tempfile::tempdir().expect("failed to create temp dir");
     let copybook_path = temp_dir.path().join("COMMON.cpy");
@@ -2445,7 +2445,7 @@ fn e2e_copybook_structure() {
 fn e2e_copybook_features() {
     use cobol_transpiler::transpile::{transpile_with_config, TranspileConfig};
     use std::collections::HashMap;
-    use std::path::PathBuf;
+    
 
     let temp_dir = tempfile::tempdir().expect("failed to create temp dir");
     let copybook_path = temp_dir.path().join("COMMON.cpy");
@@ -2609,7 +2609,7 @@ fn e2e_regression_compute_with_parens() {
 
     // Parentheses should be preserved in the arithmetic expression
     assert!(
-        rust_code.contains("(") && rust_code.contains(")"),
+        rust_code.contains('(') && rust_code.contains(')'),
         "missing parentheses in compute expression: {rust_code}"
     );
 }

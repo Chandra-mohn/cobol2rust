@@ -1,7 +1,7 @@
 //! cobol-types: COBOL data type implementations.
 //!
-//! Provides PackedDecimal (COMP-3), PicX (alphanumeric), CompBinary (COMP/COMP-5),
-//! CobolArray (OCCURS), Level88 predicates, figurative constants, and PicA (alphabetic).
+//! Provides `PackedDecimal` (COMP-3), `PicX` (alphanumeric), `CompBinary` (COMP/COMP-5),
+//! `CobolArray` (OCCURS), Level88 predicates, figurative constants, and `PicA` (alphabetic).
 
 pub mod alpha_edited;
 pub mod cobol_array;

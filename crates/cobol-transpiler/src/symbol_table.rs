@@ -1,7 +1,7 @@
 //! Symbol table for resolved data references.
 //!
 //! Built from the parsed DATA DIVISION hierarchy. Provides name resolution
-//! with IN/OF qualification, type resolution (DataEntry -> Rust type info),
+//! with IN/OF qualification, type resolution (`DataEntry` -> Rust type info),
 //! and field lookup by qualified name.
 
 use std::collections::HashMap;
@@ -12,7 +12,7 @@ use crate::error::{Result, TranspileError};
 /// Resolved type information for a data item.
 #[derive(Debug, Clone)]
 pub struct ResolvedType {
-    /// Rust type to generate (e.g., "PackedDecimal", "PicX", "CompBinary").
+    /// Rust type to generate (e.g., "`PackedDecimal`", "`PicX`", "`CompBinary`").
     pub rust_type: RustType,
     /// Storage size in bytes.
     pub byte_length: usize,
@@ -23,24 +23,24 @@ pub struct ResolvedType {
 /// Rust type mapping for COBOL data items.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RustType {
-    /// PackedDecimal { precision, scale, signed }
+    /// `PackedDecimal` { precision, scale, signed }
     PackedDecimal {
         precision: u32,
         scale: u32,
         signed: bool,
     },
-    /// PicX { length }
+    /// `PicX` { length }
     PicX { length: u32 },
-    /// PicA { length }
+    /// `PicA` { length }
     PicA { length: u32 },
-    /// CompBinary { precision, scale, signed, pic_limited }
+    /// `CompBinary` { precision, scale, signed, `pic_limited` }
     CompBinary {
         precision: u32,
         scale: u32,
         signed: bool,
         pic_limited: bool,
     },
-    /// AlphanumericEdited { length } -- PIC with B, 0, / insertion
+    /// `AlphanumericEdited` { length } -- PIC with B, 0, / insertion
     AlphanumericEdited { length: u32 },
     /// Display numeric (zoned decimal) -- no USAGE clause
     DisplayNumeric {
@@ -84,7 +84,7 @@ pub struct SymbolEntry {
 /// Supports:
 /// - Simple name lookup: `resolve("WS-FIELD")`
 /// - Qualified name lookup: `resolve_qualified("WS-FIELD", &["WS-RECORD"])`
-/// - Type resolution: `resolve_type(entry)` -> RustType
+/// - Type resolution: `resolve_type(entry)` -> `RustType`
 #[derive(Debug, Default)]
 pub struct SymbolTable {
     /// Map from data name -> list of matching entries (multiple for ambiguous names).
@@ -227,7 +227,7 @@ impl SymbolTable {
     /// Resolve the type for a level-66 RENAMES entry.
     ///
     /// - Single RENAMES: copies the target's resolved type
-    /// - RENAMES THRU: creates a PicX spanning from target start to thru-end
+    /// - RENAMES THRU: creates a `PicX` spanning from target start to thru-end
     fn resolve_renames_type(&self, entry: &DataEntry) -> ResolvedType {
         let target_name = match &entry.renames_target {
             Some(name) => name.to_uppercase(),
@@ -271,12 +271,11 @@ impl SymbolTable {
         } else {
             // Single RENAMES: copy target's type
             target_entry
-                .map(|t| t.resolved_type.clone())
-                .unwrap_or(ResolvedType {
+                .map_or(ResolvedType {
                     rust_type: RustType::PicX { length: 1 },
                     byte_length: 1,
                     is_group: false,
-                })
+                }, |t| t.resolved_type.clone())
         }
     }
 }

@@ -27,9 +27,9 @@ enum OpenState {
 pub struct SequentialFile {
     /// COBOL SELECT name.
     select_name: String,
-    /// Filesystem path (resolved by FileResolver).
+    /// Filesystem path (resolved by `FileResolver`).
     path: PathBuf,
-    /// File organization (Sequential or LineSequential).
+    /// File organization (Sequential or `LineSequential`).
     organization: FileOrganization,
     /// Fixed record length (0 for LINE SEQUENTIAL = variable).
     record_length: usize,
@@ -58,7 +58,7 @@ impl SequentialFile {
     ///
     /// - `select_name`: COBOL SELECT name.
     /// - `path`: Resolved filesystem path.
-    /// - `organization`: Sequential or LineSequential.
+    /// - `organization`: Sequential or `LineSequential`.
     /// - `record_length`: Fixed record length (for SEQUENTIAL).
     ///   For LINE SEQUENTIAL, pass 0 (records are newline-delimited).
     pub fn new(
@@ -121,7 +121,7 @@ impl CobolFile for SequentialFile {
             }
             FileOpenMode::Extend => {
                 match OpenOptions::new()
-                    .write(true)
+                    
                     .create(true)
                     .append(true)
                     .open(&self.path)
@@ -176,7 +176,7 @@ impl CobolFile for SequentialFile {
 
     fn read_next(&mut self) -> (FileStatusCode, Option<Vec<u8>>) {
         match self.open_mode {
-            Some(FileOpenMode::Input) | Some(FileOpenMode::InputOutput) => {}
+            Some(FileOpenMode::Input | FileOpenMode::InputOutput) => {}
             Some(_) => return (FileStatusCode::BAD_OPEN_MODE, None),
             None => return (FileStatusCode::NOT_OPEN, None),
         }
@@ -234,7 +234,7 @@ impl CobolFile for SequentialFile {
 
     fn write_record(&mut self, record: &[u8]) -> FileStatusCode {
         match self.open_mode {
-            Some(FileOpenMode::Output) | Some(FileOpenMode::Extend) => {}
+            Some(FileOpenMode::Output | FileOpenMode::Extend) => {}
             Some(_) => return FileStatusCode::BAD_OPEN_MODE,
             None => return FileStatusCode::NOT_OPEN,
         }
@@ -273,12 +273,12 @@ impl CobolFile for SequentialFile {
         // Full implementation would require seeking back. For now, return error.
         match self.open_mode {
             Some(FileOpenMode::InputOutput) => {
-                if !self.has_current_record {
-                    FileStatusCode::NO_PRIOR_READ
-                } else {
+                if self.has_current_record {
                     // Sequential REWRITE is complex (seek back by record_length).
                     // Not yet implemented -- return permanent error.
                     FileStatusCode::PERM_ERROR
+                } else {
+                    FileStatusCode::NO_PRIOR_READ
                 }
             }
             Some(_) => FileStatusCode::BAD_OPEN_MODE,

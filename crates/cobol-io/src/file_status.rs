@@ -72,7 +72,7 @@ impl FileStatusCode {
         [self.byte1, self.byte2]
     }
 
-    /// Convert a FileError to the appropriate status code.
+    /// Convert a `FileError` to the appropriate status code.
     pub fn from_error(err: &FileError) -> Self {
         match err {
             FileError::EndOfFile => Self::AT_END,

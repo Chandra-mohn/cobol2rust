@@ -2,7 +2,7 @@
 //!
 //! Records are stored at fixed-size slots addressed by an integer key (1-based).
 //! Each slot has a 1-byte control byte: 0x00 = empty, 0x01 = occupied.
-//! Slot size = 1 (control) + record_length bytes.
+//! Slot size = 1 (control) + `record_length` bytes.
 //!
 //! Supports: OPEN INPUT/OUTPUT/I-O, READ by key, READ NEXT, WRITE, REWRITE, DELETE.
 
@@ -113,7 +113,7 @@ impl RelativeFile {
             return (FileStatusCode::NOT_OPEN, None);
         }
         match self.open_mode {
-            Some(FileOpenMode::Input) | Some(FileOpenMode::InputOutput) => {}
+            Some(FileOpenMode::Input | FileOpenMode::InputOutput) => {}
             _ => return (FileStatusCode::BAD_OPEN_MODE, None),
         }
 
@@ -146,7 +146,7 @@ impl RelativeFile {
             return FileStatusCode::NOT_OPEN;
         }
         match self.open_mode {
-            Some(FileOpenMode::Output) | Some(FileOpenMode::InputOutput) => {}
+            Some(FileOpenMode::Output | FileOpenMode::InputOutput) => {}
             _ => return FileStatusCode::BAD_OPEN_MODE,
         }
 
@@ -169,7 +169,7 @@ impl RelativeFile {
         let mut slot = vec![0u8; self.slot_size() as usize];
         slot[0] = SLOT_OCCUPIED;
         let copy_len = record.len().min(self.record_length);
-        slot[1..1 + copy_len].copy_from_slice(&record[..copy_len]);
+        slot[1..=copy_len].copy_from_slice(&record[..copy_len]);
         // Pad remainder with spaces
         for b in &mut slot[1 + copy_len..] {
             *b = b' ';
@@ -314,7 +314,7 @@ impl CobolFile for RelativeFile {
             return (FileStatusCode::NOT_OPEN, None);
         }
         match self.open_mode {
-            Some(FileOpenMode::Input) | Some(FileOpenMode::InputOutput) => {}
+            Some(FileOpenMode::Input | FileOpenMode::InputOutput) => {}
             _ => return (FileStatusCode::BAD_OPEN_MODE, None),
         }
 

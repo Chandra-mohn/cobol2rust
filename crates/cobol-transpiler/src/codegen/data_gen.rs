@@ -8,7 +8,7 @@ use crate::ast::{DataEntry, Literal};
 use crate::codegen::rust_writer::RustWriter;
 use crate::symbol_table::{resolve_type, RustType};
 
-/// Generate the WorkingStorage struct and its `new()` constructor.
+/// Generate the `WorkingStorage` struct and its `new()` constructor.
 pub fn generate_working_storage(
     w: &mut RustWriter,
     records: &[DataEntry],
@@ -72,7 +72,7 @@ pub fn generate_working_storage(
     w.close_block("}");
 }
 
-/// Generate the LinkageSection struct and its `new()` constructor.
+/// Generate the `LinkageSection` struct and its `new()` constructor.
 ///
 /// Mirrors `generate_working_storage` exactly but with struct name `LinkageSection`.
 /// Linkage section items are used by called programs to receive parameters.
@@ -163,7 +163,7 @@ fn generate_field(w: &mut RustWriter, entry: &DataEntry, prefix: &str) {
 /// Generate flattened fields for a group record.
 ///
 /// Children use their own COBOL name without parent group prefix.
-/// proc_gen references fields by COBOL name directly via
+/// `proc_gen` references fields by COBOL name directly via
 /// `cobol_to_rust_name(name, "")`, so Rust field names must match.
 fn generate_group_fields(w: &mut RustWriter, entry: &DataEntry, _prefix: &str) {
     for child in &entry.children {
@@ -280,7 +280,7 @@ fn generate_renames_field_inits(w: &mut RustWriter, record: &DataEntry, _prefix:
 /// Resolve the type for a level-66 RENAMES entry by looking at its target within the record.
 ///
 /// - Single RENAMES: copies the target field's resolved type
-/// - RENAMES THRU: creates a PicX spanning the combined byte lengths
+/// - RENAMES THRU: creates a `PicX` spanning the combined byte lengths
 fn resolve_renames_type_from_entry(
     renames_entry: &DataEntry,
     record: &DataEntry,
@@ -327,16 +327,15 @@ fn resolve_renames_type_from_entry(
     } else {
         // Single RENAMES: copy target's resolved type
         target
-            .map(|t| resolve_type(t))
-            .unwrap_or(ResolvedType {
+            .map_or(ResolvedType {
                 rust_type: RustType::PicX { length: 1 },
                 byte_length: 1,
                 is_group: false,
-            })
+            }, resolve_type)
     }
 }
 
-/// Recursively find a DataEntry by name within a record's children.
+/// Recursively find a `DataEntry` by name within a record's children.
 fn find_entry_by_name<'a>(record: &'a DataEntry, name: &str) -> Option<&'a DataEntry> {
     for child in &record.children {
         if child.name.to_uppercase() == name {
@@ -351,7 +350,7 @@ fn find_entry_by_name<'a>(record: &'a DataEntry, name: &str) -> Option<&'a DataE
 
 /// Convert a COBOL data name to a Rust field name.
 ///
-/// COBOL names use hyphens; Rust uses snake_case.
+/// COBOL names use hyphens; Rust uses `snake_case`.
 pub fn cobol_to_rust_name(cobol_name: &str, prefix: &str) -> String {
     let base = cobol_name.to_lowercase().replace('-', "_");
     if prefix.is_empty() {
@@ -393,9 +392,7 @@ fn rust_type_string(rt: &RustType) -> String {
                 if *signed { "i16" } else { "u16" }
             } else if *precision <= 9 {
                 if *signed { "i32" } else { "u32" }
-            } else {
-                if *signed { "i64" } else { "u64" }
-            };
+            } else if *signed { "i64" } else { "u64" };
             format!(
                 "{storage} /* COMP P{precision} S{scale} {} */",
                 if *pic_limited { "PIC-limited" } else { "full-range" }
@@ -479,12 +476,10 @@ fn value_to_init(lit: &Literal, rt: &RustType) -> String {
                 } else {
                     format!("{n}u32")
                 }
+            } else if *signed {
+                format!("{n}i64")
             } else {
-                if *signed {
-                    format!("{n}i64")
-                } else {
-                    format!("{n}u64")
-                }
+                format!("{n}u64")
             }
         }
         (Literal::Numeric(n), RustType::DisplayNumeric { precision, scale, signed }) => {
@@ -494,7 +489,7 @@ fn value_to_init(lit: &Literal, rt: &RustType) -> String {
         }
         (Literal::Numeric(n), RustType::Float32) => format!("Comp1Float::from_f32({n}f32)"),
         (Literal::Numeric(n), RustType::Float64) => format!("Comp2Float::from_f64({n}f64)"),
-        (Literal::Numeric(n), _) => format!("{n}"),
+        (Literal::Numeric(n), _) => n.clone(),
         (Literal::Alphanumeric(s), RustType::PicX { length }) => {
             format!("PicX::new({length}, b\"{s}\")")
         }
@@ -526,7 +521,7 @@ fn value_to_init(lit: &Literal, rt: &RustType) -> String {
     }
 }
 
-/// Generate the init expression for an AlphanumericEdited field.
+/// Generate the init expression for an `AlphanumericEdited` field.
 ///
 /// Emits `AlphanumericEdited::new(vec![AlphaEditSymbol::Data, ...])`.
 fn alpha_edited_init_expr(entry: &DataEntry) -> String {

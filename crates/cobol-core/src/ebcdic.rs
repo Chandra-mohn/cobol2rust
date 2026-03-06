@@ -22,8 +22,10 @@
 
 /// Supported EBCDIC code pages.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Default)]
 pub enum CodePage {
     /// IBM CP037 -- US/Canada, most common mainframe code page.
+    #[default]
     CP037,
     /// IBM CP1140 -- Euro variant of CP037 (0x9F = Euro sign instead of
     /// currency sign). All other positions identical to CP037.
@@ -32,11 +34,6 @@ pub enum CodePage {
     CP500,
 }
 
-impl Default for CodePage {
-    fn default() -> Self {
-        Self::CP037
-    }
-}
 
 // ---------------------------------------------------------------------------
 // CP037 EBCDIC -> Unicode/ASCII mapping (256 entries)
@@ -104,7 +101,7 @@ const CP037_TO_UNICODE: [u8; 256] = [
 ];
 
 /// CP500 EBCDIC -> byte mapping.
-/// Source: https://www.unicode.org/Public/MAPPINGS/VENDORS/MICSFT/EBCDIC/CP500.TXT
+/// Source: <https://www.unicode.org/Public/MAPPINGS/VENDORS/MICSFT/EBCDIC/CP500.TXT>
 ///
 /// Differences from CP037 are concentrated in the symbol/punctuation area:
 /// 0x4A='[', 0x4F='!', 0x5A=']', 0x5F='^', 0xB0=cent, 0xBA=not, 0xBB='|'
@@ -348,8 +345,7 @@ mod tests {
             let back = ebcdic_to_ascii_byte(CodePage::CP037, ebcdic);
             assert_eq!(
                 back, ascii,
-                "CP037 roundtrip failed for ASCII 0x{:02X}: EBCDIC 0x{:02X} -> 0x{:02X}",
-                ascii, ebcdic, back
+                "CP037 roundtrip failed for ASCII 0x{ascii:02X}: EBCDIC 0x{ebcdic:02X} -> 0x{back:02X}"
             );
         }
     }
@@ -361,8 +357,7 @@ mod tests {
             let back = ebcdic_to_ascii_byte(CodePage::CP500, ebcdic);
             assert_eq!(
                 back, ascii,
-                "CP500 roundtrip failed for ASCII 0x{:02X}: EBCDIC 0x{:02X} -> 0x{:02X}",
-                ascii, ebcdic, back
+                "CP500 roundtrip failed for ASCII 0x{ascii:02X}: EBCDIC 0x{ebcdic:02X} -> 0x{back:02X}"
             );
         }
     }
@@ -374,8 +369,7 @@ mod tests {
             let back = ebcdic_to_ascii_byte(CodePage::CP1140, ebcdic);
             assert_eq!(
                 back, ascii,
-                "CP1140 roundtrip failed for ASCII 0x{:02X}: EBCDIC 0x{:02X} -> 0x{:02X}",
-                ascii, ebcdic, back
+                "CP1140 roundtrip failed for ASCII 0x{ascii:02X}: EBCDIC 0x{ebcdic:02X} -> 0x{back:02X}"
             );
         }
     }
@@ -389,8 +383,7 @@ mod tests {
             assert_eq!(
                 ebcdic_to_ascii_byte(CodePage::CP037, 0xF0 + digit),
                 b'0' + digit,
-                "digit {} mapping failed",
-                digit
+                "digit {digit} mapping failed"
             );
         }
     }
@@ -524,8 +517,7 @@ mod tests {
             assert_eq!(
                 ebcdic_to_ascii_byte(CodePage::CP1140, i as u8),
                 ebcdic_to_ascii_byte(CodePage::CP037, i as u8),
-                "CP1140 vs CP037 differ at position 0x{:02X}",
-                i
+                "CP1140 vs CP037 differ at position 0x{i:02X}"
             );
         }
     }

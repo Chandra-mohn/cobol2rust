@@ -1,7 +1,7 @@
 //! Numeric-Edited data type (PIC Z, *, $, +, -, CR, DB).
 //!
 //! Stores an edited display string produced by applying a PIC editing mask
-//! to a numeric value. The edited result is the "as_bytes" representation.
+//! to a numeric value. The edited result is the "`as_bytes`" representation.
 //!
 //! Editing rules follow IBM Enterprise COBOL semantics:
 //! - Zero suppression: Z replaces leading zeros with spaces, * with asterisks
@@ -48,7 +48,7 @@ impl std::fmt::Debug for NumericEdited {
 }
 
 impl NumericEdited {
-    /// Create a new NumericEdited field.
+    /// Create a new `NumericEdited` field.
     ///
     /// - `mask`: The parsed editing mask from the PIC clause.
     /// - `int_positions`: Number of integer digit positions.
@@ -440,7 +440,7 @@ mod tests {
     use super::*;
     use rust_decimal_macros::dec;
 
-    /// Helper: build mask from a slice of EditSymbols.
+    /// Helper: build mask from a slice of `EditSymbols`.
     fn make(mask: &[EditSymbol], int_pos: u32, dec_pos: u32) -> NumericEdited {
         NumericEdited::new(mask.to_vec(), int_pos, dec_pos, false)
     }

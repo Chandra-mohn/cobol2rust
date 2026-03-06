@@ -5,14 +5,14 @@
 
 use std::collections::HashMap;
 
-use crate::ast::*;
+use crate::ast::{ConditionValue, DataEntry, PicClause, PicCategory, ProcedureDivision, Paragraph, Statement, MoveStatement, Operand, Literal, FigurativeConstant, DisplayStatement, AddStatement, SubtractStatement, MultiplyStatement, DivideStatement, DivideDirection, ComputeStatement, IfStatement, EvaluateStatement, EvaluateSubject, WhenValue, PerformStatement, PerformLoopType, GoToStatement, InitializeStatement, CallStatement, PassingMode, CancelStatement, AcceptStatement, AcceptSource, OpenStatement, OpenMode, CloseStatement, ReadStatement, WriteStatement, Advancing, RewriteStatement, DeleteStatement, StartStatement, ComparisonOp, SetStatement, SetAction, DataReference, Subscript, ArithExpr, ArithOp, Condition, ClassCondition, SignCondition, SortStatement, SortInput, SortOutput, MergeStatement, ReleaseStatement, ReturnStatement, InspectStatement, InspectWhat, StringStatement, StringDelimiter, UnstringStatement};
 use crate::codegen::data_gen::cobol_to_rust_name;
 use crate::codegen::rust_writer::RustWriter;
 
 /// Information about an 88-level condition for codegen.
 #[derive(Debug, Clone)]
 pub struct ConditionInfo {
-    /// Rust expression for the parent field (e.g., "ws.ws_status").
+    /// Rust expression for the parent field (e.g., "`ws.ws_status`").
     pub parent_field: String,
     /// Whether the parent field is numeric (affects comparison codegen).
     pub parent_is_numeric: bool,
@@ -23,7 +23,7 @@ pub struct ConditionInfo {
 /// Map from condition name (uppercase COBOL name) to its info.
 pub type ConditionMap = HashMap<String, ConditionInfo>;
 
-/// Build a ConditionMap by walking the DataEntry hierarchy.
+/// Build a `ConditionMap` by walking the `DataEntry` hierarchy.
 ///
 /// 88-level entries are children of their parent field. We walk the tree,
 /// and for each 88-level child, record its parent's Rust field path and
@@ -44,8 +44,7 @@ fn collect_conditions(map: &mut ConditionMap, entry: &DataEntry, prefix: &str) {
     let is_numeric = entry
         .pic
         .as_ref()
-        .map(|p| is_numeric_pic(p))
-        .unwrap_or(false);
+        .is_some_and(is_numeric_pic);
 
     for child in &entry.children {
         if child.level == 88 && !child.condition_values.is_empty() {
@@ -73,7 +72,7 @@ fn is_numeric_pic(pic: &PicClause) -> bool {
 struct ParagraphIndex {
     /// Original COBOL paragraph name (uppercase).
     name: String,
-    /// Rust function name (snake_case).
+    /// Rust function name (`snake_case`).
     rust_name: String,
     /// Dispatch index in the `run()` match.
     index: usize,
@@ -288,7 +287,7 @@ fn generate_move(w: &mut RustWriter, m: &MoveStatement) {
     }
 }
 
-/// Get an operand's bytes for use as ref_mod_write source.
+/// Get an operand's bytes for use as `ref_mod_write` source.
 fn operand_to_source_bytes(op: &Operand) -> String {
     match op {
         Operand::Literal(Literal::Alphanumeric(s)) => format!("b\"{s}\""),
@@ -355,9 +354,21 @@ fn generate_display(w: &mut RustWriter, d: &DisplayStatement) {
 }
 
 fn generate_add(w: &mut RustWriter, a: &AddStatement) {
-    if !a.giving.is_empty() {
+    if a.giving.is_empty() {
+        // ADD ... TO: add each operand to each TO target
+        let operands: Vec<String> = a.operands.iter().map(operand_numeric_expr).collect();
+        for target in &a.to {
+            let dest = data_ref_expr(&target.field);
+            let r = rounded_str(target.rounded);
+            for op in &operands {
+                w.line(&format!(
+                    "cobol_add(&{op}, &mut {dest}, {r}, &ctx.config);"
+                ));
+            }
+        }
+    } else {
         // ADD ... GIVING: sum the operands, store in giving targets
-        let operands: Vec<String> = a.operands.iter().map(|o| operand_numeric_expr(o)).collect();
+        let operands: Vec<String> = a.operands.iter().map(operand_numeric_expr).collect();
         // For GIVING, first operand is src, second is src2
         if operands.len() >= 2 {
             for target in &a.giving {
@@ -379,24 +390,23 @@ fn generate_add(w: &mut RustWriter, a: &AddStatement) {
                 ));
             }
         }
-    } else {
-        // ADD ... TO: add each operand to each TO target
-        let operands: Vec<String> = a.operands.iter().map(|o| operand_numeric_expr(o)).collect();
-        for target in &a.to {
-            let dest = data_ref_expr(&target.field);
-            let r = rounded_str(target.rounded);
-            for op in &operands {
-                w.line(&format!(
-                    "cobol_add(&{op}, &mut {dest}, {r}, &ctx.config);"
-                ));
-            }
-        }
     }
 }
 
 fn generate_subtract(w: &mut RustWriter, s: &SubtractStatement) {
-    if !s.giving.is_empty() {
-        let operands: Vec<String> = s.operands.iter().map(|o| operand_numeric_expr(o)).collect();
+    if s.giving.is_empty() {
+        let operands: Vec<String> = s.operands.iter().map(operand_numeric_expr).collect();
+        for target in &s.from {
+            let dest = data_ref_expr(&target.field);
+            let r = rounded_str(target.rounded);
+            for op in &operands {
+                w.line(&format!(
+                    "cobol_subtract(&{op}, &mut {dest}, {r}, &ctx.config);"
+                ));
+            }
+        }
+    } else {
+        let operands: Vec<String> = s.operands.iter().map(operand_numeric_expr).collect();
         if operands.len() >= 2 {
             for target in &s.giving {
                 let dest = data_ref_expr(&target.field);
@@ -416,35 +426,13 @@ fn generate_subtract(w: &mut RustWriter, s: &SubtractStatement) {
                 ));
             }
         }
-    } else {
-        let operands: Vec<String> = s.operands.iter().map(|o| operand_numeric_expr(o)).collect();
-        for target in &s.from {
-            let dest = data_ref_expr(&target.field);
-            let r = rounded_str(target.rounded);
-            for op in &operands {
-                w.line(&format!(
-                    "cobol_subtract(&{op}, &mut {dest}, {r}, &ctx.config);"
-                ));
-            }
-        }
     }
 }
 
 fn generate_multiply(w: &mut RustWriter, m: &MultiplyStatement) {
     let multiplicand = operand_numeric_expr(&m.operand);
 
-    if !m.giving.is_empty() {
-        let by_field = m.by.first()
-            .map(|t| data_ref_expr(&t.field))
-            .unwrap_or_else(|| "0".to_string());
-        for target in &m.giving {
-            let dest = data_ref_expr(&target.field);
-            let r = rounded_str(target.rounded);
-            w.line(&format!(
-                "cobol_multiply_giving(&{multiplicand}, &{by_field}, &mut {dest}, {r}, &ctx.config);"
-            ));
-        }
-    } else {
+    if m.giving.is_empty() {
         for target in &m.by {
             let dest = data_ref_expr(&target.field);
             let r = rounded_str(target.rounded);
@@ -452,19 +440,33 @@ fn generate_multiply(w: &mut RustWriter, m: &MultiplyStatement) {
                 "cobol_multiply(&{multiplicand}, &mut {dest}, {r}, &ctx.config);"
             ));
         }
+    } else {
+        let by_field = m.by.first().map_or_else(|| "0".to_string(), |t| data_ref_expr(&t.field));
+        for target in &m.giving {
+            let dest = data_ref_expr(&target.field);
+            let r = rounded_str(target.rounded);
+            w.line(&format!(
+                "cobol_multiply_giving(&{multiplicand}, &{by_field}, &mut {dest}, {r}, &ctx.config);"
+            ));
+        }
     }
 }
 
 fn generate_divide(w: &mut RustWriter, d: &DivideStatement) {
     let operand = operand_numeric_expr(&d.operand);
-    let remainder_expr = d.remainder.as_ref()
-        .map(|rem| format!("Some(&mut {})", data_ref_expr(&rem.field)))
-        .unwrap_or_else(|| "None".to_string());
+    let remainder_expr = d.remainder.as_ref().map_or_else(|| "None".to_string(), |rem| format!("Some(&mut {})", data_ref_expr(&rem.field)));
 
-    if !d.giving.is_empty() {
-        let into_field = d.into.first()
-            .map(|t| data_ref_expr(&t.field))
-            .unwrap_or_else(|| "0".to_string());
+    if d.giving.is_empty() {
+        // DIVIDE x INTO y -> cobol_divide(x, y, remainder, rounded, config)
+        for target in &d.into {
+            let dest = data_ref_expr(&target.field);
+            let r = rounded_str(target.rounded);
+            w.line(&format!(
+                "cobol_divide(&{operand}, &mut {dest}, {remainder_expr}, {r}, &ctx.config);"
+            ));
+        }
+    } else {
+        let into_field = d.into.first().map_or_else(|| "0".to_string(), |t| data_ref_expr(&t.field));
         match d.direction {
             DivideDirection::Into => {
                 // DIVIDE x INTO y GIVING z -> cobol_divide_giving(x, y, z, remainder, rounded, config)
@@ -486,15 +488,6 @@ fn generate_divide(w: &mut RustWriter, d: &DivideStatement) {
                     ));
                 }
             }
-        }
-    } else {
-        // DIVIDE x INTO y -> cobol_divide(x, y, remainder, rounded, config)
-        for target in &d.into {
-            let dest = data_ref_expr(&target.field);
-            let r = rounded_str(target.rounded);
-            w.line(&format!(
-                "cobol_divide(&{operand}, &mut {dest}, {remainder_expr}, {r}, &ctx.config);"
-            ));
         }
     }
 }
@@ -1316,8 +1309,8 @@ fn operand_expr(op: &Operand) -> String {
 }
 
 /// Format an operand as a Rust expression suitable for arithmetic functions
-/// (i.e. implements CobolNumeric). Numeric literals are wrapped in a
-/// temporary PackedDecimal since bare `dec!()` produces `Decimal` which
+/// (i.e. implements `CobolNumeric`). Numeric literals are wrapped in a
+/// temporary `PackedDecimal` since bare `dec!()` produces `Decimal` which
 /// does not implement `CobolNumeric`.
 fn operand_numeric_expr(op: &Operand) -> String {
     match op {
@@ -1393,7 +1386,7 @@ fn data_ref_base_expr(dr: &DataReference) -> String {
     expr
 }
 
-/// Generate a Rust expression evaluating to usize for ref_mod offset/length.
+/// Generate a Rust expression evaluating to usize for `ref_mod` offset/length.
 fn ref_mod_index_expr(expr: &ArithExpr) -> String {
     match expr {
         ArithExpr::Operand(Operand::Literal(Literal::Numeric(n))) => {
@@ -1413,7 +1406,7 @@ fn ref_mod_index_expr(expr: &ArithExpr) -> String {
 /// Format a data reference as a Rust expression for read contexts.
 ///
 /// Applies reference modification when present, wrapping the result
-/// in a temporary PicX (since ref-mod always produces alphanumeric).
+/// in a temporary `PicX` (since ref-mod always produces alphanumeric).
 fn data_ref_expr(dr: &DataReference) -> String {
     let base = data_ref_base_expr(dr);
 
@@ -1491,8 +1484,8 @@ fn operand_to_decimal_expr(op: &Operand) -> String {
 }
 
 /// Format a condition as a Rust expression.
-/// Uses `.to_decimal()` for numeric comparisons since PackedDecimal
-/// doesn't implement PartialOrd directly.
+/// Uses `.to_decimal()` for numeric comparisons since `PackedDecimal`
+/// doesn't implement `PartialOrd` directly.
 fn condition_expr(cond: &Condition, cmap: &ConditionMap) -> String {
     match cond {
         Condition::Comparison { left, op, right } => {
@@ -1554,7 +1547,7 @@ fn condition_expr(cond: &Condition, cmap: &ConditionMap) -> String {
 
 /// Generate an expression for an 88-level condition name test.
 ///
-/// Looks up the condition in the ConditionMap. If found, generates inline
+/// Looks up the condition in the `ConditionMap`. If found, generates inline
 /// comparisons against the parent field. Falls back to `.is_true()` if not found.
 fn condition_name_expr(dr: &DataReference, cmap: &ConditionMap) -> String {
     let key = dr.name.to_uppercase();
@@ -1824,9 +1817,7 @@ fn generate_inspect(w: &mut RustWriter, insp: &InspectStatement, _cmap: &Conditi
         let counter = data_ref_expr(&tally.counter);
         match &tally.what {
             InspectWhat::Characters => {
-                w.line(&format!(
-                    "{{ let specs = vec![TallyingSpec {{ what: InspectWhat::Characters, bounds: vec![] }}];"
-                ));
+                w.line("{ let specs = vec![TallyingSpec { what: InspectWhat::Characters, bounds: vec![] }];");
                 w.line(&format!(
                     "let counts = cobol_inspect_tallying({target}.as_bytes(), &specs);"
                 ));

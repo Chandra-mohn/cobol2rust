@@ -1,4 +1,4 @@
-//! AlphanumericEdited: PIC with B, 0, / insertion characters.
+//! `AlphanumericEdited`: PIC with B, 0, / insertion characters.
 //!
 //! Alphanumeric editing is much simpler than numeric editing:
 //! - Only 3 insertion symbols: B (space), 0 (zero), / (slash)
@@ -60,7 +60,7 @@ impl std::fmt::Debug for AlphanumericEdited {
 }
 
 impl AlphanumericEdited {
-    /// Create a new AlphanumericEdited field from an edit pattern.
+    /// Create a new `AlphanumericEdited` field from an edit pattern.
     ///
     /// The field is initialized with spaces in data positions and
     /// insertion characters at their fixed positions.
@@ -72,7 +72,7 @@ impl AlphanumericEdited {
         Self { data, edit_pattern }
     }
 
-    /// Create a new AlphanumericEdited and immediately set from source bytes.
+    /// Create a new `AlphanumericEdited` and immediately set from source bytes.
     pub fn from_bytes(edit_pattern: Vec<AlphaEditSymbol>, source: &[u8]) -> Self {
         let mut field = Self::new(edit_pattern);
         field.set(source);

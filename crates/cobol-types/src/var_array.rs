@@ -103,7 +103,7 @@ impl<T: CobolField> CobolVarArray<T> {
         self.active_len = len;
     }
 
-    /// Total allocated elements (may be > active_len).
+    /// Total allocated elements (may be > `active_len`).
     pub fn allocated_len(&self) -> usize {
         self.elements.len()
     }
@@ -392,7 +392,7 @@ mod tests {
         ];
         let arr = CobolVarArray::with_active_len(elements, 5, 2);
 
-        let bytes: Vec<&[u8]> = arr.iter().map(|e| e.as_bytes()).collect();
+        let bytes: Vec<&[u8]> = arr.iter().map(cobol_core::CobolField::as_bytes).collect();
         assert_eq!(bytes, vec![b"A" as &[u8], b"B"]);
     }
 

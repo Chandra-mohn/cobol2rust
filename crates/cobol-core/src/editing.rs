@@ -1,7 +1,7 @@
 /// Parsed PIC editing symbols (for numeric-edited and alpha-edited types).
 ///
 /// These represent the individual elements of a PIC editing mask after
-/// the PIC string has been parsed and expanded (e.g., Z(3) -> [ZeroSuppress; 3]).
+/// the PIC string has been parsed and expanded (e.g., Z(3) -> [`ZeroSuppress`; 3]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EditSymbol {
     /// 9 -- always display digit

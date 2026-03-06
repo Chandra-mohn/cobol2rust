@@ -47,7 +47,7 @@ impl FileResolver {
     /// Resolution order:
     /// 1. Environment variable `COBOL_FILE_{NAME}`
     /// 2. Explicit mapping
-    /// 3. Default: base_dir / name
+    /// 3. Default: `base_dir` / name
     pub fn resolve(&self, cobol_name: &str) -> PathBuf {
         let upper = cobol_name.to_uppercase();
 

@@ -1,6 +1,6 @@
 //! Indexed file implementation (ORGANIZATION IS INDEXED).
 //!
-//! Uses SQLite as the storage backend for VSAM KSDS emulation.
+//! Uses `SQLite` as the storage backend for VSAM KSDS emulation.
 //! Records are keyed by a primary key extracted from the record at a
 //! fixed offset and length. Alternate keys are supported.
 //!
@@ -20,11 +20,11 @@ use crate::file_traits::{CobolFile, FileAccessMode, FileOpenMode, FileOrganizati
 /// Indexed file (ORGANIZATION IS INDEXED).
 ///
 /// Primary key is extracted from the record at `key_offset` for `key_length` bytes.
-/// SQLite provides transactional, crash-safe keyed access.
+/// `SQLite` provides transactional, crash-safe keyed access.
 pub struct IndexedFile {
     /// COBOL SELECT name.
     select_name: String,
-    /// SQLite database path.
+    /// `SQLite` database path.
     path: PathBuf,
     /// Fixed record length.
     record_length: usize,
@@ -38,7 +38,7 @@ pub struct IndexedFile {
     _allow_duplicates: bool,
     /// Current open mode.
     open_mode: Option<FileOpenMode>,
-    /// SQLite connection.
+    /// `SQLite` connection.
     conn: Option<Connection>,
     /// Current key for sequential access (cursor).
     current_key: Option<Vec<u8>>,
@@ -124,7 +124,7 @@ impl IndexedFile {
             return (FileStatusCode::NOT_OPEN, None);
         }
         match self.open_mode {
-            Some(FileOpenMode::Input) | Some(FileOpenMode::InputOutput) => {}
+            Some(FileOpenMode::Input | FileOpenMode::InputOutput) => {}
             _ => return (FileStatusCode::BAD_OPEN_MODE, None),
         }
 
@@ -159,7 +159,7 @@ impl IndexedFile {
             return FileStatusCode::NOT_OPEN;
         }
         match self.open_mode {
-            Some(FileOpenMode::Input) | Some(FileOpenMode::InputOutput) => {}
+            Some(FileOpenMode::Input | FileOpenMode::InputOutput) => {}
             _ => return FileStatusCode::BAD_OPEN_MODE,
         }
 
@@ -258,7 +258,7 @@ impl CobolFile for IndexedFile {
             return (FileStatusCode::NOT_OPEN, None);
         }
         match self.open_mode {
-            Some(FileOpenMode::Input) | Some(FileOpenMode::InputOutput) => {}
+            Some(FileOpenMode::Input | FileOpenMode::InputOutput) => {}
             _ => return (FileStatusCode::BAD_OPEN_MODE, None),
         }
 
@@ -310,8 +310,7 @@ impl CobolFile for IndexedFile {
             return FileStatusCode::NOT_OPEN;
         }
         match self.open_mode {
-            Some(FileOpenMode::Output) | Some(FileOpenMode::InputOutput)
-            | Some(FileOpenMode::Extend) => {}
+            Some(FileOpenMode::Output | FileOpenMode::InputOutput | FileOpenMode::Extend) => {}
             _ => return FileStatusCode::BAD_OPEN_MODE,
         }
 

@@ -20,7 +20,7 @@ use std::cmp::Ordering;
 #[derive(Clone)]
 pub struct Comp1Float {
     value: f32,
-    /// Cached byte representation for as_bytes() support.
+    /// Cached byte representation for `as_bytes()` support.
     byte_cache: [u8; 4],
 }
 
@@ -31,7 +31,7 @@ impl std::fmt::Debug for Comp1Float {
 }
 
 impl Comp1Float {
-    /// Create a new Comp1Float with value 0.0.
+    /// Create a new `Comp1Float` with value 0.0.
     pub fn new() -> Self {
         Self {
             value: 0.0,
@@ -87,7 +87,7 @@ impl CobolField for Comp1Float {
     fn display_bytes(&self) -> Vec<u8> {
         // Format as decimal string without trailing zeros.
         // COBOL DISPLAY of COMP-1 shows the value in readable numeric form.
-        let s = format_float_display(self.value as f64);
+        let s = format_float_display(f64::from(self.value));
         s.into_bytes()
     }
 
@@ -104,7 +104,7 @@ impl CobolField for Comp1Float {
 
 impl CobolNumeric for Comp1Float {
     fn to_decimal(&self) -> Decimal {
-        Decimal::from_f64_retain(self.value as f64).unwrap_or(Decimal::ZERO)
+        Decimal::from_f64_retain(f64::from(self.value)).unwrap_or(Decimal::ZERO)
     }
 
     fn set_decimal(&mut self, value: Decimal) {
@@ -153,8 +153,8 @@ pub(crate) fn format_float_display(v: f64) -> String {
     // Use Decimal for clean formatting (avoids f64 precision artifacts).
     if let Some(d) = Decimal::from_f64_retain(v) {
         let d = d.normalize();
-        let s = d.to_string();
-        s
+        
+        d.to_string()
     } else {
         "0".to_string()
     }
@@ -278,6 +278,6 @@ mod tests {
     #[test]
     fn format_float_display_infinity() {
         let s = format_float_display(f64::INFINITY);
-        assert!(s.starts_with("9"));
+        assert!(s.starts_with('9'));
     }
 }

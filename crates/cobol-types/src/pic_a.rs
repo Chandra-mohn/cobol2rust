@@ -3,7 +3,7 @@ use cobol_core::traits::CobolField;
 
 /// PIC A(N): Fixed-length alphabetic field.
 ///
-/// Same storage semantics as PicX but category is Alphabetic.
+/// Same storage semantics as `PicX` but category is Alphabetic.
 /// Only allows letters and spaces (enforcement is at transpiler/MOVE level).
 #[derive(Clone)]
 pub struct PicA {
@@ -54,8 +54,7 @@ impl PicA {
             .data
             .iter()
             .rposition(|&b| b != b' ')
-            .map(|p| p + 1)
-            .unwrap_or(0);
+            .map_or(0, |p| p + 1);
         &self.data[..end]
     }
 }

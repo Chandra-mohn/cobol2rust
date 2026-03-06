@@ -22,7 +22,7 @@ use crate::comp1_float::format_float_display;
 #[derive(Clone)]
 pub struct Comp2Float {
     value: f64,
-    /// Cached byte representation for as_bytes() support.
+    /// Cached byte representation for `as_bytes()` support.
     byte_cache: [u8; 8],
 }
 
@@ -33,7 +33,7 @@ impl std::fmt::Debug for Comp2Float {
 }
 
 impl Comp2Float {
-    /// Create a new Comp2Float with value 0.0.
+    /// Create a new `Comp2Float` with value 0.0.
     pub fn new() -> Self {
         Self {
             value: 0.0,

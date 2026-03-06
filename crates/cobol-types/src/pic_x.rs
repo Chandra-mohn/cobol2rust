@@ -93,8 +93,7 @@ impl PicX {
             .data
             .iter()
             .rposition(|&b| b != b' ')
-            .map(|p| p + 1)
-            .unwrap_or(0);
+            .map_or(0, |p| p + 1);
         &self.data[..end]
     }
 

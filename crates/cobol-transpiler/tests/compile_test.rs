@@ -5,7 +5,7 @@
 //!
 //! These tests are slower (each spawns cargo) and are gated behind the
 //! `compile_tests` feature flag. Run with:
-//!   cargo test -p cobol-transpiler --test compile_test --features compile_tests
+//!   cargo test -p cobol-transpiler --test `compile_test` --features `compile_tests`
 //!
 //! They require cobol-runtime and all dependency crates to be available
 //! at their workspace paths.

@@ -114,7 +114,7 @@ impl CobolField for RedefinesGroup {
     }
 }
 
-/// Helper to copy bytes from a typed field into a RedefinesGroup at an offset.
+/// Helper to copy bytes from a typed field into a `RedefinesGroup` at an offset.
 ///
 /// Used by generated code when writing to a REDEFINES overlay field.
 pub fn sync_field_to_redefines(group: &mut RedefinesGroup, offset: usize, field: &dyn CobolField) {
@@ -125,7 +125,7 @@ pub fn sync_field_to_redefines(group: &mut RedefinesGroup, offset: usize, field:
     target[..copy_len].copy_from_slice(&bytes[..copy_len]);
 }
 
-/// Helper to copy bytes from a RedefinesGroup into a typed field.
+/// Helper to copy bytes from a `RedefinesGroup` into a typed field.
 ///
 /// Used by generated code when reading from a REDEFINES overlay field.
 pub fn sync_redefines_to_field(

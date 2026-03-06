@@ -183,7 +183,7 @@ impl CobolField for PackedDecimal {
     }
 
     fn fill_bytes(&mut self, byte: u8) {
-        for b in self.data.iter_mut() {
+        for b in &mut self.data {
             *b = byte;
         }
     }
@@ -225,7 +225,7 @@ pub fn format_display(value: Decimal, precision: u32, scale: u32, signed: bool) 
     let digit_str = scaled.to_string();
 
     let prec = precision as usize;
-    let mut result = Vec::with_capacity(prec + if signed { 1 } else { 0 });
+    let mut result = Vec::with_capacity(prec + usize::from(signed));
 
     // Build digits, left-padded with zeros
     let digits: Vec<u8> = if digit_str.len() >= prec {

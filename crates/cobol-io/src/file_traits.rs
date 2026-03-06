@@ -13,7 +13,7 @@ pub enum FileOrganization {
     Sequential,
     /// LINE SEQUENTIAL (text lines, newline-delimited).
     LineSequential,
-    /// INDEXED (keyed access, backed by SQLite in our implementation).
+    /// INDEXED (keyed access, backed by `SQLite` in our implementation).
     Indexed,
     /// RELATIVE (slot-based, integer key).
     Relative,

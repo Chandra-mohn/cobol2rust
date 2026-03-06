@@ -56,10 +56,10 @@ pub fn cobol_move_numeric(
         warning.handle(diag);
     }
 
-    let store_value = if !dest.is_signed() {
-        final_value.abs()
-    } else {
+    let store_value = if dest.is_signed() {
         final_value
+    } else {
+        final_value.abs()
     };
 
     dest.set_decimal(store_value);
@@ -71,7 +71,7 @@ pub fn is_legal_move(
     dest_cat: DataCategory,
     config: &RuntimeConfig,
 ) -> bool {
-    use DataCategory::*;
+    use DataCategory::{Group, Alphanumeric, National, Alphabetic, AlphanumericEdited, Numeric, NumericEdited};
     match (src_cat, dest_cat) {
         // Group destination always accepts anything
         (_, Group) => true,

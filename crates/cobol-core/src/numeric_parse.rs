@@ -69,7 +69,7 @@ pub fn parse_with_implied_decimal(bytes: &[u8], scale: u32) -> Decimal {
     let (sign_negative, digits) = extract_sign(s);
 
     // Parse as integer, then apply scale
-    let cleaned: String = digits.chars().filter(|c| c.is_ascii_digit()).collect();
+    let cleaned: String = digits.chars().filter(char::is_ascii_digit).collect();
     if cleaned.is_empty() {
         return Decimal::ZERO;
     }
@@ -147,7 +147,7 @@ fn strip_edit_chars(s: &str) -> String {
 
 /// Strip CR/DB suffix and detect negative sign.
 ///
-/// Returns (remaining_string, is_negative).
+/// Returns (`remaining_string`, `is_negative`).
 fn strip_sign_suffix(s: &str) -> (&str, bool) {
     if let Some(rest) = s.strip_suffix("CR") {
         (rest, true)
@@ -160,7 +160,7 @@ fn strip_sign_suffix(s: &str) -> (&str, bool) {
 
 /// Extract sign from a numeric string.
 ///
-/// Returns (is_negative, remaining_digits).
+/// Returns (`is_negative`, `remaining_digits`).
 fn extract_sign(s: &str) -> (bool, &str) {
     if let Some(rest) = s.strip_prefix('-') {
         (true, rest)

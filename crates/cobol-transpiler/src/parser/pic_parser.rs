@@ -393,7 +393,7 @@ pub fn compute_storage_size(pic: &PicClause, usage: crate::ast::Usage) -> u32 {
     }
 }
 
-/// Build an alpha edit pattern from an AlphanumericEdited PIC clause.
+/// Build an alpha edit pattern from an `AlphanumericEdited` PIC clause.
 ///
 /// Returns a vector of pattern characters where:
 /// - 'X' = data position (source character pass-through)
