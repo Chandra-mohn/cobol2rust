@@ -1465,30 +1465,71 @@ fn extract_perform_varying<'input>(
         .map(|tc| !tc.get_text().to_uppercase().contains("AFTER"))
         .unwrap_or(true);
 
-    // Extract varying clause from text (simplified)
-    let text = ctx
-        .performVaryingClause()
-        .map(|vc| vc.get_text().to_uppercase())
-        .unwrap_or_default();
+    // Navigate the ANTLR parse tree properly:
+    // performVarying -> performVaryingClause -> performVaryingPhrase
+    //   -> identifier (counter), performFrom, performBy, performUntil -> condition
+    let vc = ctx.performVaryingClause();
+    let phrase = vc.as_ref().and_then(|vc| vc.performVaryingPhrase());
 
-    // Parse: counter FROM start BY increment UNTIL condition
-    let parts: Vec<&str> = text.split_whitespace().collect();
+    // Extract counter name from the identifier child of performVaryingPhrase
+    let counter_name = phrase
+        .as_ref()
+        .and_then(|p| p.identifier())
+        .map(|id| id.get_text().to_uppercase())
+        .unwrap_or_else(|| "I".to_string());
 
-    let counter_name = parts.first().unwrap_or(&"I").to_string();
-    let from_val = find_keyword_value(&parts, "FROM").unwrap_or("1".to_string());
-    let by_val = find_keyword_value(&parts, "BY").unwrap_or("1".to_string());
-
-    // Extract condition from the varying clause context
-    let condition = ctx
-        .performVaryingClause()
-        .and_then(|vc| {
-            // The varying clause text includes UNTIL - extract condition after UNTIL
-            let vc_text = vc.get_text().to_uppercase();
-            if let Some(until_pos) = vc_text.find("UNTIL") {
-                let cond_text = vc_text[until_pos + 5..].trim();
-                Some(parse_simple_condition(cond_text))
+    // Extract FROM value from performFrom child
+    let from_text = phrase
+        .as_ref()
+        .and_then(|p| p.performFrom())
+        .map(|pf| {
+            // performFrom = FROM (identifier | literal | arithmeticExpression)
+            // Get everything after FROM keyword
+            if let Some(id) = pf.identifier() {
+                id.get_text().to_uppercase()
+            } else if let Some(lit) = pf.literal() {
+                lit.get_text()
+            } else if let Some(arith) = pf.arithmeticExpression() {
+                arith.get_text()
             } else {
-                None
+                "1".to_string()
+            }
+        })
+        .unwrap_or_else(|| "1".to_string());
+
+    // Extract BY value from performBy child
+    let by_text = phrase
+        .as_ref()
+        .and_then(|p| p.performBy())
+        .map(|pb| {
+            if let Some(id) = pb.identifier() {
+                id.get_text().to_uppercase()
+            } else if let Some(lit) = pb.literal() {
+                lit.get_text()
+            } else if let Some(arith) = pb.arithmeticExpression() {
+                arith.get_text()
+            } else {
+                "1".to_string()
+            }
+        })
+        .unwrap_or_else(|| "1".to_string());
+
+    // Extract UNTIL condition from performUntil -> condition child
+    let condition = phrase
+        .as_ref()
+        .and_then(|p| p.performUntil())
+        .and_then(|pu| {
+            if let Some(cond_ctx) = pu.condition() {
+                Some(extract_condition(&*cond_ctx))
+            } else {
+                // Fallback: parse from text
+                let pu_text = pu.get_text().to_uppercase();
+                if let Some(until_pos) = pu_text.find("UNTIL") {
+                    let cond_text = pu_text[until_pos + 5..].trim();
+                    Some(parse_simple_condition(cond_text))
+                } else {
+                    None
+                }
             }
         })
         .unwrap_or(Condition::ConditionName(make_data_ref("TRUE")));
@@ -1496,20 +1537,11 @@ fn extract_perform_varying<'input>(
     PerformLoopType::Varying {
         test_before,
         counter: make_data_ref(&counter_name),
-        from: extract_operand_from_identifier_or_literal_ctx(&from_val),
-        by: extract_operand_from_identifier_or_literal_ctx(&by_val),
+        from: extract_operand_from_identifier_or_literal_ctx(&from_text),
+        by: extract_operand_from_identifier_or_literal_ctx(&by_text),
         until: condition,
         after: Vec::new(),
     }
-}
-
-/// Find value after a keyword in a token list (e.g., "FROM" -> next token).
-fn find_keyword_value(parts: &[&str], keyword: &str) -> Option<String> {
-    parts
-        .iter()
-        .position(|p| *p == keyword)
-        .and_then(|pos| parts.get(pos + 1))
-        .map(|s| s.to_string())
 }
 
 // ---------------------------------------------------------------------------

@@ -239,7 +239,7 @@ fn diagnostic_level(config: &RuntimeConfig) -> MoveDiagnostic {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cobol_types::{PackedDecimal, PicX};
+    use cobol_types::{Comp1Float, Comp2Float, PackedDecimal, PicX};
     use rust_decimal_macros::dec;
 
     fn default_config() -> RuntimeConfig {
@@ -341,5 +341,33 @@ mod tests {
         assert_eq!(parse_numeric_display(b"-00456"), dec!(-456));
         assert_eq!(parse_numeric_display(b"00000"), dec!(0));
         assert_eq!(parse_numeric_display(b"12345"), dec!(12345));
+    }
+
+    #[test]
+    fn move_comp1_to_packed() {
+        let src = Comp1Float::from_f32(42.5);
+        let mut dest = PackedDecimal::new(5, 2, true);
+        let config = default_config();
+        cobol_move_numeric(&src, &mut dest, &config);
+        assert_eq!(dest.to_decimal(), dec!(42.50));
+    }
+
+    #[test]
+    fn move_packed_to_comp2() {
+        let mut src = PackedDecimal::new(5, 2, true);
+        src.set_decimal(dec!(123.45));
+        let mut dest = Comp2Float::new();
+        let config = default_config();
+        cobol_move_numeric(&src, &mut dest, &config);
+        assert!((dest.as_f64() - 123.45).abs() < 0.001);
+    }
+
+    #[test]
+    fn move_comp1_to_comp2() {
+        let src = Comp1Float::from_f32(99.5);
+        let mut dest = Comp2Float::new();
+        let config = default_config();
+        cobol_move_numeric(&src, &mut dest, &config);
+        assert!((dest.as_f64() - 99.5).abs() < 0.01);
     }
 }

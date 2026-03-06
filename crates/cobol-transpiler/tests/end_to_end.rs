@@ -1197,7 +1197,7 @@ fn e2e_set_up_by() {
 
     let rust_code = transpile(cobol).expect("transpile failed");
     assert!(
-        rust_code.contains("ws.ws_ctr") && rust_code.contains("+="),
+        rust_code.contains("ws.ws_ctr") && rust_code.contains("cobol_add"),
         "missing SET UP BY: {rust_code}"
     );
 }
@@ -1219,7 +1219,7 @@ fn e2e_set_down_by() {
 
     let rust_code = transpile(cobol).expect("transpile failed");
     assert!(
-        rust_code.contains("ws.ws_ctr") && rust_code.contains("-="),
+        rust_code.contains("ws.ws_ctr") && rust_code.contains("cobol_subtract"),
         "missing SET DOWN BY: {rust_code}"
     );
 }
@@ -1368,5 +1368,1248 @@ fn e2e_plain_exit() {
     assert!(
         rust_code.contains("fn do_work_exit"),
         "missing do_work_exit paragraph: {rust_code}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Test: Level 66 RENAMES -- single field alias
+// ---------------------------------------------------------------------------
+#[test]
+fn e2e_renames_single() {
+    let cobol = concat!(
+        "IDENTIFICATION DIVISION.\n",
+        "PROGRAM-ID. REN1.\n",
+        "DATA DIVISION.\n",
+        "WORKING-STORAGE SECTION.\n",
+        "01  WS-RECORD.\n",
+        "    05  WS-NAME PIC X(20).\n",
+        "    05  WS-AGE PIC 9(3).\n",
+        "    66  WS-ALIAS RENAMES WS-NAME.\n",
+        "PROCEDURE DIVISION.\n",
+        "MAIN-PARA.\n",
+        "    DISPLAY WS-ALIAS.\n",
+        "    STOP RUN.\n",
+    );
+
+    let rust_code = transpile(cobol).expect("transpile failed");
+
+    // RENAMES alias should appear as a struct field
+    assert!(
+        rust_code.contains("ws_record_ws_alias"),
+        "missing RENAMES alias field: {rust_code}"
+    );
+    // Should contain a RENAMES comment
+    assert!(
+        rust_code.contains("RENAMES"),
+        "missing RENAMES annotation: {rust_code}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Test: Level 66 RENAMES THRU -- range alias
+// ---------------------------------------------------------------------------
+#[test]
+fn e2e_renames_thru() {
+    let cobol = concat!(
+        "IDENTIFICATION DIVISION.\n",
+        "PROGRAM-ID. REN2.\n",
+        "DATA DIVISION.\n",
+        "WORKING-STORAGE SECTION.\n",
+        "01  WS-RECORD.\n",
+        "    05  WS-YEAR PIC 9(4).\n",
+        "    05  WS-MONTH PIC 9(2).\n",
+        "    05  WS-DAY PIC 9(2).\n",
+        "    66  WS-DATE-RANGE RENAMES WS-YEAR THRU WS-DAY.\n",
+        "PROCEDURE DIVISION.\n",
+        "MAIN-PARA.\n",
+        "    DISPLAY WS-DATE-RANGE.\n",
+        "    STOP RUN.\n",
+    );
+
+    let rust_code = transpile(cobol).expect("transpile failed");
+
+    // RENAMES THRU should generate a PicX field spanning the range
+    assert!(
+        rust_code.contains("ws_record_ws_date_range"),
+        "missing RENAMES THRU field: {rust_code}"
+    );
+    assert!(
+        rust_code.contains("THRU"),
+        "missing THRU annotation: {rust_code}"
+    );
+    assert!(
+        rust_code.contains("PicX"),
+        "RENAMES THRU should produce PicX type: {rust_code}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Test: Level 66 RENAMES with numeric target
+// ---------------------------------------------------------------------------
+#[test]
+fn e2e_renames_numeric_target() {
+    let cobol = concat!(
+        "IDENTIFICATION DIVISION.\n",
+        "PROGRAM-ID. REN3.\n",
+        "DATA DIVISION.\n",
+        "WORKING-STORAGE SECTION.\n",
+        "01  WS-RECORD.\n",
+        "    05  WS-AMOUNT PIC 9(7)V99.\n",
+        "    66  WS-AMT RENAMES WS-AMOUNT.\n",
+        "PROCEDURE DIVISION.\n",
+        "MAIN-PARA.\n",
+        "    DISPLAY WS-AMT.\n",
+        "    STOP RUN.\n",
+    );
+
+    let rust_code = transpile(cobol).expect("transpile failed");
+
+    // RENAMES of numeric should copy the numeric type (PackedDecimal)
+    assert!(
+        rust_code.contains("ws_record_ws_amt"),
+        "missing RENAMES numeric alias field: {rust_code}"
+    );
+    assert!(
+        rust_code.contains("RENAMES WS-AMOUNT"),
+        "missing RENAMES comment: {rust_code}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Test: Multiple RENAMES in one record
+// ---------------------------------------------------------------------------
+#[test]
+fn e2e_renames_multiple() {
+    let cobol = concat!(
+        "IDENTIFICATION DIVISION.\n",
+        "PROGRAM-ID. REN4.\n",
+        "DATA DIVISION.\n",
+        "WORKING-STORAGE SECTION.\n",
+        "01  WS-EMPLOYEE.\n",
+        "    05  WS-EMP-NAME PIC X(30).\n",
+        "    05  WS-EMP-ID PIC 9(5).\n",
+        "    05  WS-EMP-DEPT PIC X(10).\n",
+        "    66  WS-NAME-ALIAS RENAMES WS-EMP-NAME.\n",
+        "    66  WS-ID-ALIAS RENAMES WS-EMP-ID.\n",
+        "PROCEDURE DIVISION.\n",
+        "MAIN-PARA.\n",
+        "    DISPLAY WS-NAME-ALIAS.\n",
+        "    DISPLAY WS-ID-ALIAS.\n",
+        "    STOP RUN.\n",
+    );
+
+    let rust_code = transpile(cobol).expect("transpile failed");
+
+    assert!(
+        rust_code.contains("ws_employee_ws_name_alias"),
+        "missing first RENAMES alias: {rust_code}"
+    );
+    assert!(
+        rust_code.contains("ws_employee_ws_id_alias"),
+        "missing second RENAMES alias: {rust_code}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Test: No RENAMES -- record without level 66 should be unaffected
+// ---------------------------------------------------------------------------
+#[test]
+fn e2e_renames_none_unchanged() {
+    let cobol = concat!(
+        "IDENTIFICATION DIVISION.\n",
+        "PROGRAM-ID. REN5.\n",
+        "DATA DIVISION.\n",
+        "WORKING-STORAGE SECTION.\n",
+        "01  WS-RECORD.\n",
+        "    05  WS-NAME PIC X(20).\n",
+        "    05  WS-AGE PIC 9(3).\n",
+        "PROCEDURE DIVISION.\n",
+        "MAIN-PARA.\n",
+        "    DISPLAY WS-NAME.\n",
+        "    STOP RUN.\n",
+    );
+
+    let rust_code = transpile(cobol).expect("transpile failed");
+
+    // Should not contain any RENAMES artifacts
+    assert!(
+        !rust_code.contains("RENAMES"),
+        "no RENAMES expected: {rust_code}"
+    );
+    assert!(
+        rust_code.contains("ws_record_ws_name"),
+        "normal fields should still work: {rust_code}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Test: AlphanumericEdited -- DISPLAY of edited field
+// ---------------------------------------------------------------------------
+#[test]
+fn e2e_alpha_edited_display() {
+    let cobol = concat!(
+        "IDENTIFICATION DIVISION.\n",
+        "PROGRAM-ID. AE1.\n",
+        "DATA DIVISION.\n",
+        "WORKING-STORAGE SECTION.\n",
+        "01  WS-RECORD.\n",
+        "    05  WS-DATE-FMT PIC X(2)/X(2)/X(4).\n",
+        "PROCEDURE DIVISION.\n",
+        "MAIN-PARA.\n",
+        "    DISPLAY WS-DATE-FMT.\n",
+        "    STOP RUN.\n",
+    );
+
+    let rust_code = transpile(cobol).expect("transpile failed");
+
+    // Should generate AlphanumericEdited type
+    assert!(
+        rust_code.contains("AlphanumericEdited"),
+        "should use AlphanumericEdited type: {rust_code}"
+    );
+    assert!(
+        rust_code.contains("AlphaEditSymbol"),
+        "should reference AlphaEditSymbol: {rust_code}"
+    );
+    assert!(
+        rust_code.contains("ws_record_ws_date_fmt"),
+        "should have field name: {rust_code}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Test: AlphanumericEdited -- MOVE alphanumeric TO edited
+// ---------------------------------------------------------------------------
+#[test]
+fn e2e_alpha_edited_move() {
+    let cobol = concat!(
+        "IDENTIFICATION DIVISION.\n",
+        "PROGRAM-ID. AE2.\n",
+        "DATA DIVISION.\n",
+        "WORKING-STORAGE SECTION.\n",
+        "01  WS-RECORD.\n",
+        "    05  WS-RAW PIC X(6).\n",
+        "    05  WS-EDITED PIC X(3)BX(3).\n",
+        "PROCEDURE DIVISION.\n",
+        "MAIN-PARA.\n",
+        "    MOVE WS-RAW TO WS-EDITED.\n",
+        "    STOP RUN.\n",
+    );
+
+    let rust_code = transpile(cobol).expect("transpile failed");
+
+    // MOVE should generate cobol_move
+    assert!(
+        rust_code.contains("cobol_move"),
+        "should generate MOVE call: {rust_code}"
+    );
+    // Edited field should be AlphanumericEdited
+    assert!(
+        rust_code.contains("AlphanumericEdited"),
+        "should use AlphanumericEdited: {rust_code}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Test: AlphanumericEdited -- INITIALIZE edited field
+// ---------------------------------------------------------------------------
+#[test]
+fn e2e_alpha_edited_initialize() {
+    let cobol = concat!(
+        "IDENTIFICATION DIVISION.\n",
+        "PROGRAM-ID. AE3.\n",
+        "DATA DIVISION.\n",
+        "WORKING-STORAGE SECTION.\n",
+        "01  WS-RECORD.\n",
+        "    05  WS-FMT PIC X(3)0X(3).\n",
+        "PROCEDURE DIVISION.\n",
+        "MAIN-PARA.\n",
+        "    INITIALIZE WS-FMT.\n",
+        "    STOP RUN.\n",
+    );
+
+    let rust_code = transpile(cobol).expect("transpile failed");
+
+    assert!(
+        rust_code.contains("AlphanumericEdited"),
+        "should use AlphanumericEdited: {rust_code}"
+    );
+    assert!(
+        rust_code.contains("initialize"),
+        "should have initialize call: {rust_code}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// COMP-1/COMP-2 Float Tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn e2e_comp1_display() {
+    let cobol = concat!(
+        "IDENTIFICATION DIVISION.\n",
+        "PROGRAM-ID. FLT1.\n",
+        "DATA DIVISION.\n",
+        "WORKING-STORAGE SECTION.\n",
+        "01  WS-RATE COMP-1 VALUE 3.14.\n",
+        "PROCEDURE DIVISION.\n",
+        "MAIN-PARA.\n",
+        "    DISPLAY WS-RATE.\n",
+        "    STOP RUN.\n",
+    );
+
+    let rust_code = transpile(cobol).expect("transpile failed");
+
+    assert!(
+        rust_code.contains("Comp1Float"),
+        "should use Comp1Float type: {rust_code}"
+    );
+    assert!(
+        rust_code.contains("Comp1Float::from_f32(3.14f32)"),
+        "should init with from_f32: {rust_code}"
+    );
+    assert!(
+        rust_code.contains("display_bytes"),
+        "should call display_bytes for DISPLAY: {rust_code}"
+    );
+}
+
+#[test]
+fn e2e_comp2_arithmetic() {
+    let cobol = concat!(
+        "IDENTIFICATION DIVISION.\n",
+        "PROGRAM-ID. FLT2.\n",
+        "DATA DIVISION.\n",
+        "WORKING-STORAGE SECTION.\n",
+        "01  WS-A COMP-2 VALUE 100.5.\n",
+        "01  WS-B COMP-2 VALUE 50.25.\n",
+        "01  WS-RESULT COMP-2.\n",
+        "PROCEDURE DIVISION.\n",
+        "MAIN-PARA.\n",
+        "    ADD WS-A TO WS-B.\n",
+        "    STOP RUN.\n",
+    );
+
+    let rust_code = transpile(cobol).expect("transpile failed");
+
+    assert!(
+        rust_code.contains("Comp2Float"),
+        "should use Comp2Float type: {rust_code}"
+    );
+    assert!(
+        rust_code.contains("Comp2Float::from_f64(100.5f64)"),
+        "should init WS-A with from_f64: {rust_code}"
+    );
+    assert!(
+        rust_code.contains("cobol_add"),
+        "should generate cobol_add call: {rust_code}"
+    );
+}
+
+#[test]
+fn e2e_comp1_move() {
+    let cobol = concat!(
+        "IDENTIFICATION DIVISION.\n",
+        "PROGRAM-ID. FLT3.\n",
+        "DATA DIVISION.\n",
+        "WORKING-STORAGE SECTION.\n",
+        "01  WS-FLOAT COMP-1 VALUE 42.5.\n",
+        "01  WS-NUM PIC 9(5)V99 COMP-3.\n",
+        "PROCEDURE DIVISION.\n",
+        "MAIN-PARA.\n",
+        "    MOVE WS-FLOAT TO WS-NUM.\n",
+        "    STOP RUN.\n",
+    );
+
+    let rust_code = transpile(cobol).expect("transpile failed");
+
+    assert!(
+        rust_code.contains("Comp1Float"),
+        "should use Comp1Float for COMP-1: {rust_code}"
+    );
+    assert!(
+        rust_code.contains("cobol_move"),
+        "should generate cobol_move call: {rust_code}"
+    );
+}
+
+// ===========================================================================
+// Session 37: Real-World COBOL Test Suite
+// ===========================================================================
+
+// ---------------------------------------------------------------------------
+// Program 1: PAYROLL -- batch payroll calculation
+// Features: Group records, 88-level conditions, PERFORM VARYING, COMPUTE,
+//           REDEFINES
+// ---------------------------------------------------------------------------
+
+#[test]
+fn e2e_payroll_structure() {
+    let cobol = concat!(
+        "IDENTIFICATION DIVISION.\n",
+        "PROGRAM-ID. PAYROLL.\n",
+        "DATA DIVISION.\n",
+        "WORKING-STORAGE SECTION.\n",
+        "01  WS-EMPLOYEE.\n",
+        "    05  WS-EMP-ID       PIC 9(5) VALUE 0.\n",
+        "    05  WS-EMP-HOURS    PIC 9(3) VALUE 0.\n",
+        "    05  WS-EMP-RATE     PIC 9(3)V99 VALUE 0.\n",
+        "    05  WS-EMP-STATUS   PIC X VALUE 'A'.\n",
+        "        88  IS-ACTIVE    VALUE 'A'.\n",
+        "        88  IS-INACTIVE  VALUE 'I'.\n",
+        "    05  WS-EMP-PAY      PIC 9(5)V99 VALUE 0.\n",
+        "01  WS-RAW-DATA.\n",
+        "    05  WS-RAW-BYTES    PIC X(20).\n",
+        "    05  WS-RAW-OVERLAY  REDEFINES WS-RAW-BYTES PIC 9(10).\n",
+        "01  WS-COUNTER          PIC 9(3) VALUE 0.\n",
+        "01  WS-MAX-EMP          PIC 9(3) VALUE 5.\n",
+        "PROCEDURE DIVISION.\n",
+        "MAIN-PARA.\n",
+        "    PERFORM CALC-PARA VARYING WS-COUNTER\n",
+        "        FROM 1 BY 1 UNTIL WS-COUNTER > WS-MAX-EMP.\n",
+        "    STOP RUN.\n",
+        "CALC-PARA.\n",
+        "    IF IS-ACTIVE\n",
+        "        COMPUTE WS-EMP-PAY = WS-EMP-HOURS * WS-EMP-RATE\n",
+        "    END-IF.\n",
+        "    DISPLAY WS-EMP-PAY.\n",
+    );
+
+    let rust_code = transpile(cobol).expect("transpile failed");
+
+    // WorkingStorage with child fields
+    assert!(
+        rust_code.contains("pub struct WorkingStorage"),
+        "missing WorkingStorage struct: {rust_code}"
+    );
+    assert!(
+        rust_code.contains("ws_employee_ws_emp_id"),
+        "missing WS-EMP-ID field: {rust_code}"
+    );
+    assert!(
+        rust_code.contains("ws_employee_ws_emp_pay"),
+        "missing WS-EMP-PAY field: {rust_code}"
+    );
+
+    // RedefinesGroup
+    assert!(
+        rust_code.contains("RedefinesGroup"),
+        "missing RedefinesGroup for REDEFINES: {rust_code}"
+    );
+
+    // Dispatch loop with both paragraphs
+    assert!(
+        rust_code.contains("fn main_para("),
+        "missing main_para function: {rust_code}"
+    );
+    assert!(
+        rust_code.contains("fn calc_para("),
+        "missing calc_para function: {rust_code}"
+    );
+
+    // Balanced braces
+    let open = rust_code.chars().filter(|c| *c == '{').count();
+    let close = rust_code.chars().filter(|c| *c == '}').count();
+    assert_eq!(
+        open, close,
+        "unbalanced braces: {open} open vs {close} close\n{rust_code}"
+    );
+}
+
+#[test]
+fn e2e_payroll_features() {
+    let cobol = concat!(
+        "IDENTIFICATION DIVISION.\n",
+        "PROGRAM-ID. PAYROLL.\n",
+        "DATA DIVISION.\n",
+        "WORKING-STORAGE SECTION.\n",
+        "01  WS-EMPLOYEE.\n",
+        "    05  WS-EMP-ID       PIC 9(5) VALUE 0.\n",
+        "    05  WS-EMP-HOURS    PIC 9(3) VALUE 0.\n",
+        "    05  WS-EMP-RATE     PIC 9(3)V99 VALUE 0.\n",
+        "    05  WS-EMP-STATUS   PIC X VALUE 'A'.\n",
+        "        88  IS-ACTIVE    VALUE 'A'.\n",
+        "        88  IS-INACTIVE  VALUE 'I'.\n",
+        "    05  WS-EMP-PAY      PIC 9(5)V99 VALUE 0.\n",
+        "01  WS-RAW-DATA.\n",
+        "    05  WS-RAW-BYTES    PIC X(20).\n",
+        "    05  WS-RAW-OVERLAY  REDEFINES WS-RAW-BYTES PIC 9(10).\n",
+        "01  WS-COUNTER          PIC 9(3) VALUE 0.\n",
+        "01  WS-MAX-EMP          PIC 9(3) VALUE 5.\n",
+        "PROCEDURE DIVISION.\n",
+        "MAIN-PARA.\n",
+        "    PERFORM CALC-PARA VARYING WS-COUNTER\n",
+        "        FROM 1 BY 1 UNTIL WS-COUNTER > WS-MAX-EMP.\n",
+        "    STOP RUN.\n",
+        "CALC-PARA.\n",
+        "    IF IS-ACTIVE\n",
+        "        COMPUTE WS-EMP-PAY = WS-EMP-HOURS * WS-EMP-RATE\n",
+        "    END-IF.\n",
+        "    DISPLAY WS-EMP-PAY.\n",
+    );
+
+    let rust_code = transpile(cobol).expect("transpile failed");
+
+    // COMPUTE
+    assert!(
+        rust_code.contains("cobol_compute"),
+        "missing cobol_compute call: {rust_code}"
+    );
+
+    // PERFORM VARYING loop (while !(...))
+    assert!(
+        rust_code.contains("while !("),
+        "missing PERFORM VARYING while loop: {rust_code}"
+    );
+
+    // 88-level condition inline comparison for IS-ACTIVE
+    assert!(
+        rust_code.contains("ws_emp_status"),
+        "missing 88-level parent field reference: {rust_code}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Program 2: REPORT -- string manipulation
+// Features: STRING with DELIMITED BY, UNSTRING with delimiter,
+//           INSPECT TALLYING, multiple paragraphs
+// ---------------------------------------------------------------------------
+
+#[test]
+fn e2e_report_structure() {
+    let cobol = concat!(
+        "IDENTIFICATION DIVISION.\n",
+        "PROGRAM-ID. REPORT.\n",
+        "DATA DIVISION.\n",
+        "WORKING-STORAGE SECTION.\n",
+        "01  WS-FIRST-NAME      PIC X(15) VALUE 'JOHN'.\n",
+        "01  WS-LAST-NAME       PIC X(15) VALUE 'SMITH'.\n",
+        "01  WS-FULL-NAME       PIC X(35).\n",
+        "01  WS-INPUT-LINE      PIC X(40) VALUE 'PART1,PART2,PART3'.\n",
+        "01  WS-FIELD1          PIC X(10).\n",
+        "01  WS-FIELD2          PIC X(10).\n",
+        "01  WS-FIELD3          PIC X(10).\n",
+        "01  WS-SPACE-COUNT     PIC 9(3) VALUE 0.\n",
+        "01  WS-PTR             PIC 9(3) VALUE 1.\n",
+        "PROCEDURE DIVISION.\n",
+        "MAIN-PARA.\n",
+        "    PERFORM FORMAT-PARA.\n",
+        "    PERFORM SPLIT-PARA.\n",
+        "    PERFORM COUNT-PARA.\n",
+        "    DISPLAY WS-FULL-NAME.\n",
+        "    STOP RUN.\n",
+        "FORMAT-PARA.\n",
+        "    STRING WS-FIRST-NAME DELIMITED BY ' '\n",
+        "           ' ' DELIMITED BY SIZE\n",
+        "           WS-LAST-NAME DELIMITED BY ' '\n",
+        "        INTO WS-FULL-NAME\n",
+        "        WITH POINTER WS-PTR.\n",
+        "SPLIT-PARA.\n",
+        "    UNSTRING WS-INPUT-LINE DELIMITED BY ','\n",
+        "        INTO WS-FIELD1 WS-FIELD2 WS-FIELD3.\n",
+        "COUNT-PARA.\n",
+        "    INSPECT WS-FULL-NAME\n",
+        "        TALLYING WS-SPACE-COUNT FOR ALL ' '.\n",
+    );
+
+    let rust_code = transpile(cobol).expect("transpile failed");
+
+    // All paragraph functions present
+    assert!(
+        rust_code.contains("fn main_para("),
+        "missing main_para: {rust_code}"
+    );
+    assert!(
+        rust_code.contains("fn format_para("),
+        "missing format_para: {rust_code}"
+    );
+    assert!(
+        rust_code.contains("fn split_para("),
+        "missing split_para: {rust_code}"
+    );
+    assert!(
+        rust_code.contains("fn count_para("),
+        "missing count_para: {rust_code}"
+    );
+
+    // Balanced braces
+    let open = rust_code.chars().filter(|c| *c == '{').count();
+    let close = rust_code.chars().filter(|c| *c == '}').count();
+    assert_eq!(
+        open, close,
+        "unbalanced braces: {open} open vs {close} close\n{rust_code}"
+    );
+}
+
+#[test]
+fn e2e_report_string_ops() {
+    let cobol = concat!(
+        "IDENTIFICATION DIVISION.\n",
+        "PROGRAM-ID. REPORT.\n",
+        "DATA DIVISION.\n",
+        "WORKING-STORAGE SECTION.\n",
+        "01  WS-FIRST-NAME      PIC X(15) VALUE 'JOHN'.\n",
+        "01  WS-LAST-NAME       PIC X(15) VALUE 'SMITH'.\n",
+        "01  WS-FULL-NAME       PIC X(35).\n",
+        "01  WS-INPUT-LINE      PIC X(40) VALUE 'PART1,PART2,PART3'.\n",
+        "01  WS-FIELD1          PIC X(10).\n",
+        "01  WS-FIELD2          PIC X(10).\n",
+        "01  WS-FIELD3          PIC X(10).\n",
+        "01  WS-SPACE-COUNT     PIC 9(3) VALUE 0.\n",
+        "01  WS-PTR             PIC 9(3) VALUE 1.\n",
+        "PROCEDURE DIVISION.\n",
+        "MAIN-PARA.\n",
+        "    PERFORM FORMAT-PARA.\n",
+        "    PERFORM SPLIT-PARA.\n",
+        "    PERFORM COUNT-PARA.\n",
+        "    DISPLAY WS-FULL-NAME.\n",
+        "    STOP RUN.\n",
+        "FORMAT-PARA.\n",
+        "    STRING WS-FIRST-NAME DELIMITED BY ' '\n",
+        "           ' ' DELIMITED BY SIZE\n",
+        "           WS-LAST-NAME DELIMITED BY ' '\n",
+        "        INTO WS-FULL-NAME\n",
+        "        WITH POINTER WS-PTR.\n",
+        "SPLIT-PARA.\n",
+        "    UNSTRING WS-INPUT-LINE DELIMITED BY ','\n",
+        "        INTO WS-FIELD1 WS-FIELD2 WS-FIELD3.\n",
+        "COUNT-PARA.\n",
+        "    INSPECT WS-FULL-NAME\n",
+        "        TALLYING WS-SPACE-COUNT FOR ALL ' '.\n",
+    );
+
+    let rust_code = transpile(cobol).expect("transpile failed");
+
+    // STRING verb
+    assert!(
+        rust_code.contains("cobol_string"),
+        "missing cobol_string call: {rust_code}"
+    );
+
+    // UNSTRING verb
+    assert!(
+        rust_code.contains("cobol_unstring") || rust_code.contains("cobol_unstring_simple"),
+        "missing cobol_unstring call: {rust_code}"
+    );
+
+    // INSPECT TALLYING verb
+    assert!(
+        rust_code.contains("cobol_inspect_tallying"),
+        "missing cobol_inspect_tallying call: {rust_code}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Program 3: SEARCH -- table processing
+// Features: OCCURS DEPENDING ON, PERFORM UNTIL, SET UP BY, SET TO,
+//           EVALUATE TRUE with 88-level conditions
+// ---------------------------------------------------------------------------
+
+#[test]
+fn e2e_search_structure() {
+    let cobol = concat!(
+        "IDENTIFICATION DIVISION.\n",
+        "PROGRAM-ID. SEARCH.\n",
+        "DATA DIVISION.\n",
+        "WORKING-STORAGE SECTION.\n",
+        "01  WS-TABLE-SIZE       PIC 9(3) VALUE 10.\n",
+        "01  WS-TABLE.\n",
+        "    05  WS-ENTRY OCCURS 100 TIMES\n",
+        "        DEPENDING ON WS-TABLE-SIZE PIC 9(5).\n",
+        "01  WS-INDEX            PIC 9(3) VALUE 1.\n",
+        "01  WS-FOUND            PIC 9 VALUE 0.\n",
+        "    88  IS-FOUND        VALUE 1.\n",
+        "    88  NOT-FOUND       VALUE 0.\n",
+        "01  WS-TARGET           PIC 9(5) VALUE 500.\n",
+        "01  WS-RESULT           PIC X(10).\n",
+        "PROCEDURE DIVISION.\n",
+        "MAIN-PARA.\n",
+        "    PERFORM SEARCH-PARA.\n",
+        "    EVALUATE TRUE\n",
+        "        WHEN IS-FOUND\n",
+        "            MOVE 'YES' TO WS-RESULT\n",
+        "        WHEN NOT-FOUND\n",
+        "            MOVE 'NO' TO WS-RESULT\n",
+        "    END-EVALUATE.\n",
+        "    DISPLAY WS-RESULT.\n",
+        "    STOP RUN.\n",
+        "SEARCH-PARA.\n",
+        "    SET WS-INDEX TO 1.\n",
+        "    PERFORM UNTIL WS-INDEX > WS-TABLE-SIZE\n",
+        "        IF WS-TARGET = 500\n",
+        "            SET IS-FOUND TO TRUE\n",
+        "        END-IF\n",
+        "        SET WS-INDEX UP BY 1\n",
+        "    END-PERFORM.\n",
+    );
+
+    let rust_code = transpile(cobol).expect("transpile failed");
+
+    // CobolVarArray for OCCURS DEPENDING ON
+    assert!(
+        rust_code.contains("CobolVarArray"),
+        "missing CobolVarArray for OCCURS DEPENDING: {rust_code}"
+    );
+
+    // Both paragraphs present
+    assert!(
+        rust_code.contains("fn main_para("),
+        "missing main_para: {rust_code}"
+    );
+    assert!(
+        rust_code.contains("fn search_para("),
+        "missing search_para: {rust_code}"
+    );
+
+    // Balanced braces
+    let open = rust_code.chars().filter(|c| *c == '{').count();
+    let close = rust_code.chars().filter(|c| *c == '}').count();
+    assert_eq!(
+        open, close,
+        "unbalanced braces: {open} open vs {close} close\n{rust_code}"
+    );
+}
+
+#[test]
+fn e2e_search_features() {
+    let cobol = concat!(
+        "IDENTIFICATION DIVISION.\n",
+        "PROGRAM-ID. SEARCH.\n",
+        "DATA DIVISION.\n",
+        "WORKING-STORAGE SECTION.\n",
+        "01  WS-TABLE-SIZE       PIC 9(3) VALUE 10.\n",
+        "01  WS-TABLE.\n",
+        "    05  WS-ENTRY OCCURS 100 TIMES\n",
+        "        DEPENDING ON WS-TABLE-SIZE PIC 9(5).\n",
+        "01  WS-INDEX            PIC 9(3) VALUE 1.\n",
+        "01  WS-FOUND            PIC 9 VALUE 0.\n",
+        "    88  IS-FOUND        VALUE 1.\n",
+        "    88  NOT-FOUND       VALUE 0.\n",
+        "01  WS-TARGET           PIC 9(5) VALUE 500.\n",
+        "01  WS-RESULT           PIC X(10).\n",
+        "PROCEDURE DIVISION.\n",
+        "MAIN-PARA.\n",
+        "    PERFORM SEARCH-PARA.\n",
+        "    EVALUATE TRUE\n",
+        "        WHEN IS-FOUND\n",
+        "            MOVE 'YES' TO WS-RESULT\n",
+        "        WHEN NOT-FOUND\n",
+        "            MOVE 'NO' TO WS-RESULT\n",
+        "    END-EVALUATE.\n",
+        "    DISPLAY WS-RESULT.\n",
+        "    STOP RUN.\n",
+        "SEARCH-PARA.\n",
+        "    SET WS-INDEX TO 1.\n",
+        "    PERFORM UNTIL WS-INDEX > WS-TABLE-SIZE\n",
+        "        IF WS-TARGET = 500\n",
+        "            SET IS-FOUND TO TRUE\n",
+        "        END-IF\n",
+        "        SET WS-INDEX UP BY 1\n",
+        "    END-PERFORM.\n",
+    );
+
+    let rust_code = transpile(cobol).expect("transpile failed");
+
+    // PERFORM UNTIL loop
+    assert!(
+        rust_code.contains("while !("),
+        "missing PERFORM UNTIL while loop: {rust_code}"
+    );
+
+    // SET UP BY -> cobol_add
+    assert!(
+        rust_code.contains("cobol_add"),
+        "missing SET UP BY (cobol_add): {rust_code}"
+    );
+
+    // EVALUATE TRUE pattern with 88-level condition references
+    assert!(
+        rust_code.contains("ws.ws_found"),
+        "missing ws_found reference in EVALUATE TRUE: {rust_code}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Program 4: SUBPROG -- inter-program communication
+// Features: CALL with mixed passing modes (BY REF/CONTENT/VALUE),
+//           ON EXCEPTION, RETURNING, CANCEL
+// ---------------------------------------------------------------------------
+
+#[test]
+fn e2e_subprog_structure() {
+    let cobol = concat!(
+        "IDENTIFICATION DIVISION.\n",
+        "PROGRAM-ID. SUBPROG.\n",
+        "DATA DIVISION.\n",
+        "WORKING-STORAGE SECTION.\n",
+        "01  WS-PARAM-A          PIC X(10) VALUE 'INPUT'.\n",
+        "01  WS-PARAM-B          PIC 9(5) VALUE 100.\n",
+        "01  WS-RESULT           PIC 9(5) VALUE 0.\n",
+        "01  WS-RC               PIC 9(3) VALUE 0.\n",
+        "PROCEDURE DIVISION.\n",
+        "MAIN-PARA.\n",
+        "    CALL 'PROCESSOR' USING\n",
+        "        BY REFERENCE WS-PARAM-A\n",
+        "        BY CONTENT WS-PARAM-B\n",
+        "        BY VALUE WS-PARAM-B\n",
+        "        ON EXCEPTION\n",
+        "            DISPLAY 'CALL FAILED'\n",
+        "        NOT ON EXCEPTION\n",
+        "            DISPLAY 'CALL OK'\n",
+        "    END-CALL.\n",
+        "    CALL 'UTILITY' USING WS-PARAM-A\n",
+        "        RETURNING WS-RC.\n",
+        "    CANCEL 'PROCESSOR'.\n",
+        "    STOP RUN.\n",
+    );
+
+    let rust_code = transpile(cobol).expect("transpile failed");
+
+    // Two cobol_call invocations
+    let call_count = rust_code.matches("cobol_call").count();
+    assert!(
+        call_count >= 2,
+        "expected at least 2 cobol_call invocations, got {call_count}: {rust_code}"
+    );
+
+    // cobol_cancel
+    assert!(
+        rust_code.contains("cobol_cancel"),
+        "missing cobol_cancel: {rust_code}"
+    );
+}
+
+#[test]
+fn e2e_subprog_features() {
+    let cobol = concat!(
+        "IDENTIFICATION DIVISION.\n",
+        "PROGRAM-ID. SUBPROG.\n",
+        "DATA DIVISION.\n",
+        "WORKING-STORAGE SECTION.\n",
+        "01  WS-PARAM-A          PIC X(10) VALUE 'INPUT'.\n",
+        "01  WS-PARAM-B          PIC 9(5) VALUE 100.\n",
+        "01  WS-RESULT           PIC 9(5) VALUE 0.\n",
+        "01  WS-RC               PIC 9(3) VALUE 0.\n",
+        "PROCEDURE DIVISION.\n",
+        "MAIN-PARA.\n",
+        "    CALL 'PROCESSOR' USING\n",
+        "        BY REFERENCE WS-PARAM-A\n",
+        "        BY CONTENT WS-PARAM-B\n",
+        "        BY VALUE WS-PARAM-B\n",
+        "        ON EXCEPTION\n",
+        "            DISPLAY 'CALL FAILED'\n",
+        "        NOT ON EXCEPTION\n",
+        "            DISPLAY 'CALL OK'\n",
+        "    END-CALL.\n",
+        "    CALL 'UTILITY' USING WS-PARAM-A\n",
+        "        RETURNING WS-RC.\n",
+        "    CANCEL 'PROCESSOR'.\n",
+        "    STOP RUN.\n",
+    );
+
+    let rust_code = transpile(cobol).expect("transpile failed");
+
+    // Mixed passing modes
+    assert!(
+        rust_code.contains("call_param_by_ref"),
+        "missing call_param_by_ref: {rust_code}"
+    );
+    assert!(
+        rust_code.contains("call_param_by_content"),
+        "missing call_param_by_content: {rust_code}"
+    );
+    assert!(
+        rust_code.contains("call_param_by_value"),
+        "missing call_param_by_value: {rust_code}"
+    );
+
+    // Ok/Err exception pattern
+    assert!(
+        rust_code.contains("Ok(rc)") || rust_code.contains("Ok(_"),
+        "missing Ok arm for NOT ON EXCEPTION: {rust_code}"
+    );
+    assert!(
+        rust_code.contains("Err(_e)") || rust_code.contains("Err(_"),
+        "missing Err arm for ON EXCEPTION: {rust_code}"
+    );
+
+    // CANCEL
+    assert!(
+        rust_code.contains("cobol_cancel"),
+        "missing cobol_cancel: {rust_code}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Program 5: CONTROL -- control flow stress test
+// Features: GO TO DEPENDING ON, PERFORM THRU, EXIT PARAGRAPH, forward GO TO,
+//           paragraph fall-through
+// ---------------------------------------------------------------------------
+
+#[test]
+fn e2e_control_structure() {
+    let cobol = concat!(
+        "IDENTIFICATION DIVISION.\n",
+        "PROGRAM-ID. CONTROL.\n",
+        "DATA DIVISION.\n",
+        "WORKING-STORAGE SECTION.\n",
+        "01  WS-BRANCH           PIC 9 VALUE 2.\n",
+        "01  WS-FLAG             PIC 9 VALUE 0.\n",
+        "01  WS-COUNTER          PIC 9(3) VALUE 0.\n",
+        "PROCEDURE DIVISION.\n",
+        "MAIN-PARA.\n",
+        "    PERFORM INIT-PARA THRU INIT-EXIT.\n",
+        "    GO TO BRANCH-PARA SKIP-PARA DONE-PARA\n",
+        "        DEPENDING ON WS-BRANCH.\n",
+        "    DISPLAY 'FALLTHROUGH'.\n",
+        "BRANCH-PARA.\n",
+        "    IF WS-FLAG = 1\n",
+        "        GO TO DONE-PARA\n",
+        "    END-IF.\n",
+        "    DISPLAY 'BRANCH'.\n",
+        "SKIP-PARA.\n",
+        "    DISPLAY 'SKIP'.\n",
+        "DONE-PARA.\n",
+        "    DISPLAY 'DONE'.\n",
+        "    STOP RUN.\n",
+        "INIT-PARA.\n",
+        "    ADD 1 TO WS-COUNTER.\n",
+        "    IF WS-COUNTER > 5\n",
+        "        EXIT PARAGRAPH\n",
+        "    END-IF.\n",
+        "    DISPLAY 'INIT'.\n",
+        "INIT-EXIT.\n",
+        "    EXIT.\n",
+    );
+
+    let rust_code = transpile(cobol).expect("transpile failed");
+
+    // All 6 paragraphs in dispatch loop
+    assert!(
+        rust_code.contains("fn main_para("),
+        "missing main_para: {rust_code}"
+    );
+    assert!(
+        rust_code.contains("fn branch_para("),
+        "missing branch_para: {rust_code}"
+    );
+    assert!(
+        rust_code.contains("fn skip_para("),
+        "missing skip_para: {rust_code}"
+    );
+    assert!(
+        rust_code.contains("fn done_para("),
+        "missing done_para: {rust_code}"
+    );
+    assert!(
+        rust_code.contains("fn init_para("),
+        "missing init_para: {rust_code}"
+    );
+    assert!(
+        rust_code.contains("fn init_exit("),
+        "missing init_exit: {rust_code}"
+    );
+
+    // Balanced braces
+    let open = rust_code.chars().filter(|c| *c == '{').count();
+    let close = rust_code.chars().filter(|c| *c == '}').count();
+    assert_eq!(
+        open, close,
+        "unbalanced braces: {open} open vs {close} close\n{rust_code}"
+    );
+}
+
+#[test]
+fn e2e_control_features() {
+    let cobol = concat!(
+        "IDENTIFICATION DIVISION.\n",
+        "PROGRAM-ID. CONTROL.\n",
+        "DATA DIVISION.\n",
+        "WORKING-STORAGE SECTION.\n",
+        "01  WS-BRANCH           PIC 9 VALUE 2.\n",
+        "01  WS-FLAG             PIC 9 VALUE 0.\n",
+        "01  WS-COUNTER          PIC 9(3) VALUE 0.\n",
+        "PROCEDURE DIVISION.\n",
+        "MAIN-PARA.\n",
+        "    PERFORM INIT-PARA THRU INIT-EXIT.\n",
+        "    GO TO BRANCH-PARA SKIP-PARA DONE-PARA\n",
+        "        DEPENDING ON WS-BRANCH.\n",
+        "    DISPLAY 'FALLTHROUGH'.\n",
+        "BRANCH-PARA.\n",
+        "    IF WS-FLAG = 1\n",
+        "        GO TO DONE-PARA\n",
+        "    END-IF.\n",
+        "    DISPLAY 'BRANCH'.\n",
+        "SKIP-PARA.\n",
+        "    DISPLAY 'SKIP'.\n",
+        "DONE-PARA.\n",
+        "    DISPLAY 'DONE'.\n",
+        "    STOP RUN.\n",
+        "INIT-PARA.\n",
+        "    ADD 1 TO WS-COUNTER.\n",
+        "    IF WS-COUNTER > 5\n",
+        "        EXIT PARAGRAPH\n",
+        "    END-IF.\n",
+        "    DISPLAY 'INIT'.\n",
+        "INIT-EXIT.\n",
+        "    EXIT.\n",
+    );
+
+    let rust_code = transpile(cobol).expect("transpile failed");
+
+    // GO TO DEPENDING ON (match _goto_idx)
+    assert!(
+        rust_code.contains("match _goto_idx"),
+        "missing match _goto_idx for GO TO DEPENDING: {rust_code}"
+    );
+
+    // PERFORM THRU (_perf_pc)
+    assert!(
+        rust_code.contains("_perf_pc"),
+        "missing _perf_pc for PERFORM THRU: {rust_code}"
+    );
+
+    // EXIT PARAGRAPH (return;)
+    assert!(
+        rust_code.contains("return;"),
+        "missing return for EXIT PARAGRAPH: {rust_code}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Program 6: COPYBOOK -- COPY REPLACING integration
+// Features: COPY with pseudo-text REPLACING, copybook-defined fields used in
+//           MOVE/ADD/DISPLAY
+// ---------------------------------------------------------------------------
+
+#[test]
+fn e2e_copybook_structure() {
+    use cobol_transpiler::transpile::{transpile_with_config, TranspileConfig};
+    use std::collections::HashMap;
+    use std::path::PathBuf;
+
+    let temp_dir = tempfile::tempdir().expect("failed to create temp dir");
+    let copybook_path = temp_dir.path().join("COMMON.cpy");
+    std::fs::write(
+        &copybook_path,
+        concat!(
+            "01  :PREFIX:-RECORD.\n",
+            "    05  :PREFIX:-NAME   PIC X(20).\n",
+            "    05  :PREFIX:-AMOUNT PIC 9(5)V99.\n",
+            "    05  :PREFIX:-FLAG   PIC X VALUE 'N'.\n",
+        ),
+    )
+    .expect("failed to write copybook");
+
+    let cobol = concat!(
+        "IDENTIFICATION DIVISION.\n",
+        "PROGRAM-ID. COPYTEST.\n",
+        "DATA DIVISION.\n",
+        "WORKING-STORAGE SECTION.\n",
+        "COPY COMMON REPLACING ==:PREFIX:== BY ==WS==.\n",
+        "01  WS-TOTAL            PIC 9(7)V99 VALUE 0.\n",
+        "PROCEDURE DIVISION.\n",
+        "MAIN-PARA.\n",
+        "    MOVE 'SMITH' TO WS-NAME.\n",
+        "    MOVE 100 TO WS-AMOUNT.\n",
+        "    ADD WS-AMOUNT TO WS-TOTAL.\n",
+        "    DISPLAY WS-NAME.\n",
+        "    DISPLAY WS-TOTAL.\n",
+        "    STOP RUN.\n",
+    );
+
+    let config = TranspileConfig {
+        copybook_paths: vec![temp_dir.path().to_path_buf()],
+        library_map: HashMap::new(),
+        max_copy_depth: 10,
+    };
+
+    let rust_code = transpile_with_config(cobol, &config).expect("transpile_with_config failed");
+
+    // Expanded copybook fields (after REPLACING :PREFIX: -> WS)
+    assert!(
+        rust_code.contains("ws_record_ws_name") || rust_code.contains("ws_name"),
+        "missing WS-NAME field from copybook: {rust_code}"
+    );
+    assert!(
+        rust_code.contains("ws_record_ws_amount") || rust_code.contains("ws_amount"),
+        "missing WS-AMOUNT field from copybook: {rust_code}"
+    );
+    assert!(
+        rust_code.contains("ws_total"),
+        "missing WS-TOTAL field: {rust_code}"
+    );
+}
+
+#[test]
+fn e2e_copybook_features() {
+    use cobol_transpiler::transpile::{transpile_with_config, TranspileConfig};
+    use std::collections::HashMap;
+    use std::path::PathBuf;
+
+    let temp_dir = tempfile::tempdir().expect("failed to create temp dir");
+    let copybook_path = temp_dir.path().join("COMMON.cpy");
+    std::fs::write(
+        &copybook_path,
+        concat!(
+            "01  :PREFIX:-RECORD.\n",
+            "    05  :PREFIX:-NAME   PIC X(20).\n",
+            "    05  :PREFIX:-AMOUNT PIC 9(5)V99.\n",
+            "    05  :PREFIX:-FLAG   PIC X VALUE 'N'.\n",
+        ),
+    )
+    .expect("failed to write copybook");
+
+    let cobol = concat!(
+        "IDENTIFICATION DIVISION.\n",
+        "PROGRAM-ID. COPYTEST.\n",
+        "DATA DIVISION.\n",
+        "WORKING-STORAGE SECTION.\n",
+        "COPY COMMON REPLACING ==:PREFIX:== BY ==WS==.\n",
+        "01  WS-TOTAL            PIC 9(7)V99 VALUE 0.\n",
+        "PROCEDURE DIVISION.\n",
+        "MAIN-PARA.\n",
+        "    MOVE 'SMITH' TO WS-NAME.\n",
+        "    MOVE 100 TO WS-AMOUNT.\n",
+        "    ADD WS-AMOUNT TO WS-TOTAL.\n",
+        "    DISPLAY WS-NAME.\n",
+        "    DISPLAY WS-TOTAL.\n",
+        "    STOP RUN.\n",
+    );
+
+    let config = TranspileConfig {
+        copybook_paths: vec![temp_dir.path().to_path_buf()],
+        library_map: HashMap::new(),
+        max_copy_depth: 10,
+    };
+
+    let rust_code = transpile_with_config(cobol, &config).expect("transpile_with_config failed");
+
+    // MOVE and ADD should be present
+    assert!(
+        rust_code.contains("cobol_move"),
+        "missing cobol_move: {rust_code}"
+    );
+    assert!(
+        rust_code.contains("cobol_add"),
+        "missing cobol_add: {rust_code}"
+    );
+
+    // No unexpanded :PREFIX: should remain
+    assert!(
+        !rust_code.contains(":PREFIX:"),
+        "unexpanded :PREFIX: found in output: {rust_code}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Regression Tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn e2e_regression_nested_if_with_88_level() {
+    let cobol = concat!(
+        "IDENTIFICATION DIVISION.\n",
+        "PROGRAM-ID. REGR1.\n",
+        "DATA DIVISION.\n",
+        "WORKING-STORAGE SECTION.\n",
+        "01  WS-TYPE PIC X VALUE 'A'.\n",
+        "    88  IS-TYPE-A VALUE 'A'.\n",
+        "    88  IS-TYPE-B VALUE 'B'.\n",
+        "01  WS-STATUS PIC 9 VALUE 1.\n",
+        "    88  IS-ACTIVE VALUE 1.\n",
+        "01  WS-COUNT PIC 9(3) VALUE 0.\n",
+        "PROCEDURE DIVISION.\n",
+        "MAIN-PARA.\n",
+        "    PERFORM CHECK-PARA 3 TIMES.\n",
+        "    STOP RUN.\n",
+        "CHECK-PARA.\n",
+        "    IF IS-TYPE-A\n",
+        "        IF IS-ACTIVE\n",
+        "            ADD 1 TO WS-COUNT\n",
+        "        END-IF\n",
+        "    ELSE\n",
+        "        IF IS-TYPE-B\n",
+        "            ADD 2 TO WS-COUNT\n",
+        "        END-IF\n",
+        "    END-IF.\n",
+    );
+
+    let rust_code = transpile(cobol).expect("transpile failed");
+
+    // Balanced braces -- critical for nested IF
+    let open = rust_code.chars().filter(|c| *c == '{').count();
+    let close = rust_code.chars().filter(|c| *c == '}').count();
+    assert_eq!(
+        open, close,
+        "unbalanced braces in nested IF with 88-level: {open} open vs {close} close\n{rust_code}"
+    );
+
+    // 88-level conditions referenced
+    assert!(
+        rust_code.contains("ws.ws_type"),
+        "missing 88-level parent ws_type: {rust_code}"
+    );
+    assert!(
+        rust_code.contains("ws.ws_status"),
+        "missing 88-level parent ws_status: {rust_code}"
+    );
+}
+
+#[test]
+fn e2e_regression_ref_mod_in_move() {
+    let cobol = concat!(
+        "IDENTIFICATION DIVISION.\n",
+        "PROGRAM-ID. REGR2.\n",
+        "DATA DIVISION.\n",
+        "WORKING-STORAGE SECTION.\n",
+        "01  WS-SOURCE PIC X(20) VALUE 'HELLO WORLD'.\n",
+        "01  WS-DEST   PIC X(5).\n",
+        "PROCEDURE DIVISION.\n",
+        "MAIN-PARA.\n",
+        "    MOVE WS-SOURCE(1:5) TO WS-DEST.\n",
+        "    DISPLAY WS-DEST.\n",
+        "    STOP RUN.\n",
+    );
+
+    let rust_code = transpile(cobol).expect("transpile failed");
+
+    // Reference modification should generate ref_mod_read
+    assert!(
+        rust_code.contains("ref_mod_read") || rust_code.contains("ref_mod"),
+        "missing ref_mod_read for reference modification: {rust_code}"
+    );
+}
+
+#[test]
+fn e2e_regression_compute_with_parens() {
+    let cobol = concat!(
+        "IDENTIFICATION DIVISION.\n",
+        "PROGRAM-ID. REGR3.\n",
+        "DATA DIVISION.\n",
+        "WORKING-STORAGE SECTION.\n",
+        "01  WS-A      PIC 9(5) VALUE 10.\n",
+        "01  WS-B      PIC 9(5) VALUE 20.\n",
+        "01  WS-C      PIC 9(5) VALUE 3.\n",
+        "01  WS-RESULT PIC 9(7).\n",
+        "PROCEDURE DIVISION.\n",
+        "MAIN-PARA.\n",
+        "    COMPUTE WS-RESULT = (WS-A + WS-B) * WS-C.\n",
+        "    DISPLAY WS-RESULT.\n",
+        "    STOP RUN.\n",
+    );
+
+    let rust_code = transpile(cobol).expect("transpile failed");
+
+    // COMPUTE with parenthesized expression
+    assert!(
+        rust_code.contains("cobol_compute"),
+        "missing cobol_compute: {rust_code}"
+    );
+
+    // Parentheses should be preserved in the arithmetic expression
+    assert!(
+        rust_code.contains("(") && rust_code.contains(")"),
+        "missing parentheses in compute expression: {rust_code}"
     );
 }

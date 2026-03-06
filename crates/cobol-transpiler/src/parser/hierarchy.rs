@@ -174,6 +174,8 @@ mod tests {
             condition_values: Vec::new(),
             byte_offset: None,
             byte_length,
+            renames_target: None,
+            renames_thru: None,
         }
     }
 

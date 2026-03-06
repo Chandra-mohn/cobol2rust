@@ -27,8 +27,9 @@ pub use cobol_core::numeric_parse::{
 
 // Data types
 pub use cobol_types::{
-    CobolArray, CobolVarArray, CompBinary, ConditionValue, FigurativeConstant, Level88Predicate,
-    Level88Value, NumericEdited, PackedDecimal, PicA, PicX, RedefinesGroup, ZonedDecimal,
+    AlphaEditSymbol, AlphanumericEdited, CobolArray, CobolVarArray, Comp1Float, Comp2Float,
+    CompBinary, ConditionValue, FigurativeConstant, Level88Predicate, Level88Value,
+    NumericEdited, PackedDecimal, PicA, PicX, RedefinesGroup, ZonedDecimal,
     sync_field_to_redefines, sync_redefines_to_field,
 };
 

@@ -40,6 +40,8 @@ pub enum RustType {
         signed: bool,
         pic_limited: bool,
     },
+    /// AlphanumericEdited { length } -- PIC with B, 0, / insertion
+    AlphanumericEdited { length: u32 },
     /// Display numeric (zoned decimal) -- no USAGE clause
     DisplayNumeric {
         precision: u32,
@@ -106,7 +108,13 @@ impl SymbolTable {
         let mut name_path = parent_path.to_vec();
         name_path.push(entry.name.clone());
 
-        let resolved_type = resolve_type(entry);
+        // Level 66 RENAMES: resolve type from target field(s)
+        let resolved_type = if entry.level == 66 {
+            self.resolve_renames_type(entry)
+        } else {
+            resolve_type(entry)
+        };
+
         let parent = if parent_path.is_empty() {
             None
         } else {
@@ -129,7 +137,7 @@ impl SymbolTable {
             .push(symbol.clone());
         self.all_entries.push(symbol);
 
-        // Recurse into children (skip 88-level conditions)
+        // Recurse into children (skip 88-level conditions and 66-level RENAMES)
         for child in &entry.children {
             if child.level != 88 {
                 self.add_entry(child, &name_path);
@@ -215,6 +223,62 @@ impl SymbolTable {
     pub fn all(&self) -> &[SymbolEntry] {
         &self.all_entries
     }
+
+    /// Resolve the type for a level-66 RENAMES entry.
+    ///
+    /// - Single RENAMES: copies the target's resolved type
+    /// - RENAMES THRU: creates a PicX spanning from target start to thru-end
+    fn resolve_renames_type(&self, entry: &DataEntry) -> ResolvedType {
+        let target_name = match &entry.renames_target {
+            Some(name) => name.to_uppercase(),
+            None => {
+                return ResolvedType {
+                    rust_type: RustType::PicX { length: 1 },
+                    byte_length: 1,
+                    is_group: false,
+                };
+            }
+        };
+
+        // Look up the target in the symbol table
+        let target_entry = self.entries.get(&target_name).and_then(|v| v.first());
+
+        if let Some(ref thru_name) = entry.renames_thru {
+            // RENAMES X THRU Y: compute byte range
+            let thru_upper = thru_name.to_uppercase();
+            let thru_entry = self.entries.get(&thru_upper).and_then(|v| v.first());
+
+            if let (Some(target), Some(thru)) = (target_entry, thru_entry) {
+                let total_size = thru.resolved_type.byte_length;
+                // Use max of target + thru sizes as a reasonable approximation
+                // In a full layout system, we'd compute exact offsets
+                let range_size = target.resolved_type.byte_length + total_size;
+                ResolvedType {
+                    rust_type: RustType::PicX {
+                        length: range_size as u32,
+                    },
+                    byte_length: range_size,
+                    is_group: false,
+                }
+            } else {
+                // Target or thru not found -- fallback
+                ResolvedType {
+                    rust_type: RustType::PicX { length: 1 },
+                    byte_length: 1,
+                    is_group: false,
+                }
+            }
+        } else {
+            // Single RENAMES: copy target's type
+            target_entry
+                .map(|t| t.resolved_type.clone())
+                .unwrap_or(ResolvedType {
+                    rust_type: RustType::PicX { length: 1 },
+                    byte_length: 1,
+                    is_group: false,
+                })
+        }
+    }
 }
 
 /// Resolve the Rust type for a data entry.
@@ -252,7 +316,10 @@ pub fn resolve_type(entry: &DataEntry) -> ResolvedType {
                 PicCategory::Alphabetic => RustType::PicA {
                     length: pic.display_length,
                 },
-                PicCategory::Alphanumeric | PicCategory::AlphanumericEdited => RustType::PicX {
+                PicCategory::Alphanumeric => RustType::PicX {
+                    length: pic.display_length,
+                },
+                PicCategory::AlphanumericEdited => RustType::AlphanumericEdited {
                     length: pic.display_length,
                 },
                 PicCategory::Numeric | PicCategory::NumericEdited => RustType::DisplayNumeric {
@@ -312,6 +379,8 @@ mod tests {
             condition_values: Vec::new(),
             byte_offset: None,
             byte_length,
+            renames_target: None,
+            renames_thru: None,
         }
     }
 
@@ -403,6 +472,63 @@ mod tests {
         let resolved = resolve_type(&group);
         assert_eq!(resolved.rust_type, RustType::Group);
         assert!(resolved.is_group);
+    }
+
+
+    #[test]
+    fn resolve_renames_single() {
+        // 66 ALIAS RENAMES WS-NAME -> should copy WS-NAME's type (PicX)
+        let mut renames = make_entry(66, "WS-ALIAS", None, Usage::Display);
+        renames.renames_target = Some("WS-NAME".to_string());
+
+        let mut record = make_entry(1, "WS-RECORD", None, Usage::Display);
+        record.children.push(make_entry(5, "WS-NAME", Some("X(20)"), Usage::Display));
+        record.children.push(renames);
+
+        let table = SymbolTable::from_entries(&[record]);
+
+        let alias = table.resolve("WS-ALIAS").unwrap();
+        assert_eq!(alias.level, 66);
+        assert_eq!(alias.resolved_type.rust_type, RustType::PicX { length: 20 });
+    }
+
+    #[test]
+    fn resolve_renames_thru() {
+        // 66 ALIAS RENAMES WS-A THRU WS-B -> PicX with combined size
+        let mut renames = make_entry(66, "WS-RANGE", None, Usage::Display);
+        renames.renames_target = Some("WS-A".to_string());
+        renames.renames_thru = Some("WS-B".to_string());
+
+        let mut record = make_entry(1, "WS-RECORD", None, Usage::Display);
+        record.children.push(make_entry(5, "WS-A", Some("X(10)"), Usage::Display));
+        record.children.push(make_entry(5, "WS-B", Some("X(15)"), Usage::Display));
+        record.children.push(renames);
+
+        let table = SymbolTable::from_entries(&[record]);
+
+        let range_entry = table.resolve("WS-RANGE").unwrap();
+        assert_eq!(range_entry.level, 66);
+        // THRU creates PicX with combined byte_length
+        assert_eq!(range_entry.resolved_type.byte_length, 25);
+        assert!(matches!(range_entry.resolved_type.rust_type, RustType::PicX { .. }));
+    }
+
+    #[test]
+    fn resolve_renames_missing_target_fallback() {
+        // 66 ALIAS RENAMES NONEXISTENT -> fallback to PicX(1)
+        let mut renames = make_entry(66, "WS-BAD-ALIAS", None, Usage::Display);
+        renames.renames_target = Some("NONEXISTENT".to_string());
+
+        let mut record = make_entry(1, "WS-RECORD", None, Usage::Display);
+        record.children.push(make_entry(5, "WS-NAME", Some("X(20)"), Usage::Display));
+        record.children.push(renames);
+
+        let table = SymbolTable::from_entries(&[record]);
+
+        let alias = table.resolve("WS-BAD-ALIAS").unwrap();
+        assert_eq!(alias.level, 66);
+        // Fallback: PicX(1)
+        assert_eq!(alias.resolved_type.rust_type, RustType::PicX { length: 1 });
     }
 
     #[test]

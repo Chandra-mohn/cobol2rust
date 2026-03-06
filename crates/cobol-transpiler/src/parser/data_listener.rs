@@ -151,6 +151,8 @@ impl<'input> Cobol85Listener<'input> for DataDivisionListener {
             condition_values: Vec::new(),
             byte_offset: None,
             byte_length,
+            renames_target: None,
+            renames_thru: None,
         });
     }
 
@@ -216,6 +218,57 @@ impl<'input> Cobol85Listener<'input> for DataDivisionListener {
             condition_values,
             byte_offset: None,
             byte_length: None,
+            renames_target: None,
+            renames_thru: None,
+        });
+    }
+
+    fn enter_dataDescriptionEntryFormat2(
+        &mut self,
+        ctx: &DataDescriptionEntryFormat2Context<'input>,
+    ) {
+        // 66-level RENAMES clause
+        let name = if let Some(dn) = ctx.dataName() {
+            dn.get_text().trim().to_uppercase()
+        } else {
+            return;
+        };
+
+        let (renames_target, renames_thru) = if let Some(rc) = ctx.dataRenamesClause() {
+            let qdn_all = rc.qualifiedDataName_all();
+            let target = qdn_all
+                .first()
+                .map(|qdn| qdn.get_text().trim().to_uppercase());
+            let thru = if rc.THROUGH().is_some() || rc.THRU().is_some() {
+                qdn_all
+                    .get(1)
+                    .map(|qdn| qdn.get_text().trim().to_uppercase())
+            } else {
+                None
+            };
+            (target, thru)
+        } else {
+            (None, None)
+        };
+
+        self.items.push(DataEntry {
+            level: 66,
+            name,
+            pic: None,
+            usage: Usage::Display,
+            value: None,
+            redefines: None,
+            occurs: None,
+            occurs_depending: None,
+            sign: None,
+            justified_right: false,
+            blank_when_zero: false,
+            children: Vec::new(),
+            condition_values: Vec::new(),
+            byte_offset: None,
+            byte_length: None,
+            renames_target,
+            renames_thru,
         });
     }
 }

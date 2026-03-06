@@ -393,6 +393,40 @@ pub fn compute_storage_size(pic: &PicClause, usage: crate::ast::Usage) -> u32 {
     }
 }
 
+/// Build an alpha edit pattern from an AlphanumericEdited PIC clause.
+///
+/// Returns a vector of pattern characters where:
+/// - 'X' = data position (source character pass-through)
+/// - 'B' = space insertion
+/// - '0' = zero insertion
+/// - '/' = slash insertion
+///
+/// Codegen uses this to emit `AlphaEditSymbol` constructors in the generated code.
+///
+/// Only valid for `PicCategory::AlphanumericEdited` clauses. Returns `None`
+/// if the clause is not an alphanumeric-edited type.
+pub fn build_alpha_edit_pattern(pic: &PicClause) -> Option<Vec<char>> {
+    if pic.category != PicCategory::AlphanumericEdited {
+        return None;
+    }
+
+    let upper = pic.raw.trim().to_uppercase();
+    let expanded = expand_repetitions(&upper).ok()?;
+
+    let pattern: Vec<char> = expanded
+        .chars()
+        .filter_map(|ch| match ch {
+            'X' | 'A' | '9' => Some('X'), // All data positions normalized to 'X'
+            'B' => Some('B'),
+            '0' => Some('0'),
+            '/' => Some('/'),
+            _ => None, // Skip S, V, and other non-position chars
+        })
+        .collect();
+
+    Some(pattern)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -611,5 +645,49 @@ mod tests {
     #[test]
     fn expand_nested_repetitions() {
         assert_eq!(expand_repetitions("9(2)V9(3)").unwrap(), "99V999");
+    }
+
+    #[test]
+    fn alpha_edit_pattern_space() {
+        // PIC X(3)BX(3) -> XXXBXXX
+        let pic = parse_pic("X(3)BX(3)").unwrap();
+        assert_eq!(pic.category, PicCategory::AlphanumericEdited);
+        let pat = build_alpha_edit_pattern(&pic).unwrap();
+        assert_eq!(pat, vec!['X', 'X', 'X', 'B', 'X', 'X', 'X']);
+    }
+
+    #[test]
+    fn alpha_edit_pattern_slash() {
+        // PIC X(2)/X(2)/X(4) -> date format
+        let pic = parse_pic("X(2)/X(2)/X(4)").unwrap();
+        assert_eq!(pic.category, PicCategory::AlphanumericEdited);
+        let pat = build_alpha_edit_pattern(&pic).unwrap();
+        assert_eq!(pat, vec!['X', 'X', '/', 'X', 'X', '/', 'X', 'X', 'X', 'X']);
+    }
+
+    #[test]
+    fn alpha_edit_pattern_zero() {
+        // PIC X(3)0X(3) -> zero insertion
+        let pic = parse_pic("X(3)0X(3)").unwrap();
+        assert_eq!(pic.category, PicCategory::AlphanumericEdited);
+        let pat = build_alpha_edit_pattern(&pic).unwrap();
+        assert_eq!(pat, vec!['X', 'X', 'X', '0', 'X', 'X', 'X']);
+    }
+
+    #[test]
+    fn alpha_edit_pattern_mixed() {
+        // PIC X(5)BB -> mixed with trailing spaces
+        let pic = parse_pic("X(5)BB").unwrap();
+        assert_eq!(pic.category, PicCategory::AlphanumericEdited);
+        let pat = build_alpha_edit_pattern(&pic).unwrap();
+        assert_eq!(pat, vec!['X', 'X', 'X', 'X', 'X', 'B', 'B']);
+    }
+
+    #[test]
+    fn alpha_edit_pattern_non_edited_returns_none() {
+        // PIC X(10) is plain alphanumeric, not edited
+        let pic = parse_pic("X(10)").unwrap();
+        assert_eq!(pic.category, PicCategory::Alphanumeric);
+        assert!(build_alpha_edit_pattern(&pic).is_none());
     }
 }

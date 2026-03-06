@@ -357,7 +357,7 @@ fn generate_display(w: &mut RustWriter, d: &DisplayStatement) {
 fn generate_add(w: &mut RustWriter, a: &AddStatement) {
     if !a.giving.is_empty() {
         // ADD ... GIVING: sum the operands, store in giving targets
-        let operands: Vec<String> = a.operands.iter().map(operand_expr).collect();
+        let operands: Vec<String> = a.operands.iter().map(|o| operand_numeric_expr(o)).collect();
         // For GIVING, first operand is src, second is src2
         if operands.len() >= 2 {
             for target in &a.giving {
@@ -381,7 +381,7 @@ fn generate_add(w: &mut RustWriter, a: &AddStatement) {
         }
     } else {
         // ADD ... TO: add each operand to each TO target
-        let operands: Vec<String> = a.operands.iter().map(operand_expr).collect();
+        let operands: Vec<String> = a.operands.iter().map(|o| operand_numeric_expr(o)).collect();
         for target in &a.to {
             let dest = data_ref_expr(&target.field);
             let r = rounded_str(target.rounded);
@@ -396,7 +396,7 @@ fn generate_add(w: &mut RustWriter, a: &AddStatement) {
 
 fn generate_subtract(w: &mut RustWriter, s: &SubtractStatement) {
     if !s.giving.is_empty() {
-        let operands: Vec<String> = s.operands.iter().map(operand_expr).collect();
+        let operands: Vec<String> = s.operands.iter().map(|o| operand_numeric_expr(o)).collect();
         if operands.len() >= 2 {
             for target in &s.giving {
                 let dest = data_ref_expr(&target.field);
@@ -417,7 +417,7 @@ fn generate_subtract(w: &mut RustWriter, s: &SubtractStatement) {
             }
         }
     } else {
-        let operands: Vec<String> = s.operands.iter().map(operand_expr).collect();
+        let operands: Vec<String> = s.operands.iter().map(|o| operand_numeric_expr(o)).collect();
         for target in &s.from {
             let dest = data_ref_expr(&target.field);
             let r = rounded_str(target.rounded);
@@ -431,7 +431,7 @@ fn generate_subtract(w: &mut RustWriter, s: &SubtractStatement) {
 }
 
 fn generate_multiply(w: &mut RustWriter, m: &MultiplyStatement) {
-    let multiplicand = operand_expr(&m.operand);
+    let multiplicand = operand_numeric_expr(&m.operand);
 
     if !m.giving.is_empty() {
         let by_field = m.by.first()
@@ -456,7 +456,7 @@ fn generate_multiply(w: &mut RustWriter, m: &MultiplyStatement) {
 }
 
 fn generate_divide(w: &mut RustWriter, d: &DivideStatement) {
-    let operand = operand_expr(&d.operand);
+    let operand = operand_numeric_expr(&d.operand);
     let remainder_expr = d.remainder.as_ref()
         .map(|rem| format!("Some(&mut {})", data_ref_expr(&rem.field)))
         .unwrap_or_else(|| "None".to_string());
@@ -640,11 +640,14 @@ fn generate_perform(w: &mut RustWriter, p: &PerformStatement, cmap: &ConditionMa
             ..
         } => {
             let counter_name = data_ref_expr(counter);
-            let from_expr = operand_expr(from);
-            let by_expr = operand_expr(by);
+            let from_expr = operand_numeric_expr(from);
+            let by_expr = operand_numeric_expr(by);
             let until_cond = condition_expr(until, cmap);
 
-            w.line(&format!("{counter_name} = {from_expr};"));
+            // Use cobol_move_numeric to properly initialize the counter
+            w.line(&format!(
+                "cobol_move_numeric(&{from_expr}, &mut {counter_name}, &ctx.config);"
+            ));
             if *test_before {
                 w.open_block(&format!("while !({until_cond}) {{"));
             } else {
@@ -664,7 +667,10 @@ fn generate_perform(w: &mut RustWriter, p: &PerformStatement, cmap: &ConditionMa
                 }
             }
 
-            w.line(&format!("{counter_name} += {by_expr};"));
+            // Use cobol_add to properly increment the counter
+            w.line(&format!(
+                "cobol_add(&{by_expr}, &mut {counter_name}, None, &ctx.config);"
+            ));
 
             if !test_before {
                 w.open_block(&format!("if {until_cond} {{"));
@@ -748,7 +754,7 @@ fn generate_goto(w: &mut RustWriter, g: &GoToStatement) {
         let dep_expr = data_ref_expr(dep_ref);
         w.line("{");
         w.line(&format!(
-            "    let _goto_idx = {dep_expr}.to_decimal().to_i64().unwrap_or(0) as usize;"
+            "    let _goto_idx = {dep_expr}.to_decimal().to_string().parse::<i64>().unwrap_or(0) as usize;"
         ));
         w.line("    match _goto_idx {");
         for (i, target) in g.targets.iter().enumerate() {
@@ -816,7 +822,7 @@ fn generate_call(w: &mut RustWriter, call: &CallStatement, cmap: &ConditionMap, 
                     if let Some(ref op) = param.operand {
                         let expr = operand_expr(op);
                         w.line(&format!(
-                            "let mut _cp{i} = call_param_by_value({expr}.to_decimal().to_i64().unwrap_or(0));"
+                            "let mut _cp{i} = call_param_by_value({expr}.to_decimal().to_string().parse::<i64>().unwrap_or(0));"
                         ));
                     }
                 }
@@ -1246,26 +1252,32 @@ fn generate_set(w: &mut RustWriter, set: &SetStatement, cmap: &ConditionMap) {
         }
         SetAction::To(value) => {
             // SET index/field TO value
-            let val_expr = operand_expr(value);
+            let val_expr = operand_numeric_expr(value);
             for target in &set.targets {
                 let tgt = data_ref_expr(target);
-                w.line(&format!("{tgt} = {val_expr};"));
+                w.line(&format!(
+                    "cobol_move_numeric(&{val_expr}, &mut {tgt}, &ctx.config);"
+                ));
             }
         }
         SetAction::UpBy(value) => {
             // SET index UP BY value
-            let val_expr = operand_expr(value);
+            let val_expr = operand_numeric_expr(value);
             for target in &set.targets {
                 let tgt = data_ref_expr(target);
-                w.line(&format!("{tgt} += {val_expr};"));
+                w.line(&format!(
+                    "cobol_add(&{val_expr}, &mut {tgt}, None, &ctx.config);"
+                ));
             }
         }
         SetAction::DownBy(value) => {
             // SET index DOWN BY value
-            let val_expr = operand_expr(value);
+            let val_expr = operand_numeric_expr(value);
             for target in &set.targets {
                 let tgt = data_ref_expr(target);
-                w.line(&format!("{tgt} -= {val_expr};"));
+                w.line(&format!(
+                    "cobol_subtract(&{val_expr}, &mut {tgt}, None, &ctx.config);"
+                ));
             }
         }
     }
@@ -1300,6 +1312,39 @@ fn operand_expr(op: &Operand) -> String {
                 args.join(", ")
             )
         }
+    }
+}
+
+/// Format an operand as a Rust expression suitable for arithmetic functions
+/// (i.e. implements CobolNumeric). Numeric literals are wrapped in a
+/// temporary PackedDecimal since bare `dec!()` produces `Decimal` which
+/// does not implement `CobolNumeric`.
+fn operand_numeric_expr(op: &Operand) -> String {
+    match op {
+        Operand::Literal(Literal::Numeric(n)) => {
+            // Determine precision and scale from the literal text
+            let (prec, scale) = numeric_literal_precision(n);
+            let signed = n.starts_with('-') || n.starts_with('+');
+            format!(
+                "{{ let mut _tmp = PackedDecimal::new({prec}, {scale}, {signed}); _tmp.pack(dec!({n})); _tmp }}"
+            )
+        }
+        _ => operand_expr(op),
+    }
+}
+
+/// Compute (precision, scale) from a numeric literal string.
+fn numeric_literal_precision(n: &str) -> (u8, u8) {
+    let s = n.trim_start_matches(['-', '+']);
+    if let Some(dot_pos) = s.find('.') {
+        let int_part = &s[..dot_pos];
+        let frac_part = &s[dot_pos + 1..];
+        let int_digits = int_part.len().max(1) as u8;
+        let frac_digits = frac_part.len() as u8;
+        (int_digits + frac_digits, frac_digits)
+    } else {
+        let digits = s.len().max(1) as u8;
+        (digits, 0)
     }
 }
 
@@ -2821,6 +2866,8 @@ mod tests {
             condition_values: Vec::new(),
             byte_offset: None,
             byte_length: None,
+            renames_target: None,
+            renames_thru: None,
         }
     }
 
@@ -2841,6 +2888,8 @@ mod tests {
             condition_values: values,
             byte_offset: None,
             byte_length: None,
+            renames_target: None,
+            renames_thru: None,
         }
     }
 
@@ -3066,7 +3115,10 @@ mod tests {
         };
         generate_set(&mut w, &stmt, &empty_cmap());
         let output = w.finish();
-        assert!(output.contains("ws.ws_index = dec!(5);"));
+        assert!(
+            output.contains("cobol_move_numeric") && output.contains("ws.ws_index"),
+            "SET TO should use cobol_move_numeric: {output}"
+        );
     }
 
     #[test]
@@ -3078,7 +3130,10 @@ mod tests {
         };
         generate_set(&mut w, &stmt, &empty_cmap());
         let output = w.finish();
-        assert!(output.contains("ws.ws_idx += dec!(1);"));
+        assert!(
+            output.contains("cobol_add") && output.contains("ws.ws_idx"),
+            "SET UP BY should use cobol_add: {output}"
+        );
     }
 
     #[test]
@@ -3090,7 +3145,10 @@ mod tests {
         };
         generate_set(&mut w, &stmt, &empty_cmap());
         let output = w.finish();
-        assert!(output.contains("ws.ws_idx -= dec!(2);"));
+        assert!(
+            output.contains("cobol_subtract") && output.contains("ws.ws_idx"),
+            "SET DOWN BY should use cobol_subtract: {output}"
+        );
     }
 
     #[test]
@@ -3456,7 +3514,7 @@ mod tests {
         generate_goto(&mut w, &goto);
         let output = w.finish();
         assert!(
-            output.contains("let _goto_idx = ws.ws_index.to_decimal().to_i64().unwrap_or(0) as usize;"),
+            output.contains("let _goto_idx = ws.ws_index.to_decimal().to_string().parse::<i64>().unwrap_or(0) as usize;"),
             "missing _goto_idx: {output}"
         );
         assert!(output.contains("1 => ctx.goto_target = Some(\"PARA-A\".to_string()),"), "missing PARA-A: {output}");

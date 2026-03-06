@@ -191,3 +191,88 @@ fn compile_if_else() {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// Session 37: Real-World compile tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn compile_payroll() {
+    let cobol = concat!(
+        "IDENTIFICATION DIVISION.\n",
+        "PROGRAM-ID. PAYROLL.\n",
+        "DATA DIVISION.\n",
+        "WORKING-STORAGE SECTION.\n",
+        "01  WS-EMP-HOURS    PIC 9(3) VALUE 8.\n",
+        "01  WS-EMP-PAY      PIC 9(5)V99 VALUE 0.\n",
+        "01  WS-COUNTER      PIC 9(3) VALUE 0.\n",
+        "01  WS-MAX-EMP      PIC 9(3) VALUE 5.\n",
+        "PROCEDURE DIVISION.\n",
+        "MAIN-PARA.\n",
+        "    PERFORM CALC-PARA VARYING WS-COUNTER\n",
+        "        FROM 1 BY 1 UNTIL WS-COUNTER > WS-MAX-EMP.\n",
+        "    STOP RUN.\n",
+        "CALC-PARA.\n",
+        "    ADD WS-EMP-HOURS TO WS-EMP-PAY.\n",
+        "    DISPLAY WS-EMP-PAY.\n",
+    );
+
+    let rust_code = transpile(cobol).expect("transpile failed");
+    let temp_dir = create_temp_project("payroll", &rust_code);
+
+    match cargo_check(&temp_dir, "payroll") {
+        Ok(()) => {}
+        Err(e) => {
+            println!("Generated code:\n{rust_code}");
+            panic!("compile failed: {e}");
+        }
+    }
+}
+
+#[test]
+fn compile_control() {
+    let cobol = concat!(
+        "IDENTIFICATION DIVISION.\n",
+        "PROGRAM-ID. CONTROL.\n",
+        "DATA DIVISION.\n",
+        "WORKING-STORAGE SECTION.\n",
+        "01  WS-BRANCH           PIC 9 VALUE 2.\n",
+        "01  WS-FLAG             PIC 9 VALUE 0.\n",
+        "01  WS-COUNTER          PIC 9(3) VALUE 0.\n",
+        "PROCEDURE DIVISION.\n",
+        "MAIN-PARA.\n",
+        "    PERFORM INIT-PARA THRU INIT-EXIT.\n",
+        "    GO TO BRANCH-PARA SKIP-PARA DONE-PARA\n",
+        "        DEPENDING ON WS-BRANCH.\n",
+        "    DISPLAY 'FALLTHROUGH'.\n",
+        "BRANCH-PARA.\n",
+        "    IF WS-FLAG = 1\n",
+        "        GO TO DONE-PARA\n",
+        "    END-IF.\n",
+        "    DISPLAY 'BRANCH'.\n",
+        "SKIP-PARA.\n",
+        "    DISPLAY 'SKIP'.\n",
+        "DONE-PARA.\n",
+        "    DISPLAY 'DONE'.\n",
+        "    STOP RUN.\n",
+        "INIT-PARA.\n",
+        "    ADD 1 TO WS-COUNTER.\n",
+        "    IF WS-COUNTER > 5\n",
+        "        EXIT PARAGRAPH\n",
+        "    END-IF.\n",
+        "    DISPLAY 'INIT'.\n",
+        "INIT-EXIT.\n",
+        "    EXIT.\n",
+    );
+
+    let rust_code = transpile(cobol).expect("transpile failed");
+    let temp_dir = create_temp_project("control", &rust_code);
+
+    match cargo_check(&temp_dir, "control") {
+        Ok(()) => {}
+        Err(e) => {
+            println!("Generated code:\n{rust_code}");
+            panic!("compile failed: {e}");
+        }
+    }
+}

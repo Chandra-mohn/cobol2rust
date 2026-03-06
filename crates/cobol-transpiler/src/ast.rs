@@ -73,6 +73,10 @@ pub struct DataEntry {
     pub byte_offset: Option<usize>,
     /// Byte length (computed during layout or from PIC).
     pub byte_length: Option<usize>,
+    /// For level 66 RENAMES: the target field name.
+    pub renames_target: Option<String>,
+    /// For level 66 RENAMES THRU: the range end field name.
+    pub renames_thru: Option<String>,
 }
 
 /// Parsed PIC clause.
