@@ -3,6 +3,8 @@
 //! Covers all phases: preprocessing, parsing (ANTLR4), semantic analysis,
 //! and code generation.
 
+use std::path::PathBuf;
+
 use miette::Diagnostic;
 use thiserror::Error;
 
@@ -68,5 +70,32 @@ pub enum TranspileError {
     #[error("unsupported feature: {feature}")]
     Unsupported {
         feature: String,
+    },
+
+    /// Copybook not found in any search path.
+    #[error("copybook '{name}' not found (searched: {paths_searched:?})")]
+    CopyNotFound {
+        name: String,
+        paths_searched: Vec<PathBuf>,
+    },
+
+    /// Cyclic COPY dependency detected.
+    #[error("cyclic COPY dependency: {}", chain.join(" -> "))]
+    CopyCyclic {
+        chain: Vec<String>,
+    },
+
+    /// COPY nesting depth exceeded.
+    #[error("COPY nesting depth {depth} exceeds maximum {max}")]
+    CopyDepthExceeded {
+        depth: usize,
+        max: usize,
+    },
+
+    /// Malformed REPLACING clause in COPY statement.
+    #[error("malformed REPLACING clause in COPY '{copybook}': {message}")]
+    CopyReplacingInvalid {
+        copybook: String,
+        message: String,
     },
 }

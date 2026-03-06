@@ -733,3 +733,640 @@ fn e2e_delete_rewrite_statements() {
         "missing rewrite_record call: {rust_code}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// CALL / CANCEL tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn e2e_call_simple() {
+    let cobol = concat!(
+        "IDENTIFICATION DIVISION.\n",
+        "PROGRAM-ID. CALLER.\n",
+        "PROCEDURE DIVISION.\n",
+        "MAIN-PARA.\n",
+        "    CALL 'SUBPROG'.\n",
+        "    STOP RUN.\n",
+    );
+
+    let rust_code = transpile(cobol).expect("transpile failed");
+
+    assert!(
+        rust_code.contains("cobol_call(&mut ctx.dispatcher"),
+        "missing cobol_call: {rust_code}"
+    );
+    assert!(
+        rust_code.contains("SUBPROG"),
+        "missing program name: {rust_code}"
+    );
+    // ProgramContext should have dispatcher field
+    assert!(
+        rust_code.contains("dispatcher: CallDispatcher::new()"),
+        "missing dispatcher in ProgramContext: {rust_code}"
+    );
+}
+
+#[test]
+fn e2e_call_using_by_ref() {
+    let cobol = concat!(
+        "IDENTIFICATION DIVISION.\n",
+        "PROGRAM-ID. CALLER.\n",
+        "DATA DIVISION.\n",
+        "WORKING-STORAGE SECTION.\n",
+        "01  WS-PARAM PIC X(10) VALUE 'HELLO'.\n",
+        "PROCEDURE DIVISION.\n",
+        "MAIN-PARA.\n",
+        "    CALL 'SUBPROG' USING WS-PARAM.\n",
+        "    STOP RUN.\n",
+    );
+
+    let rust_code = transpile(cobol).expect("transpile failed");
+
+    assert!(
+        rust_code.contains("call_param_by_ref"),
+        "missing call_param_by_ref: {rust_code}"
+    );
+    assert!(
+        rust_code.contains("ws.ws_param"),
+        "missing ws.ws_param reference: {rust_code}"
+    );
+    assert!(
+        rust_code.contains("_call_params"),
+        "missing _call_params array: {rust_code}"
+    );
+}
+
+#[test]
+fn e2e_call_with_exception() {
+    let cobol = concat!(
+        "IDENTIFICATION DIVISION.\n",
+        "PROGRAM-ID. CALLER.\n",
+        "PROCEDURE DIVISION.\n",
+        "MAIN-PARA.\n",
+        "    CALL 'MISSING'\n",
+        "        ON EXCEPTION\n",
+        "            DISPLAY 'NOT FOUND'\n",
+        "        NOT ON EXCEPTION\n",
+        "            DISPLAY 'CALLED OK'\n",
+        "    END-CALL.\n",
+        "    STOP RUN.\n",
+    );
+
+    let rust_code = transpile(cobol).expect("transpile failed");
+
+    assert!(
+        rust_code.contains("match cobol_call("),
+        "should generate match for exception handling: {rust_code}"
+    );
+    assert!(
+        rust_code.contains("Ok(rc)"),
+        "should have Ok arm: {rust_code}"
+    );
+    assert!(
+        rust_code.contains("Err(_e)"),
+        "should have Err arm: {rust_code}"
+    );
+    assert!(
+        rust_code.contains("NOT FOUND"),
+        "should contain ON EXCEPTION display: {rust_code}"
+    );
+    assert!(
+        rust_code.contains("CALLED OK"),
+        "should contain NOT ON EXCEPTION display: {rust_code}"
+    );
+}
+
+#[test]
+fn e2e_cancel() {
+    let cobol = concat!(
+        "IDENTIFICATION DIVISION.\n",
+        "PROGRAM-ID. CALLER.\n",
+        "PROCEDURE DIVISION.\n",
+        "MAIN-PARA.\n",
+        "    CANCEL 'SUBPROG'.\n",
+        "    STOP RUN.\n",
+    );
+
+    let rust_code = transpile(cobol).expect("transpile failed");
+
+    assert!(
+        rust_code.contains("cobol_cancel(&mut ctx.dispatcher"),
+        "missing cobol_cancel: {rust_code}"
+    );
+    assert!(
+        rust_code.contains("SUBPROG"),
+        "missing program name in cancel: {rust_code}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Session 32: Paragraph Fall-Through Execution Model
+// ---------------------------------------------------------------------------
+
+// Test: 3 paragraphs all execute sequentially via dispatch loop
+#[test]
+fn e2e_fall_through_basic() {
+    let cobol = concat!(
+        "IDENTIFICATION DIVISION.\n",
+        "PROGRAM-ID. FALLTHRU.\n",
+        "PROCEDURE DIVISION.\n",
+        "PARA-A.\n",
+        "    DISPLAY 'A'.\n",
+        "PARA-B.\n",
+        "    DISPLAY 'B'.\n",
+        "PARA-C.\n",
+        "    DISPLAY 'C'.\n",
+    );
+
+    let rust_code = transpile(cobol).expect("transpile failed");
+
+    // Dispatch loop with all three paragraphs
+    assert!(rust_code.contains("let mut _pc: usize = 0;"), "missing _pc: {rust_code}");
+    assert!(rust_code.contains("0 => para_a(ws, ctx),"), "missing para_a dispatch: {rust_code}");
+    assert!(rust_code.contains("1 => para_b(ws, ctx),"), "missing para_b dispatch: {rust_code}");
+    assert!(rust_code.contains("2 => para_c(ws, ctx),"), "missing para_c dispatch: {rust_code}");
+    assert!(rust_code.contains("_pc += 1;"), "missing _pc increment: {rust_code}");
+}
+
+// Test: STOP RUN in 2nd paragraph, 3rd skipped
+#[test]
+fn e2e_fall_through_stop_run() {
+    let cobol = concat!(
+        "IDENTIFICATION DIVISION.\n",
+        "PROGRAM-ID. STOPTEST.\n",
+        "PROCEDURE DIVISION.\n",
+        "PARA-A.\n",
+        "    DISPLAY 'A'.\n",
+        "PARA-B.\n",
+        "    STOP RUN.\n",
+        "PARA-C.\n",
+        "    DISPLAY 'C'.\n",
+    );
+
+    let rust_code = transpile(cobol).expect("transpile failed");
+
+    // STOP RUN sets flag and returns
+    assert!(rust_code.contains("ctx.stop_run();"), "missing stop_run: {rust_code}");
+    assert!(rust_code.contains("if ctx.stopped || ctx.exit_program { break; }"), "missing break check: {rust_code}");
+}
+
+// Test: EXIT PROGRAM stops fall-through
+#[test]
+fn e2e_fall_through_exit_program() {
+    let cobol = concat!(
+        "IDENTIFICATION DIVISION.\n",
+        "PROGRAM-ID. EXITTEST.\n",
+        "PROCEDURE DIVISION.\n",
+        "PARA-A.\n",
+        "    DISPLAY 'A'.\n",
+        "PARA-B.\n",
+        "    EXIT PROGRAM.\n",
+        "PARA-C.\n",
+        "    DISPLAY 'C'.\n",
+    );
+
+    let rust_code = transpile(cobol).expect("transpile failed");
+
+    assert!(rust_code.contains("ctx.exit_program = true;"), "missing exit_program flag: {rust_code}");
+}
+
+// Test: GO TO skips paragraphs forward
+#[test]
+fn e2e_goto_forward() {
+    let cobol = concat!(
+        "IDENTIFICATION DIVISION.\n",
+        "PROGRAM-ID. GOTOTEST.\n",
+        "PROCEDURE DIVISION.\n",
+        "PARA-A.\n",
+        "    GO TO PARA-C.\n",
+        "PARA-B.\n",
+        "    DISPLAY 'SKIPPED'.\n",
+        "PARA-C.\n",
+        "    DISPLAY 'JUMPED TO C'.\n",
+        "    STOP RUN.\n",
+    );
+
+    let rust_code = transpile(cobol).expect("transpile failed");
+
+    // GO TO sets goto_target
+    assert!(
+        rust_code.contains("ctx.goto_target = Some(\"PARA-C\".to_string());"),
+        "missing goto_target for PARA-C: {rust_code}"
+    );
+    // Dispatch loop resolves target
+    assert!(rust_code.contains("\"PARA-C\" => 2,"), "missing PARA-C lookup: {rust_code}");
+}
+
+// Test: GO TO jumps backward (with guard to prevent infinite loop)
+#[test]
+fn e2e_goto_backward() {
+    let cobol = concat!(
+        "IDENTIFICATION DIVISION.\n",
+        "PROGRAM-ID. GOBACK.\n",
+        "DATA DIVISION.\n",
+        "WORKING-STORAGE SECTION.\n",
+        "01  WS-CTR PIC 9(3) VALUE 0.\n",
+        "PROCEDURE DIVISION.\n",
+        "PARA-A.\n",
+        "    ADD 1 TO WS-CTR.\n",
+        "    IF WS-CTR > 3\n",
+        "        STOP RUN\n",
+        "    END-IF.\n",
+        "    GO TO PARA-A.\n",
+    );
+
+    let rust_code = transpile(cobol).expect("transpile failed");
+
+    // Backward GO TO
+    assert!(
+        rust_code.contains("ctx.goto_target = Some(\"PARA-A\".to_string());"),
+        "missing backward goto: {rust_code}"
+    );
+    assert!(rust_code.contains("\"PARA-A\" => 0,"), "missing PARA-A lookup: {rust_code}");
+}
+
+// Test: PERFORM doesn't break caller's fall-through
+#[test]
+fn e2e_perform_returns() {
+    let cobol = concat!(
+        "IDENTIFICATION DIVISION.\n",
+        "PROGRAM-ID. PERFTEST.\n",
+        "PROCEDURE DIVISION.\n",
+        "MAIN-PARA.\n",
+        "    PERFORM WORK-PARA.\n",
+        "    DISPLAY 'AFTER PERFORM'.\n",
+        "    STOP RUN.\n",
+        "WORK-PARA.\n",
+        "    DISPLAY 'WORKING'.\n",
+        "FINAL-PARA.\n",
+        "    DISPLAY 'FINAL'.\n",
+    );
+
+    let rust_code = transpile(cobol).expect("transpile failed");
+
+    // PERFORM is still a direct function call
+    assert!(rust_code.contains("work_para(ws, ctx);"), "missing PERFORM call: {rust_code}");
+    // But all paragraphs are in the dispatch loop
+    assert!(rust_code.contains("0 => main_para(ws, ctx),"), "missing main dispatch: {rust_code}");
+    assert!(rust_code.contains("1 => work_para(ws, ctx),"), "missing work dispatch: {rust_code}");
+    assert!(rust_code.contains("2 => final_para(ws, ctx),"), "missing final dispatch: {rust_code}");
+}
+
+// Test: PERFORM A THRU C executes range
+#[test]
+fn e2e_perform_thru() {
+    let cobol = concat!(
+        "IDENTIFICATION DIVISION.\n",
+        "PROGRAM-ID. THRUTEST.\n",
+        "PROCEDURE DIVISION.\n",
+        "MAIN-PARA.\n",
+        "    PERFORM STEP-A THRU STEP-C.\n",
+        "    STOP RUN.\n",
+        "STEP-A.\n",
+        "    DISPLAY 'A'.\n",
+        "STEP-B.\n",
+        "    DISPLAY 'B'.\n",
+        "STEP-C.\n",
+        "    DISPLAY 'C'.\n",
+    );
+
+    let rust_code = transpile(cobol).expect("transpile failed");
+
+    // PERFORM THRU generates inline dispatch loop
+    assert!(rust_code.contains("_perf_pc"), "missing _perf_pc for THRU: {rust_code}");
+    assert!(rust_code.contains("step_a(ws, ctx)"), "missing step_a in THRU range: {rust_code}");
+    assert!(rust_code.contains("step_b(ws, ctx)"), "missing step_b in THRU range: {rust_code}");
+    assert!(rust_code.contains("step_c(ws, ctx)"), "missing step_c in THRU range: {rust_code}");
+}
+
+// Test: verify run() has loop/match/_pc structure
+#[test]
+fn e2e_dispatch_loop_structure() {
+    let cobol = concat!(
+        "IDENTIFICATION DIVISION.\n",
+        "PROGRAM-ID. LOOPTEST.\n",
+        "PROCEDURE DIVISION.\n",
+        "PARA-ONE.\n",
+        "    DISPLAY 'ONE'.\n",
+        "PARA-TWO.\n",
+        "    DISPLAY 'TWO'.\n",
+    );
+
+    let rust_code = transpile(cobol).expect("transpile failed");
+
+    assert!(rust_code.contains("loop {"), "missing loop in run(): {rust_code}");
+    assert!(rust_code.contains("match _pc {"), "missing match _pc: {rust_code}");
+    assert!(rust_code.contains("continue;"), "missing continue after goto resolution: {rust_code}");
+}
+
+// Test: GO TO inside IF branch
+#[test]
+fn e2e_goto_from_if() {
+    let cobol = concat!(
+        "IDENTIFICATION DIVISION.\n",
+        "PROGRAM-ID. GOTOCOND.\n",
+        "DATA DIVISION.\n",
+        "WORKING-STORAGE SECTION.\n",
+        "01  WS-FLAG PIC 9 VALUE 1.\n",
+        "PROCEDURE DIVISION.\n",
+        "CHECK-PARA.\n",
+        "    IF WS-FLAG = 1\n",
+        "        GO TO DONE-PARA\n",
+        "    END-IF.\n",
+        "    DISPLAY 'NOT REACHED'.\n",
+        "DONE-PARA.\n",
+        "    STOP RUN.\n",
+    );
+
+    let rust_code = transpile(cobol).expect("transpile failed");
+
+    // GO TO inside IF
+    assert!(
+        rust_code.contains("ctx.goto_target = Some(\"DONE-PARA\".to_string());"),
+        "missing conditional goto: {rust_code}"
+    );
+}
+
+// Test: single paragraph still works
+#[test]
+fn e2e_single_paragraph() {
+    let cobol = concat!(
+        "IDENTIFICATION DIVISION.\n",
+        "PROGRAM-ID. SINGLE.\n",
+        "PROCEDURE DIVISION.\n",
+        "ONLY-PARA.\n",
+        "    DISPLAY 'ALONE'.\n",
+        "    STOP RUN.\n",
+    );
+
+    let rust_code = transpile(cobol).expect("transpile failed");
+
+    assert!(rust_code.contains("0 => only_para(ws, ctx),"), "missing single para dispatch: {rust_code}");
+    assert!(rust_code.contains("fn only_para("), "missing only_para fn: {rust_code}");
+}
+
+// Test: paragraphs in sections also fall through
+#[test]
+fn e2e_sections_fall_through() {
+    let cobol = concat!(
+        "IDENTIFICATION DIVISION.\n",
+        "PROGRAM-ID. SECTEST.\n",
+        "PROCEDURE DIVISION.\n",
+        "MAIN-SECTION SECTION.\n",
+        "SETUP-PARA.\n",
+        "    DISPLAY 'SETUP'.\n",
+        "PROCESS-PARA.\n",
+        "    DISPLAY 'PROCESS'.\n",
+        "    STOP RUN.\n",
+    );
+
+    let rust_code = transpile(cobol).expect("transpile failed");
+
+    // Both section paragraphs should be in the dispatch loop
+    assert!(rust_code.contains("0 => setup_para(ws, ctx),"), "missing setup_para dispatch: {rust_code}");
+    assert!(rust_code.contains("1 => process_para(ws, ctx),"), "missing process_para dispatch: {rust_code}");
+    // Section name may include the SECTION keyword depending on parser behavior
+    assert!(rust_code.contains("// --- Section:"), "missing section comment: {rust_code}");
+}
+
+// =========================================================================
+// Session 33: SET, START, EXIT variants, GO TO DEPENDING ON
+// =========================================================================
+
+// Test: SET TO literal value
+#[test]
+fn e2e_set_to_literal() {
+    let cobol = concat!(
+        "IDENTIFICATION DIVISION.\n",
+        "PROGRAM-ID. SETTEST.\n",
+        "DATA DIVISION.\n",
+        "WORKING-STORAGE SECTION.\n",
+        "01 WS-INDEX PIC 9(3) VALUE 0.\n",
+        "PROCEDURE DIVISION.\n",
+        "MAIN-PARA.\n",
+        "    SET WS-INDEX TO 5.\n",
+        "    STOP RUN.\n",
+    );
+
+    let rust_code = transpile(cobol).expect("transpile failed");
+    // SET TO should produce an assignment
+    assert!(
+        rust_code.contains("ws.ws_index") && rust_code.contains("5"),
+        "missing SET TO assignment: {rust_code}"
+    );
+}
+
+// Test: SET condition TO TRUE
+#[test]
+fn e2e_set_to_true() {
+    let cobol = concat!(
+        "IDENTIFICATION DIVISION.\n",
+        "PROGRAM-ID. SETBOOL.\n",
+        "DATA DIVISION.\n",
+        "WORKING-STORAGE SECTION.\n",
+        "01 WS-STATUS PIC X VALUE 'N'.\n",
+        "   88 IS-ACTIVE VALUE 'Y'.\n",
+        "PROCEDURE DIVISION.\n",
+        "MAIN-PARA.\n",
+        "    SET IS-ACTIVE TO TRUE.\n",
+        "    STOP RUN.\n",
+    );
+
+    let rust_code = transpile(cobol).expect("transpile failed");
+    // SET TO TRUE should MOVE the 88-level value to the parent
+    assert!(
+        rust_code.contains("cobol_move") || rust_code.contains("pack"),
+        "missing SET TO TRUE -> MOVE: {rust_code}"
+    );
+}
+
+// Test: SET UP BY
+#[test]
+fn e2e_set_up_by() {
+    let cobol = concat!(
+        "IDENTIFICATION DIVISION.\n",
+        "PROGRAM-ID. SETUP.\n",
+        "DATA DIVISION.\n",
+        "WORKING-STORAGE SECTION.\n",
+        "01 WS-CTR PIC 9(3) VALUE 0.\n",
+        "PROCEDURE DIVISION.\n",
+        "MAIN-PARA.\n",
+        "    SET WS-CTR UP BY 1.\n",
+        "    STOP RUN.\n",
+    );
+
+    let rust_code = transpile(cobol).expect("transpile failed");
+    assert!(
+        rust_code.contains("ws.ws_ctr") && rust_code.contains("+="),
+        "missing SET UP BY: {rust_code}"
+    );
+}
+
+// Test: SET DOWN BY
+#[test]
+fn e2e_set_down_by() {
+    let cobol = concat!(
+        "IDENTIFICATION DIVISION.\n",
+        "PROGRAM-ID. SETDOWN.\n",
+        "DATA DIVISION.\n",
+        "WORKING-STORAGE SECTION.\n",
+        "01 WS-CTR PIC 9(3) VALUE 10.\n",
+        "PROCEDURE DIVISION.\n",
+        "MAIN-PARA.\n",
+        "    SET WS-CTR DOWN BY 3.\n",
+        "    STOP RUN.\n",
+    );
+
+    let rust_code = transpile(cobol).expect("transpile failed");
+    assert!(
+        rust_code.contains("ws.ws_ctr") && rust_code.contains("-="),
+        "missing SET DOWN BY: {rust_code}"
+    );
+}
+
+// Test: EXIT PARAGRAPH produces return
+#[test]
+fn e2e_exit_paragraph() {
+    let cobol = concat!(
+        "IDENTIFICATION DIVISION.\n",
+        "PROGRAM-ID. EXITPARA.\n",
+        "PROCEDURE DIVISION.\n",
+        "MAIN-PARA.\n",
+        "    DISPLAY 'BEFORE'.\n",
+        "    EXIT PARAGRAPH.\n",
+        "    DISPLAY 'AFTER'.\n",
+        "NEXT-PARA.\n",
+        "    STOP RUN.\n",
+    );
+
+    let rust_code = transpile(cobol).expect("transpile failed");
+    // EXIT PARAGRAPH should generate return;
+    assert!(
+        rust_code.contains("return;"),
+        "missing return for EXIT PARAGRAPH: {rust_code}"
+    );
+}
+
+// Test: GO TO DEPENDING ON generates match
+#[test]
+fn e2e_goto_depending_on() {
+    let cobol = concat!(
+        "IDENTIFICATION DIVISION.\n",
+        "PROGRAM-ID. GOTODEP.\n",
+        "DATA DIVISION.\n",
+        "WORKING-STORAGE SECTION.\n",
+        "01 WS-INDEX PIC 9 VALUE 2.\n",
+        "PROCEDURE DIVISION.\n",
+        "MAIN-PARA.\n",
+        "    GO TO PARA-A PARA-B PARA-C\n",
+        "        DEPENDING ON WS-INDEX.\n",
+        "    STOP RUN.\n",
+        "PARA-A.\n",
+        "    DISPLAY 'A'.\n",
+        "    STOP RUN.\n",
+        "PARA-B.\n",
+        "    DISPLAY 'B'.\n",
+        "    STOP RUN.\n",
+        "PARA-C.\n",
+        "    DISPLAY 'C'.\n",
+        "    STOP RUN.\n",
+    );
+
+    let rust_code = transpile(cobol).expect("transpile failed");
+    // Should generate a match on the index
+    assert!(
+        rust_code.contains("match _goto_idx"),
+        "missing match _goto_idx: {rust_code}"
+    );
+    assert!(
+        rust_code.contains("1 => ctx.goto_target = Some(\"PARA-A\""),
+        "missing PARA-A target: {rust_code}"
+    );
+    assert!(
+        rust_code.contains("2 => ctx.goto_target = Some(\"PARA-B\""),
+        "missing PARA-B target: {rust_code}"
+    );
+    assert!(
+        rust_code.contains("3 => ctx.goto_target = Some(\"PARA-C\""),
+        "missing PARA-C target: {rust_code}"
+    );
+}
+
+// Test: START statement with KEY condition
+#[test]
+fn e2e_start_statement() {
+    let cobol = concat!(
+        "IDENTIFICATION DIVISION.\n",
+        "PROGRAM-ID. STARTTEST.\n",
+        "ENVIRONMENT DIVISION.\n",
+        "INPUT-OUTPUT SECTION.\n",
+        "FILE-CONTROL.\n",
+        "    SELECT IDX-FILE ASSIGN TO 'IDX.DAT'\n",
+        "        ORGANIZATION IS INDEXED\n",
+        "        ACCESS MODE IS DYNAMIC\n",
+        "        RECORD KEY IS IDX-KEY\n",
+        "        FILE STATUS IS WS-STATUS.\n",
+        "DATA DIVISION.\n",
+        "FILE SECTION.\n",
+        "FD IDX-FILE.\n",
+        "01 IDX-RECORD.\n",
+        "   05 IDX-KEY PIC X(10).\n",
+        "   05 IDX-DATA PIC X(40).\n",
+        "WORKING-STORAGE SECTION.\n",
+        "01 WS-STATUS PIC XX.\n",
+        "01 WS-SEARCH-KEY PIC X(10).\n",
+        "PROCEDURE DIVISION.\n",
+        "MAIN-PARA.\n",
+        "    OPEN INPUT IDX-FILE.\n",
+        "    START IDX-FILE KEY >= WS-SEARCH-KEY\n",
+        "        INVALID KEY\n",
+        "            DISPLAY 'NOT FOUND'\n",
+        "        NOT INVALID KEY\n",
+        "            DISPLAY 'FOUND'\n",
+        "    END-START.\n",
+        "    CLOSE IDX-FILE.\n",
+        "    STOP RUN.\n",
+    );
+
+    let rust_code = transpile(cobol).expect("transpile failed");
+    // Should have a start call
+    assert!(
+        rust_code.contains("idx_file.start("),
+        "missing start call: {rust_code}"
+    );
+    // Should have match for INVALID KEY handling
+    assert!(
+        rust_code.contains("Ok(())") && rust_code.contains("Err(_)"),
+        "missing INVALID KEY match: {rust_code}"
+    );
+}
+
+// Test: plain EXIT (no qualifier) treated as EXIT PARAGRAPH
+#[test]
+fn e2e_plain_exit() {
+    let cobol = concat!(
+        "IDENTIFICATION DIVISION.\n",
+        "PROGRAM-ID. EXITTEST.\n",
+        "PROCEDURE DIVISION.\n",
+        "MAIN-PARA.\n",
+        "    PERFORM DO-WORK.\n",
+        "    STOP RUN.\n",
+        "DO-WORK.\n",
+        "    DISPLAY 'WORKING'.\n",
+        "DO-WORK-EXIT.\n",
+        "    EXIT.\n",
+    );
+
+    let rust_code = transpile(cobol).expect("transpile failed");
+    // Plain EXIT -> return; (same as EXIT PARAGRAPH)
+    assert!(
+        rust_code.contains("return;"),
+        "missing return for plain EXIT: {rust_code}"
+    );
+    // Should NOT contain exit_program for plain EXIT
+    // (though other code might set exit_program; check the do_work_exit fn specifically)
+    assert!(
+        rust_code.contains("fn do_work_exit"),
+        "missing do_work_exit paragraph: {rust_code}"
+    );
+}

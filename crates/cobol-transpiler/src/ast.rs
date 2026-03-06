@@ -294,6 +294,7 @@ pub enum PassingMode {
     ByReference,
     ByValue,
     ByContent,
+    Omitted,
 }
 
 /// A section in the PROCEDURE DIVISION.
@@ -365,6 +366,7 @@ pub enum Statement {
 
     // -- Subprogram --
     Call(CallStatement),
+    Cancel(CancelStatement),
 
     // -- Sort/Merge --
     Sort(SortStatement),
@@ -908,7 +910,14 @@ pub struct CallStatement {
 #[derive(Debug, Clone)]
 pub struct CallParam {
     pub mode: PassingMode,
-    pub operand: Operand,
+    /// The operand. `None` when OMITTED.
+    pub operand: Option<Operand>,
+}
+
+/// CANCEL program-name ...
+#[derive(Debug, Clone)]
+pub struct CancelStatement {
+    pub programs: Vec<Operand>,
 }
 
 /// SORT file ON KEY ... USING/INPUT PROCEDURE ... GIVING/OUTPUT PROCEDURE ...

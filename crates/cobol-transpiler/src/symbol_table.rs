@@ -71,6 +71,10 @@ pub struct SymbolEntry {
     pub parent: Option<String>,
     /// OCCURS count (for array items).
     pub occurs: Option<u32>,
+    /// OCCURS DEPENDING ON field name (variable-length arrays).
+    pub occurs_depending: Option<String>,
+    /// REDEFINES target name (byte-level storage sharing).
+    pub redefines: Option<String>,
 }
 
 /// Symbol table built from DATA DIVISION entries.
@@ -115,6 +119,8 @@ impl SymbolTable {
             resolved_type,
             parent,
             occurs: entry.occurs,
+            occurs_depending: entry.occurs_depending.clone(),
+            redefines: entry.redefines.clone(),
         };
 
         self.entries

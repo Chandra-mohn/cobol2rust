@@ -294,6 +294,7 @@ dependencies = [
  "cobol-core",
  "cobol-io",
  "cobol-types",
+ "rust_decimal",
  "tempfile",
 ]
 

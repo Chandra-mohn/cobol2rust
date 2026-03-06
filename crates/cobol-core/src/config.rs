@@ -1,3 +1,4 @@
+use crate::ebcdic::CodePage;
 use serde::{Deserialize, Serialize};
 
 /// Target COBOL dialect for runtime behavior.
@@ -87,6 +88,8 @@ pub struct RuntimeConfig {
     pub diagnostic_level: DiagnosticLevel,
     pub allow_de_editing: bool,
     pub default_collating: CollatingSequence,
+    /// EBCDIC code page for file I/O encoding conversion.
+    pub code_page: CodePage,
 }
 
 impl Default for RuntimeConfig {
@@ -98,6 +101,7 @@ impl Default for RuntimeConfig {
             diagnostic_level: DiagnosticLevel::Silent,
             allow_de_editing: true,
             default_collating: CollatingSequence::Native,
+            code_page: CodePage::default(),
         }
     }
 }

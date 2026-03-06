@@ -4,9 +4,15 @@
 
 // Core traits and types
 pub use cobol_core::{
-    ArithError, ArithMode, CobolDialect, CobolError, CobolField, CobolGroup, CobolNumeric,
-    CobolNumericEdited, CollatingSequence, DataCategory, DiagnosticLevel, EditSymbol, FileError,
-    NumProc, RoundingMode, RuntimeConfig, SortError,
+    ArithError, ArithMode, CallError, CobolDialect, CobolError, CobolField, CobolGroup,
+    CobolNumeric, CobolNumericEdited, CodePage, CollatingSequence, DataCategory, DiagnosticLevel,
+    EditSymbol, FileError, NumProc, RoundingMode, RuntimeConfig, SortError,
+};
+
+// EBCDIC conversion utilities
+pub use cobol_core::ebcdic::{
+    ascii_to_ebcdic, ascii_to_ebcdic_byte, ascii_to_ebcdic_copy, ebcdic_collating_weights,
+    ebcdic_to_ascii, ebcdic_to_ascii_byte, ebcdic_to_ascii_copy,
 };
 
 // Core decimal utilities
@@ -21,8 +27,9 @@ pub use cobol_core::numeric_parse::{
 
 // Data types
 pub use cobol_types::{
-    CobolArray, CompBinary, ConditionValue, FigurativeConstant, Level88Predicate, Level88Value,
-    NumericEdited, PackedDecimal, PicA, PicX, ZonedDecimal,
+    CobolArray, CobolVarArray, CompBinary, ConditionValue, FigurativeConstant, Level88Predicate,
+    Level88Value, NumericEdited, PackedDecimal, PicA, PicX, RedefinesGroup, ZonedDecimal,
+    sync_field_to_redefines, sync_redefines_to_field,
 };
 
 // MOVE engine
@@ -48,9 +55,56 @@ pub use cobol_io::{
 #[cfg(feature = "io")]
 pub use cobol_io::IndexedFile;
 
+// Sort/merge
+#[cfg(feature = "sort")]
+pub use cobol_sort::{
+    CobolMergeEngine, CobolSortEngine, CollatingTable, Releaser, Returner, SortConfig,
+    SortKeySpec, SortKeyType, SortReturn, sort_with_input_procedure, sort_with_output_procedure,
+    sort_with_procedures,
+};
+
 // Decimal type and macro
 pub use rust_decimal::Decimal;
 pub use rust_decimal_macros::dec;
+
+// INSPECT verb
+pub use crate::inspect::{
+    BeforeAfter, InspectWhat, ReplacingSpec, TallyingSpec, cobol_inspect_converting,
+    cobol_inspect_replacing, cobol_inspect_tallying,
+};
+
+// STRING verb
+pub use crate::string_verb::{StringDelimiter, StringResult, StringSourceSpec, cobol_string};
+
+// UNSTRING verb
+pub use crate::unstring_verb::{
+    UnstringDelimSpec, UnstringResult, cobol_unstring, cobol_unstring_simple,
+};
+
+// Intrinsic functions
+pub use crate::intrinsics::{
+    // Numeric
+    cobol_function_abs, cobol_function_acos, cobol_function_asin, cobol_function_atan,
+    cobol_function_cos, cobol_function_factorial, cobol_function_integer,
+    cobol_function_integer_part, cobol_function_length, cobol_function_log,
+    cobol_function_log10, cobol_function_max, cobol_function_min, cobol_function_mod,
+    cobol_function_numval, cobol_function_numval_c, cobol_function_ord,
+    cobol_function_ord_max, cobol_function_ord_min, cobol_function_random,
+    cobol_function_rem, cobol_function_sin, cobol_function_sqrt, cobol_function_tan,
+    // String
+    cobol_function_concatenate, cobol_function_current_date, cobol_function_lower_case,
+    cobol_function_reverse, cobol_function_trim, cobol_function_upper_case,
+    cobol_function_when_compiled,
+};
+
+// Reference modification
+pub use crate::ref_mod::{ref_mod_read, ref_mod_read_to_end, ref_mod_write, ref_mod_write_to_end};
+
+// CALL/CANCEL
+pub use crate::call::{
+    CallDispatcher, CallParam, CallParamMode, CallableProgram, call_param_by_content,
+    call_param_by_ref, call_param_by_value, call_param_omitted, cobol_call, cobol_cancel,
+};
 
 // Runtime program lifecycle
 pub use crate::display::{accept_from_sysin, display_upon_syserr, display_upon_sysout};

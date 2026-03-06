@@ -14,6 +14,7 @@ workspace = true
 cobol-core = { workspace = true }
 cobol-types = { workspace = true }
 cobol-io = { workspace = true }
+rust_decimal = { workspace = true }
 tempfile = { workspace = true }
 
 [dev-dependencies]

@@ -179,11 +179,29 @@ fn extract_statement<'input>(ctx: &StatementContext<'input>) -> Option<Statement
     if let Some(c) = ctx.callStatement() {
         return Some(extract_call(&*c));
     }
+    if let Some(c) = ctx.cancelStatement() {
+        return Some(extract_cancel(&*c));
+    }
     if let Some(c) = ctx.acceptStatement() {
         return Some(extract_accept(&*c));
     }
-    if ctx.exitStatement().is_some() {
-        return Some(Statement::ExitProgram);
+    if let Some(c) = ctx.exitStatement() {
+        let text = c.get_text().to_uppercase();
+        if text.contains("PROGRAM") {
+            return Some(Statement::ExitProgram);
+        } else if text.contains("SECTION") {
+            return Some(Statement::ExitSection);
+        } else if text.contains("PARAGRAPH") {
+            return Some(Statement::ExitParagraph);
+        }
+        // Plain EXIT -> same as EXIT PARAGRAPH (COBOL standard)
+        return Some(Statement::ExitParagraph);
+    }
+    if let Some(c) = ctx.setStatement() {
+        return Some(extract_set(&*c));
+    }
+    if let Some(c) = ctx.startStatement() {
+        return Some(extract_start(&*c));
     }
     if let Some(c) = ctx.openStatement() {
         return Some(extract_open(&*c));
@@ -202,6 +220,27 @@ fn extract_statement<'input>(ctx: &StatementContext<'input>) -> Option<Statement
     }
     if let Some(c) = ctx.deleteStatement() {
         return Some(extract_delete(&*c));
+    }
+    if let Some(c) = ctx.sortStatement() {
+        return Some(extract_sort(&*c));
+    }
+    if let Some(c) = ctx.mergeStatement() {
+        return Some(extract_merge(&*c));
+    }
+    if let Some(c) = ctx.releaseStatement() {
+        return Some(extract_release(&*c));
+    }
+    if let Some(c) = ctx.returnStatement() {
+        return Some(extract_return(&*c));
+    }
+    if let Some(c) = ctx.inspectStatement() {
+        return Some(extract_inspect(&*c));
+    }
+    if let Some(c) = ctx.stringStatement() {
+        return Some(extract_string(&*c));
+    }
+    if let Some(c) = ctx.unstringStatement() {
+        return Some(extract_unstring(&*c));
     }
     // Unsupported statement -- skip
     None
@@ -784,16 +823,19 @@ fn extract_goto<'input>(ctx: &GoToStatementContext<'input>) -> Statement {
             depending: None,
         })
     } else if let Some(dep) = ctx.goToDependingOnStatement() {
-        let text = dep.get_text().to_uppercase();
-        let targets: Vec<String> = text
-            .split_whitespace()
-            .filter(|w| *w != "DEPENDINGON" && *w != "DEPENDING" && *w != "ON")
-            .map(|s| s.to_string())
+        // Extract targets from procedureName() children (not fragile text split)
+        let targets: Vec<String> = dep
+            .procedureName_all()
+            .iter()
+            .map(|pn| pn.get_text().trim().to_uppercase())
             .collect();
-        Statement::GoTo(GoToStatement {
-            targets,
-            depending: None,
-        })
+
+        // Extract the DEPENDING ON identifier
+        let depending = dep
+            .identifier()
+            .map(|id| extract_data_ref_from_identifier(&*id));
+
+        Statement::GoTo(GoToStatement { targets, depending })
     } else {
         Statement::GoTo(GoToStatement {
             targets: Vec::new(),
@@ -832,12 +874,294 @@ fn extract_call<'input>(ctx: &CallStatementContext<'input>) -> Statement {
         Operand::Literal(Literal::Alphanumeric(String::new()))
     };
 
+    // Extract USING parameters
+    let using = if let Some(using_phrase) = ctx.callUsingPhrase() {
+        extract_call_using_params(&*using_phrase)
+    } else {
+        Vec::new()
+    };
+
+    // Extract RETURNING / GIVING field
+    let returning = ctx.callGivingPhrase().and_then(|gp| {
+        gp.identifier()
+            .map(|id| extract_data_ref_from_identifier(&*id))
+    });
+
+    // ON EXCEPTION / ON OVERFLOW (synonym in CALL context)
+    let mut on_exception = extract_on_exception_stmts(ctx.onExceptionClause().as_deref());
+    if on_exception.is_empty() {
+        on_exception = extract_on_overflow_stmts(ctx.onOverflowPhrase().as_deref());
+    }
+
+    // NOT ON EXCEPTION
+    let not_on_exception =
+        extract_not_on_exception_stmts(ctx.notOnExceptionClause().as_deref());
+
     Statement::Call(CallStatement {
         program,
-        using: Vec::new(), // Simplified: skip USING extraction for now
-        returning: None,
-        on_exception: Vec::new(),
-        not_on_exception: Vec::new(),
+        using,
+        returning,
+        on_exception,
+        not_on_exception,
+    })
+}
+
+fn extract_call_using_params<'input>(
+    ctx: &CallUsingPhraseContext<'input>,
+) -> Vec<CallParam> {
+    let mut params = Vec::new();
+
+    for param_ctx in ctx.callUsingParameter_all() {
+        // BY REFERENCE (default)
+        if let Some(ref_phrase) = param_ctx.callByReferencePhrase() {
+            for ref_item in ref_phrase.callByReference_all() {
+                if ref_item.OMITTED().is_some() {
+                    params.push(CallParam {
+                        mode: PassingMode::Omitted,
+                        operand: None,
+                    });
+                } else if let Some(id) = ref_item.identifier() {
+                    params.push(CallParam {
+                        mode: PassingMode::ByReference,
+                        operand: Some(Operand::DataRef(
+                            extract_data_ref_from_identifier(&*id),
+                        )),
+                    });
+                } else if let Some(lit) = ref_item.literal() {
+                    params.push(CallParam {
+                        mode: PassingMode::ByReference,
+                        operand: Some(extract_literal_operand(&*lit)),
+                    });
+                }
+            }
+        }
+
+        // BY CONTENT
+        if let Some(content_phrase) = param_ctx.callByContentPhrase() {
+            for content_item in content_phrase.callByContent_all() {
+                if content_item.OMITTED().is_some() {
+                    params.push(CallParam {
+                        mode: PassingMode::Omitted,
+                        operand: None,
+                    });
+                } else if let Some(id) = content_item.identifier() {
+                    params.push(CallParam {
+                        mode: PassingMode::ByContent,
+                        operand: Some(Operand::DataRef(
+                            extract_data_ref_from_identifier(&*id),
+                        )),
+                    });
+                } else if let Some(lit) = content_item.literal() {
+                    params.push(CallParam {
+                        mode: PassingMode::ByContent,
+                        operand: Some(extract_literal_operand(&*lit)),
+                    });
+                }
+            }
+        }
+
+        // BY VALUE
+        if let Some(value_phrase) = param_ctx.callByValuePhrase() {
+            for value_item in value_phrase.callByValue_all() {
+                if let Some(id) = value_item.identifier() {
+                    params.push(CallParam {
+                        mode: PassingMode::ByValue,
+                        operand: Some(Operand::DataRef(
+                            extract_data_ref_from_identifier(&*id),
+                        )),
+                    });
+                } else if let Some(lit) = value_item.literal() {
+                    params.push(CallParam {
+                        mode: PassingMode::ByValue,
+                        operand: Some(extract_literal_operand(&*lit)),
+                    });
+                }
+            }
+        }
+    }
+
+    params
+}
+
+fn extract_on_exception_stmts<'input>(
+    ctx: Option<&OnExceptionClauseContext<'input>>,
+) -> Vec<Statement> {
+    ctx.map(|c| {
+        c.statement_all()
+            .iter()
+            .filter_map(|s| extract_statement(&**s))
+            .collect()
+    })
+    .unwrap_or_default()
+}
+
+fn extract_not_on_exception_stmts<'input>(
+    ctx: Option<&NotOnExceptionClauseContext<'input>>,
+) -> Vec<Statement> {
+    ctx.map(|c| {
+        c.statement_all()
+            .iter()
+            .filter_map(|s| extract_statement(&**s))
+            .collect()
+    })
+    .unwrap_or_default()
+}
+
+fn extract_cancel<'input>(ctx: &CancelStatementContext<'input>) -> Statement {
+    let programs: Vec<Operand> = ctx
+        .cancelCall_all()
+        .iter()
+        .filter_map(|cc| {
+            if let Some(id) = cc.identifier() {
+                Some(Operand::DataRef(extract_data_ref_from_identifier(&*id)))
+            } else if let Some(lit) = cc.literal() {
+                Some(extract_literal_operand(&*lit))
+            } else {
+                // libraryName fallback -- use text
+                cc.libraryName().map(|ln| {
+                    Operand::Literal(Literal::Alphanumeric(
+                        ln.get_text().trim().to_uppercase(),
+                    ))
+                })
+            }
+        })
+        .collect();
+
+    Statement::Cancel(CancelStatement { programs })
+}
+
+/// Extract a SET statement from the parse tree.
+///
+/// Handles:
+/// - SET target TO value/identifier (SetAction::To)
+/// - SET condition TO TRUE/FALSE (SetAction::ToBool)
+/// - SET target UP BY value (SetAction::UpBy)
+/// - SET target DOWN BY value (SetAction::DownBy)
+fn extract_set<'input>(ctx: &SetStatementContext<'input>) -> Statement {
+    // SET ... TO ... (one or more setToStatement children)
+    let to_stmts = ctx.setToStatement_all();
+    if !to_stmts.is_empty() {
+        // Use the first setToStatement (most common case: single SET ... TO ...)
+        let to_stmt = &to_stmts[0];
+
+        // Extract targets from setTo children
+        let targets: Vec<DataReference> = to_stmt
+            .setTo_all()
+            .iter()
+            .filter_map(|st| {
+                st.identifier()
+                    .map(|id| extract_data_ref_from_identifier(&*id))
+            })
+            .collect();
+
+        // Extract value from setToValue children
+        let values = to_stmt.setToValue_all();
+        let action = if let Some(val) = values.first() {
+            let text = val.get_text().to_uppercase();
+            if text == "TRUE" || val.ON().is_some() {
+                SetAction::ToBool(true)
+            } else if text == "FALSE" || val.OFF().is_some() {
+                SetAction::ToBool(false)
+            } else if let Some(id) = val.identifier() {
+                SetAction::To(Operand::DataRef(extract_data_ref_from_identifier(&*id)))
+            } else if let Some(lit) = val.literal() {
+                SetAction::To(extract_literal_operand(&*lit))
+            } else {
+                // Fallback: parse text as identifier or literal
+                SetAction::To(extract_identifier_or_literal_from_text(&text))
+            }
+        } else {
+            // No value -- shouldn't happen but handle gracefully
+            SetAction::To(Operand::Literal(Literal::Numeric("0".to_string())))
+        };
+
+        return Statement::Set(SetStatement { targets, action });
+    }
+
+    // SET ... UP BY / DOWN BY
+    if let Some(updown) = ctx.setUpDownByStatement() {
+        let targets: Vec<DataReference> = updown
+            .setTo_all()
+            .iter()
+            .filter_map(|st| {
+                st.identifier()
+                    .map(|id| extract_data_ref_from_identifier(&*id))
+            })
+            .collect();
+
+        let value = if let Some(by_val) = updown.setByValue() {
+            if let Some(id) = by_val.identifier() {
+                Operand::DataRef(extract_data_ref_from_identifier(&*id))
+            } else if let Some(lit) = by_val.literal() {
+                extract_literal_operand(&*lit)
+            } else {
+                Operand::Literal(Literal::Numeric(by_val.get_text().trim().to_string()))
+            }
+        } else {
+            Operand::Literal(Literal::Numeric("1".to_string()))
+        };
+
+        let action = if updown.UP().is_some() {
+            SetAction::UpBy(value)
+        } else {
+            SetAction::DownBy(value)
+        };
+
+        return Statement::Set(SetStatement { targets, action });
+    }
+
+    // Fallback
+    Statement::Set(SetStatement {
+        targets: Vec::new(),
+        action: SetAction::To(Operand::Literal(Literal::Numeric("0".to_string()))),
+    })
+}
+
+/// Extract a START statement from the parse tree.
+fn extract_start<'input>(ctx: &StartStatementContext<'input>) -> Statement {
+    let file_name = ctx
+        .fileName()
+        .map(|f| f.get_text().trim().to_uppercase())
+        .unwrap_or_default();
+
+    let key_condition = ctx.startKey().map(|sk| {
+        let key = sk
+            .qualifiedDataName()
+            .map(|qdn| extract_data_ref_from_qualified(&*qdn))
+            .unwrap_or_else(|| make_data_ref("UNKNOWN-KEY"));
+
+        // Determine comparison operator from grammar tokens
+        let op = if sk.EQUAL().is_some() || sk.EQUALCHAR().is_some() {
+            ComparisonOp::Equal
+        } else if sk.NOT().is_some() {
+            // NOT LESS THAN or NOT LESSTHANCHAR -> GreaterOrEqual
+            ComparisonOp::GreaterOrEqual
+        } else if sk.OR().is_some() || sk.MORETHANOREQUAL().is_some() {
+            // GREATER THAN OR EQUAL TO or >= -> GreaterOrEqual
+            ComparisonOp::GreaterOrEqual
+        } else if sk.GREATER().is_some() || sk.MORETHANCHAR().is_some() {
+            ComparisonOp::GreaterThan
+        } else {
+            // Default to EQUAL if we can't determine
+            ComparisonOp::Equal
+        };
+
+        StartKeyCondition { key, op }
+    });
+
+    let invalid_key = extract_invalid_key_stmts(
+        ctx.invalidKeyPhrase().as_deref(),
+    );
+
+    let not_invalid_key = extract_not_invalid_key_stmts(
+        ctx.notInvalidKeyPhrase().as_deref(),
+    );
+
+    Statement::Start(StartStatement {
+        file_name,
+        key_condition,
+        invalid_key,
+        not_invalid_key,
     })
 }
 
@@ -1495,6 +1819,25 @@ fn extract_basis<'input>(ctx: &BasisContext<'input>) -> ArithExpr {
 // Helper functions: identifier/literal extraction
 // ---------------------------------------------------------------------------
 
+/// Extract a RefMod from a referenceModifier context.
+fn extract_ref_mod<'input>(ctx: &ReferenceModifierContext<'input>) -> RefMod {
+    let offset = ctx
+        .characterPosition()
+        .and_then(|cp| cp.arithmeticExpression())
+        .map(|ae| extract_arith_expr(&*ae))
+        .unwrap_or(ArithExpr::Operand(Operand::Literal(Literal::Numeric(
+            "1".to_string(),
+        ))));
+    let length = ctx
+        .length()
+        .and_then(|l| l.arithmeticExpression())
+        .map(|ae| Box::new(extract_arith_expr(&*ae)));
+    RefMod {
+        offset: Box::new(offset),
+        length,
+    }
+}
+
 /// Extract a DataReference from an IdentifierContext.
 fn extract_data_ref_from_identifier<'input>(
     ctx: &IdentifierContext<'input>,
@@ -1519,8 +1862,11 @@ fn extract_data_ref_from_identifier<'input>(
                 }
             })
             .collect();
+        // Extract reference modification if present
+        let ref_mod = tc.referenceModifier().map(|rm| extract_ref_mod(&*rm));
         DataReference {
             subscripts,
+            ref_mod,
             ..base
         }
     } else {
@@ -1865,6 +2211,557 @@ fn strip_cobol_quotes(s: &str) -> String {
     } else {
         trimmed.to_string()
     }
+}
+
+// ---------------------------------------------------------------------------
+// Phase 3 statement extractors: SORT, MERGE, RELEASE, RETURN, INSPECT, STRING, UNSTRING
+// ---------------------------------------------------------------------------
+
+fn extract_sort<'input>(ctx: &SortStatementContext<'input>) -> Statement {
+    let file_name = ctx
+        .fileName()
+        .map(|f| f.get_text().trim().to_uppercase())
+        .unwrap_or_default();
+
+    // Extract sort keys
+    let mut keys = Vec::new();
+    for key_clause in ctx.sortOnKeyClause_all() {
+        let ascending = key_clause.ASCENDING().is_some();
+        for qdn in key_clause.qualifiedDataName_all() {
+            keys.push(SortKey {
+                ascending,
+                field: make_data_ref(&qdn.get_text()),
+            });
+        }
+    }
+
+    let duplicates = ctx.sortDuplicatesPhrase().is_some();
+
+    let collating = ctx
+        .sortCollatingSequencePhrase()
+        .map(|c| c.get_text().trim().to_uppercase());
+
+    // Input: USING files or INPUT PROCEDURE
+    let input = if let Some(input_proc) = ctx.sortInputProcedurePhrase() {
+        let name = input_proc
+            .procedureName()
+            .map(|p| p.get_text().trim().to_uppercase())
+            .unwrap_or_default();
+        let thru = input_proc
+            .sortInputThrough()
+            .and_then(|t| t.procedureName().map(|p| p.get_text().trim().to_uppercase()));
+        SortInput::InputProcedure { name, thru }
+    } else {
+        let files: Vec<String> = ctx
+            .sortUsing_all()
+            .iter()
+            .flat_map(|su| su.fileName_all())
+            .map(|f| f.get_text().trim().to_uppercase())
+            .collect();
+        SortInput::Using(files)
+    };
+
+    // Output: GIVING files or OUTPUT PROCEDURE
+    let output = if let Some(output_proc) = ctx.sortOutputProcedurePhrase() {
+        let name = output_proc
+            .procedureName()
+            .map(|p| p.get_text().trim().to_uppercase())
+            .unwrap_or_default();
+        let thru = output_proc
+            .sortOutputThrough()
+            .and_then(|t| t.procedureName().map(|p| p.get_text().trim().to_uppercase()));
+        SortOutput::OutputProcedure { name, thru }
+    } else {
+        let files: Vec<String> = ctx
+            .sortGivingPhrase_all()
+            .iter()
+            .flat_map(|sg| sg.sortGiving_all())
+            .flat_map(|g| g.fileName())
+            .map(|f| f.get_text().trim().to_uppercase())
+            .collect();
+        SortOutput::Giving(files)
+    };
+
+    Statement::Sort(SortStatement {
+        file_name,
+        keys,
+        duplicates,
+        collating,
+        input,
+        output,
+    })
+}
+
+fn extract_merge<'input>(ctx: &MergeStatementContext<'input>) -> Statement {
+    let file_name = ctx
+        .fileName()
+        .map(|f| f.get_text().trim().to_uppercase())
+        .unwrap_or_default();
+
+    let mut keys = Vec::new();
+    for key_clause in ctx.mergeOnKeyClause_all() {
+        let ascending = key_clause.ASCENDING().is_some();
+        for qdn in key_clause.qualifiedDataName_all() {
+            keys.push(SortKey {
+                ascending,
+                field: make_data_ref(&qdn.get_text()),
+            });
+        }
+    }
+
+    let collating = ctx
+        .mergeCollatingSequencePhrase()
+        .map(|c| c.get_text().trim().to_uppercase());
+
+    let using: Vec<String> = ctx
+        .mergeUsing_all()
+        .iter()
+        .flat_map(|mu| mu.fileName_all())
+        .map(|f| f.get_text().trim().to_uppercase())
+        .collect();
+
+    let output = if let Some(output_proc) = ctx.mergeOutputProcedurePhrase() {
+        let name = output_proc
+            .procedureName()
+            .map(|p| p.get_text().trim().to_uppercase())
+            .unwrap_or_default();
+        let thru = output_proc
+            .mergeOutputThrough()
+            .and_then(|t| t.procedureName().map(|p| p.get_text().trim().to_uppercase()));
+        SortOutput::OutputProcedure { name, thru }
+    } else {
+        let files: Vec<String> = ctx
+            .mergeGivingPhrase_all()
+            .iter()
+            .flat_map(|mg| mg.mergeGiving_all())
+            .flat_map(|g| g.fileName())
+            .map(|f| f.get_text().trim().to_uppercase())
+            .collect();
+        SortOutput::Giving(files)
+    };
+
+    Statement::Merge(MergeStatement {
+        file_name,
+        keys,
+        collating,
+        using,
+        output,
+    })
+}
+
+fn extract_release<'input>(ctx: &ReleaseStatementContext<'input>) -> Statement {
+    let record_name = ctx
+        .recordName()
+        .map(|r| r.get_text().trim().to_uppercase())
+        .unwrap_or_default();
+
+    let from = ctx
+        .qualifiedDataName()
+        .map(|q| make_data_ref(&q.get_text()));
+
+    Statement::Release(ReleaseStatement { record_name, from })
+}
+
+fn extract_return<'input>(ctx: &ReturnStatementContext<'input>) -> Statement {
+    let file_name = ctx
+        .fileName()
+        .map(|f| f.get_text().trim().to_uppercase())
+        .unwrap_or_default();
+
+    let into = ctx
+        .returnInto()
+        .and_then(|ri| ri.qualifiedDataName().map(|q| make_data_ref(&q.get_text())));
+
+    let at_end = extract_at_end_stmts(ctx.atEndPhrase().as_deref());
+    let not_at_end = extract_not_at_end_stmts(ctx.notAtEndPhrase().as_deref());
+
+    Statement::Return(ReturnStatement {
+        file_name,
+        into,
+        at_end,
+        not_at_end,
+    })
+}
+
+fn extract_at_end_stmts<'input>(ctx: Option<&AtEndPhraseContext<'input>>) -> Vec<Statement> {
+    ctx.map(|c| {
+        c.statement_all()
+            .iter()
+            .filter_map(|s| extract_statement(&**s))
+            .collect()
+    })
+    .unwrap_or_default()
+}
+
+fn extract_not_at_end_stmts<'input>(
+    ctx: Option<&NotAtEndPhraseContext<'input>>,
+) -> Vec<Statement> {
+    ctx.map(|c| {
+        c.statement_all()
+            .iter()
+            .filter_map(|s| extract_statement(&**s))
+            .collect()
+    })
+    .unwrap_or_default()
+}
+
+fn extract_on_overflow_stmts<'input>(
+    ctx: Option<&OnOverflowPhraseContext<'input>>,
+) -> Vec<Statement> {
+    ctx.map(|c| {
+        c.statement_all()
+            .iter()
+            .filter_map(|s| extract_statement(&**s))
+            .collect()
+    })
+    .unwrap_or_default()
+}
+
+fn extract_not_on_overflow_stmts<'input>(
+    ctx: Option<&NotOnOverflowPhraseContext<'input>>,
+) -> Vec<Statement> {
+    ctx.map(|c| {
+        c.statement_all()
+            .iter()
+            .filter_map(|s| extract_statement(&**s))
+            .collect()
+    })
+    .unwrap_or_default()
+}
+
+fn extract_inspect<'input>(ctx: &InspectStatementContext<'input>) -> Statement {
+    let target = ctx
+        .identifier()
+        .map(|id| extract_data_ref_from_identifier(&*id))
+        .unwrap_or_else(|| make_data_ref(""));
+
+    let mut tallying = Vec::new();
+    let mut replacing = Vec::new();
+    let mut converting = None;
+
+    // INSPECT ... TALLYING
+    if let Some(tp) = ctx.inspectTallyingPhrase() {
+        tallying = extract_inspect_tallying_items(&tp);
+    }
+
+    // INSPECT ... REPLACING
+    if let Some(rp) = ctx.inspectReplacingPhrase() {
+        replacing = extract_inspect_replacing_items(&rp);
+    }
+
+    // INSPECT ... TALLYING ... REPLACING (combined)
+    if let Some(trp) = ctx.inspectTallyingReplacingPhrase() {
+        for inspect_for in trp.inspectFor_all() {
+            tallying.extend(extract_inspect_for_items(&inspect_for));
+        }
+        for rep_phrase in trp.inspectReplacingPhrase_all() {
+            replacing.extend(extract_inspect_replacing_items(&rep_phrase));
+        }
+    }
+
+    // INSPECT ... CONVERTING
+    if let Some(cp) = ctx.inspectConvertingPhrase() {
+        let from_text = if let Some(id) = cp.identifier() {
+            extract_operand_from_identifier_or_literal_ctx(&id.get_text())
+        } else if let Some(lit) = cp.literal() {
+            extract_literal_operand(&*lit)
+        } else {
+            Operand::Literal(Literal::Alphanumeric(String::new()))
+        };
+
+        let to_text = cp
+            .inspectTo()
+            .map(|to| {
+                if let Some(id) = to.identifier() {
+                    extract_operand_from_identifier_or_literal_ctx(&id.get_text())
+                } else if let Some(lit) = to.literal() {
+                    extract_literal_operand(&*lit)
+                } else {
+                    Operand::Literal(Literal::Alphanumeric(String::new()))
+                }
+            })
+            .unwrap_or(Operand::Literal(Literal::Alphanumeric(String::new())));
+
+        converting = Some(InspectConverting {
+            from: from_text,
+            to: to_text,
+        });
+    }
+
+    Statement::Inspect(InspectStatement {
+        target,
+        tallying,
+        replacing,
+        converting,
+    })
+}
+
+fn extract_inspect_tallying_items<'input>(
+    tp: &InspectTallyingPhraseContext<'input>,
+) -> Vec<InspectTallying> {
+    let mut items = Vec::new();
+    for inspect_for in tp.inspectFor_all() {
+        items.extend(extract_inspect_for_items(&inspect_for));
+    }
+    items
+}
+
+fn extract_inspect_for_items<'input>(
+    inspect_for: &InspectForContext<'input>,
+) -> Vec<InspectTallying> {
+    let counter = inspect_for
+        .identifier()
+        .map(|id| extract_data_ref_from_identifier(&*id))
+        .unwrap_or_else(|| make_data_ref(""));
+
+    let mut items = Vec::new();
+
+    // CHARACTERS
+    for chars_ctx in inspect_for.inspectCharacters_all() {
+        items.push(InspectTallying {
+            counter: counter.clone(),
+            what: InspectWhat::Characters,
+        });
+        let _ = chars_ctx; // before/after deferred to codegen
+    }
+
+    // ALL / LEADING
+    for all_leading in inspect_for.inspectAllLeadings_all() {
+        let is_all = all_leading.ALL().is_some();
+        for al in all_leading.inspectAllLeading_all() {
+            let pattern = if let Some(id) = al.identifier() {
+                extract_operand_from_identifier_or_literal_ctx(&id.get_text())
+            } else if let Some(lit) = al.literal() {
+                extract_literal_operand(&*lit)
+            } else {
+                Operand::Literal(Literal::Alphanumeric(String::new()))
+            };
+
+            let what = if is_all {
+                InspectWhat::All(pattern)
+            } else {
+                InspectWhat::Leading(pattern)
+            };
+
+            items.push(InspectTallying {
+                counter: counter.clone(),
+                what,
+            });
+        }
+    }
+
+    items
+}
+
+fn extract_inspect_replacing_items<'input>(
+    rp: &InspectReplacingPhraseContext<'input>,
+) -> Vec<InspectReplacing> {
+    let mut items = Vec::new();
+
+    // CHARACTERS BY ...
+    for chars_ctx in rp.inspectReplacingCharacters_all() {
+        let by = chars_ctx
+            .inspectBy()
+            .map(|by| {
+                if let Some(id) = by.identifier() {
+                    extract_operand_from_identifier_or_literal_ctx(&id.get_text())
+                } else if let Some(lit) = by.literal() {
+                    extract_literal_operand(&*lit)
+                } else {
+                    Operand::Literal(Literal::Alphanumeric(String::new()))
+                }
+            })
+            .unwrap_or(Operand::Literal(Literal::Alphanumeric(String::new())));
+
+        items.push(InspectReplacing {
+            what: InspectWhat::Characters,
+            by,
+        });
+    }
+
+    // ALL / LEADING / FIRST ... BY ...
+    for all_leadings in rp.inspectReplacingAllLeadings_all() {
+        let is_all = all_leadings.ALL().is_some();
+        let is_first = all_leadings.FIRST().is_some();
+
+        for ral in all_leadings.inspectReplacingAllLeading_all() {
+            let pattern = if let Some(id) = ral.identifier() {
+                extract_operand_from_identifier_or_literal_ctx(&id.get_text())
+            } else if let Some(lit) = ral.literal() {
+                extract_literal_operand(&*lit)
+            } else {
+                Operand::Literal(Literal::Alphanumeric(String::new()))
+            };
+
+            let by = ral
+                .inspectBy()
+                .map(|by| {
+                    if let Some(id) = by.identifier() {
+                        extract_operand_from_identifier_or_literal_ctx(&id.get_text())
+                    } else if let Some(lit) = by.literal() {
+                        extract_literal_operand(&*lit)
+                    } else {
+                        Operand::Literal(Literal::Alphanumeric(String::new()))
+                    }
+                })
+                .unwrap_or(Operand::Literal(Literal::Alphanumeric(String::new())));
+
+            let what = if is_first {
+                InspectWhat::First(pattern)
+            } else if is_all {
+                InspectWhat::All(pattern)
+            } else {
+                InspectWhat::Leading(pattern)
+            };
+
+            items.push(InspectReplacing { what, by });
+        }
+    }
+
+    items
+}
+
+fn extract_string<'input>(ctx: &StringStatementContext<'input>) -> Statement {
+    let into = ctx
+        .stringIntoPhrase()
+        .and_then(|ip| ip.identifier().map(|id| extract_data_ref_from_identifier(&*id)))
+        .unwrap_or_else(|| make_data_ref(""));
+
+    let mut sources = Vec::new();
+    for sp in ctx.stringSendingPhrase_all() {
+        // Each sending phrase has sending items + a delimiter phrase
+        let delimiter = sp
+            .stringDelimitedByPhrase()
+            .map(|dp| {
+                if dp.SIZE().is_some() {
+                    StringDelimiter::Size
+                } else if let Some(id) = dp.identifier() {
+                    StringDelimiter::Literal(extract_operand_from_identifier_or_literal_ctx(
+                        &id.get_text(),
+                    ))
+                } else if let Some(lit) = dp.literal() {
+                    StringDelimiter::Literal(extract_literal_operand(&*lit))
+                } else {
+                    StringDelimiter::Size
+                }
+            })
+            .unwrap_or(StringDelimiter::Size);
+
+        for sending in sp.stringSending_all() {
+            let operand = if let Some(id) = sending.identifier() {
+                extract_operand_from_identifier_or_literal_ctx(&id.get_text())
+            } else if let Some(lit) = sending.literal() {
+                extract_literal_operand(&*lit)
+            } else {
+                Operand::Literal(Literal::Alphanumeric(String::new()))
+            };
+
+            sources.push(StringSource {
+                operand,
+                delimited_by: delimiter.clone(),
+            });
+        }
+    }
+
+    let pointer = ctx
+        .stringWithPointerPhrase()
+        .and_then(|wp| wp.qualifiedDataName().map(|q| make_data_ref(&q.get_text())));
+
+    let on_overflow = extract_on_overflow_stmts(ctx.onOverflowPhrase().as_deref());
+    let not_on_overflow = extract_not_on_overflow_stmts(ctx.notOnOverflowPhrase().as_deref());
+
+    Statement::String(StringStatement {
+        sources,
+        into,
+        pointer,
+        on_overflow,
+        not_on_overflow,
+    })
+}
+
+fn extract_unstring<'input>(ctx: &UnstringStatementContext<'input>) -> Statement {
+    let source = ctx
+        .unstringSendingPhrase()
+        .and_then(|sp| sp.identifier().map(|id| extract_data_ref_from_identifier(&*id)))
+        .unwrap_or_else(|| make_data_ref(""));
+
+    // Extract delimiters
+    let mut delimiters = Vec::new();
+    if let Some(sp) = ctx.unstringSendingPhrase() {
+        if let Some(dbp) = sp.unstringDelimitedByPhrase() {
+            let all = dbp.ALL().is_some();
+            let value = if let Some(id) = dbp.identifier() {
+                extract_operand_from_identifier_or_literal_ctx(&id.get_text())
+            } else if let Some(lit) = dbp.literal() {
+                extract_literal_operand(&*lit)
+            } else {
+                Operand::Literal(Literal::Alphanumeric(String::new()))
+            };
+            delimiters.push(UnstringDelimiter { value, all });
+
+            // OR delimiters
+            for or_phrase in sp.unstringOrAllPhrase_all() {
+                let or_all = or_phrase.ALL().is_some();
+                let or_value = if let Some(id) = or_phrase.identifier() {
+                    extract_operand_from_identifier_or_literal_ctx(&id.get_text())
+                } else if let Some(lit) = or_phrase.literal() {
+                    extract_literal_operand(&*lit)
+                } else {
+                    Operand::Literal(Literal::Alphanumeric(String::new()))
+                };
+                delimiters.push(UnstringDelimiter {
+                    value: or_value,
+                    all: or_all,
+                });
+            }
+        }
+    }
+
+    // Extract INTO targets
+    let mut into = Vec::new();
+    if let Some(ip) = ctx.unstringIntoPhrase() {
+        for ui in ip.unstringInto_all() {
+            let target = ui
+                .identifier()
+                .map(|id| extract_data_ref_from_identifier(&*id))
+                .unwrap_or_else(|| make_data_ref(""));
+
+            let delimiter_in = ui
+                .unstringDelimiterIn()
+                .and_then(|di| di.identifier().map(|id| extract_data_ref_from_identifier(&*id)));
+
+            let count_in = ui
+                .unstringCountIn()
+                .and_then(|ci| ci.identifier().map(|id| extract_data_ref_from_identifier(&*id)));
+
+            into.push(UnstringInto {
+                target,
+                delimiter_in,
+                count_in,
+            });
+        }
+    }
+
+    let pointer = ctx
+        .unstringWithPointerPhrase()
+        .and_then(|wp| wp.qualifiedDataName().map(|q| make_data_ref(&q.get_text())));
+
+    let tallying = ctx
+        .unstringTallyingPhrase()
+        .and_then(|tp| tp.qualifiedDataName().map(|q| make_data_ref(&q.get_text())));
+
+    let on_overflow = extract_on_overflow_stmts(ctx.onOverflowPhrase().as_deref());
+    let not_on_overflow = extract_not_on_overflow_stmts(ctx.notOnOverflowPhrase().as_deref());
+
+    Statement::Unstring(UnstringStatement {
+        source,
+        delimiters,
+        into,
+        pointer,
+        tallying,
+        on_overflow,
+        not_on_overflow,
+    })
 }
 
 #[cfg(test)]

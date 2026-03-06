@@ -6,6 +6,7 @@
 pub mod category;
 pub mod config;
 pub mod decimal_ext;
+pub mod ebcdic;
 pub mod editing;
 pub mod error;
 pub mod numeric_parse;
@@ -17,6 +18,7 @@ pub use config::{
     ArithMode, CobolDialect, CollatingSequence, DiagnosticLevel, NumProc, RoundingMode,
     RuntimeConfig,
 };
+pub use ebcdic::CodePage;
 pub use editing::EditSymbol;
-pub use error::{ArithError, CobolError, FileError, SortError};
+pub use error::{ArithError, CallError, CobolError, FileError, SortError};
 pub use traits::{CobolField, CobolGroup, CobolNumeric, CobolNumericEdited};

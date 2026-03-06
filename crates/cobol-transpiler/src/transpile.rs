@@ -2,10 +2,15 @@
 //!
 //! Orchestrates: parse -> resolve symbols -> generate Rust code.
 
-use crate::codegen::data_gen::generate_working_storage;
-use crate::codegen::proc_gen::generate_procedure_division;
+use std::collections::HashMap;
+use std::path::PathBuf;
+
+use crate::codegen::data_gen::{generate_linkage_section, generate_working_storage};
+use crate::codegen::proc_gen::{build_condition_map, generate_procedure_division};
 use crate::codegen::rust_writer::RustWriter;
 use crate::error::Result;
+use crate::parser::copy_expand::CopyExpander;
+use crate::parser::copybook::FileSystemResolver;
 use crate::parser::parse_cobol;
 
 /// Transpile COBOL source code to Rust source code.
@@ -18,6 +23,53 @@ use crate::parser::parse_cobol;
 /// Returns `TranspileError` if parsing or code generation fails.
 pub fn transpile(source: &str) -> Result<String> {
     let program = parse_cobol(source)?;
+    generate_rust(&program)
+}
+
+/// Configuration for COPY statement expansion and transpilation.
+#[derive(Debug, Clone)]
+pub struct TranspileConfig {
+    /// Directories to search for copybook files.
+    pub copybook_paths: Vec<PathBuf>,
+    /// COBOL library name -> directory mapping (for `COPY name OF library`).
+    pub library_map: HashMap<String, PathBuf>,
+    /// Maximum COPY nesting depth (default 10).
+    pub max_copy_depth: usize,
+}
+
+impl Default for TranspileConfig {
+    fn default() -> Self {
+        Self {
+            copybook_paths: Vec::new(),
+            library_map: HashMap::new(),
+            max_copy_depth: 10,
+        }
+    }
+}
+
+/// Transpile COBOL source with COPY statement expansion.
+///
+/// Like `transpile()`, but first expands COPY statements using the
+/// configured copybook search paths before parsing and code generation.
+///
+/// # Errors
+///
+/// Returns `TranspileError` if COPY resolution, parsing, or code generation fails.
+pub fn transpile_with_config(source: &str, config: &TranspileConfig) -> Result<String> {
+    // Expand COPY statements
+    let resolver = FileSystemResolver::new(config.copybook_paths.clone())
+        .with_library_map(config.library_map.clone());
+    let copy_expander = CopyExpander::new(Box::new(resolver), config.max_copy_depth);
+    let expanded = copy_expander.expand(source)?;
+
+    // Parse (preprocess + ANTLR4) and generate code
+    let program = parse_cobol(&expanded)?;
+    generate_rust(&program)
+}
+
+/// Shared code generation from a parsed `CobolProgram` to Rust source.
+#[allow(clippy::unnecessary_wraps)]
+fn generate_rust(program: &crate::ast::CobolProgram) -> Result<String> {
     let mut w = RustWriter::new();
 
     // File header
@@ -39,6 +91,12 @@ pub fn transpile(source: &str) -> Result<String> {
     if let Some(ref data_div) = program.data_division {
         generate_working_storage(&mut w, &data_div.working_storage);
         w.blank_line();
+
+        // Generate LinkageSection struct if present
+        if !data_div.linkage.is_empty() {
+            generate_linkage_section(&mut w, &data_div.linkage);
+            w.blank_line();
+        }
     }
 
     // Generate ProgramContext struct
@@ -46,6 +104,10 @@ pub fn transpile(source: &str) -> Result<String> {
     w.open_block("pub struct ProgramContext {");
     w.line("pub config: RuntimeConfig,");
     w.line("pub return_code: i32,");
+    w.line("pub dispatcher: CallDispatcher,");
+    w.line("pub stopped: bool,");
+    w.line("pub exit_program: bool,");
+    w.line("pub goto_target: Option<String>,");
     w.close_block("}");
     w.blank_line();
 
@@ -54,26 +116,37 @@ pub fn transpile(source: &str) -> Result<String> {
     w.open_block("Self {");
     w.line("config: RuntimeConfig::default(),");
     w.line("return_code: 0,");
+    w.line("dispatcher: CallDispatcher::new(),");
+    w.line("stopped: false,");
+    w.line("exit_program: false,");
+    w.line("goto_target: None,");
     w.close_block("}");
     w.close_block("}");
     w.blank_line();
 
-    w.open_block("pub fn stop_run(&self) {");
-    w.line("std::process::exit(self.return_code);");
+    w.open_block("pub fn stop_run(&mut self) {");
+    w.line("self.stopped = true;");
     w.close_block("}");
     w.blank_line();
 
-    w.open_block("pub fn goback(&self) {");
-    w.line("// GOBACK returns control to caller");
+    w.open_block("pub fn goback(&mut self) {");
+    w.line("self.exit_program = true;");
     w.close_block("}");
     w.blank_line();
 
     w.close_block("}");
     w.blank_line();
+
+    // Build condition map from data division for 88-level codegen
+    let cmap = if let Some(ref data_div) = program.data_division {
+        build_condition_map(&data_div.working_storage)
+    } else {
+        build_condition_map(&[])
+    };
 
     // Generate procedure division
     if let Some(ref proc_div) = program.procedure_division {
-        generate_procedure_division(&mut w, proc_div);
+        generate_procedure_division(&mut w, proc_div, &cmap);
         w.blank_line();
     }
 
@@ -82,6 +155,7 @@ pub fn transpile(source: &str) -> Result<String> {
     w.line("let mut ws = WorkingStorage::new();");
     w.line("let mut ctx = ProgramContext::new();");
     w.line("run(&mut ws, &mut ctx);");
+    w.line("std::process::exit(ctx.return_code);");
     w.close_block("}");
 
     Ok(w.finish())
@@ -192,5 +266,110 @@ mod tests {
 
         assert!(rust_code.contains("work_para(ws, ctx);"));
         assert!(rust_code.contains("fn work_para("));
+    }
+
+    #[test]
+    fn transpile_with_config_basic() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("COMMON.cpy"),
+            "01  WS-SHARED PIC X(10) VALUE 'SHARED'.\n",
+        ).unwrap();
+
+        let source = concat!(
+            "IDENTIFICATION DIVISION.\n",
+            "PROGRAM-ID. COPYTEST.\n",
+            "DATA DIVISION.\n",
+            "WORKING-STORAGE SECTION.\n",
+            "COPY COMMON.\n",
+            "PROCEDURE DIVISION.\n",
+            "MAIN-PARA.\n",
+            "    DISPLAY WS-SHARED.\n",
+            "    STOP RUN.\n",
+        );
+
+        let config = TranspileConfig {
+            copybook_paths: vec![dir.path().to_path_buf()],
+            ..TranspileConfig::default()
+        };
+
+        let result = transpile_with_config(source, &config);
+        assert!(result.is_ok(), "transpile_with_config failed: {result:?}");
+        let rust_code = result.unwrap();
+        assert!(rust_code.contains("ws_shared"));
+    }
+
+    #[test]
+    fn transpile_backward_compatible() {
+        // Existing transpile() still works without COPY expansion
+        let source = concat!(
+            "IDENTIFICATION DIVISION.\n",
+            "PROGRAM-ID. COMPAT.\n",
+            "DATA DIVISION.\n",
+            "WORKING-STORAGE SECTION.\n",
+            "01  WS-VAL PIC 9(3).\n",
+            "PROCEDURE DIVISION.\n",
+            "MAIN-PARA.\n",
+            "    DISPLAY WS-VAL.\n",
+            "    STOP RUN.\n",
+        );
+
+        let result = transpile(source);
+        assert!(result.is_ok(), "transpile failed: {result:?}");
+        let rust_code = result.unwrap();
+        assert!(rust_code.contains("pub struct WorkingStorage"));
+        assert!(rust_code.contains("fn main()"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Session 32: ProgramContext control flow fields
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn transpile_program_context_fields() {
+        let source = concat!(
+            "IDENTIFICATION DIVISION.\n",
+            "PROGRAM-ID. CTXTEST.\n",
+            "PROCEDURE DIVISION.\n",
+            "MAIN-PARA.\n",
+            "    DISPLAY 'HI'.\n",
+            "    STOP RUN.\n",
+        );
+        let rust_code = transpile(source).expect("transpile failed");
+        assert!(rust_code.contains("pub stopped: bool,"), "missing stopped field: {rust_code}");
+        assert!(rust_code.contains("pub exit_program: bool,"), "missing exit_program field: {rust_code}");
+        assert!(rust_code.contains("pub goto_target: Option<String>,"), "missing goto_target field: {rust_code}");
+        assert!(rust_code.contains("stopped: false,"), "missing stopped init");
+        assert!(rust_code.contains("exit_program: false,"), "missing exit_program init");
+        assert!(rust_code.contains("goto_target: None,"), "missing goto_target init");
+    }
+
+    #[test]
+    fn transpile_stop_run_mutating() {
+        let source = concat!(
+            "IDENTIFICATION DIVISION.\n",
+            "PROGRAM-ID. MUTTEST.\n",
+            "PROCEDURE DIVISION.\n",
+            "MAIN-PARA.\n",
+            "    STOP RUN.\n",
+        );
+        let rust_code = transpile(source).expect("transpile failed");
+        assert!(rust_code.contains("fn stop_run(&mut self)"), "stop_run should be &mut self: {rust_code}");
+        assert!(rust_code.contains("self.stopped = true;"), "stop_run should set stopped flag: {rust_code}");
+        assert!(rust_code.contains("fn goback(&mut self)"), "goback should be &mut self: {rust_code}");
+        assert!(rust_code.contains("self.exit_program = true;"), "goback should set exit_program flag: {rust_code}");
+    }
+
+    #[test]
+    fn transpile_main_exits() {
+        let source = concat!(
+            "IDENTIFICATION DIVISION.\n",
+            "PROGRAM-ID. EXITTEST.\n",
+            "PROCEDURE DIVISION.\n",
+            "MAIN-PARA.\n",
+            "    DISPLAY 'DONE'.\n",
+        );
+        let rust_code = transpile(source).expect("transpile failed");
+        assert!(rust_code.contains("std::process::exit(ctx.return_code)"), "main should call process::exit: {rust_code}");
     }
 }

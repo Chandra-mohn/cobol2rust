@@ -58,11 +58,91 @@ pub fn generate_working_storage(
     w.close_block("}");
 }
 
+/// Generate the LinkageSection struct and its `new()` constructor.
+///
+/// Mirrors `generate_working_storage` exactly but with struct name `LinkageSection`.
+/// Linkage section items are used by called programs to receive parameters.
+pub fn generate_linkage_section(
+    w: &mut RustWriter,
+    records: &[DataEntry],
+) {
+    if records.is_empty() {
+        return;
+    }
+
+    w.line("/// Linkage section data fields (CALL parameters).");
+    w.line("#[allow(non_snake_case)]");
+    w.open_block("pub struct LinkageSection {");
+
+    for record in records {
+        if record.level == 77 {
+            generate_field(w, record, "");
+        } else if record.level == 1 {
+            if record.children.is_empty() {
+                generate_field(w, record, "");
+            } else {
+                generate_group_fields(w, record, "");
+            }
+        }
+    }
+
+    w.close_block("}");
+    w.blank_line();
+
+    w.open_block("impl LinkageSection {");
+    w.line("#[allow(non_snake_case)]");
+    w.open_block("pub fn new() -> Self {");
+    w.open_block("Self {");
+
+    for record in records {
+        if record.level == 77 {
+            generate_field_init(w, record, "");
+        } else if record.level == 1 {
+            if record.children.is_empty() {
+                generate_field_init(w, record, "");
+            } else {
+                generate_group_field_inits(w, record, "");
+            }
+        }
+    }
+
+    w.close_block("}");
+    w.close_block("}");
+    w.close_block("}");
+}
+
 /// Generate a single field declaration.
 fn generate_field(w: &mut RustWriter, entry: &DataEntry, prefix: &str) {
     let field_name = cobol_to_rust_name(&entry.name, prefix);
+
+    // REDEFINES: generate a RedefinesGroup for shared byte storage
+    if entry.redefines.is_some() {
+        let size = entry.byte_length.unwrap_or(0);
+        w.line(&format!(
+            "pub {field_name}: RedefinesGroup, /* REDEFINES, {size} bytes */"
+        ));
+        return;
+    }
+
     let resolved = resolve_type(entry);
     let rust_type = rust_type_string(&resolved.rust_type);
+
+    // OCCURS DEPENDING ON: variable-length array
+    if entry.occurs.is_some() && entry.occurs_depending.is_some() {
+        w.line(&format!(
+            "pub {field_name}: CobolVarArray<{rust_type}>, /* OCCURS DEPENDING ON */"
+        ));
+        return;
+    }
+
+    // OCCURS: fixed-size array
+    if let Some(count) = entry.occurs {
+        w.line(&format!(
+            "pub {field_name}: CobolArray<{rust_type}>, /* OCCURS {count} */"
+        ));
+        return;
+    }
+
     w.line(&format!("pub {field_name}: {rust_type},"));
 }
 
@@ -78,6 +158,12 @@ fn generate_group_fields(w: &mut RustWriter, entry: &DataEntry, prefix: &str) {
         if child.level == 88 || child.level == 66 {
             continue;
         }
+        // REDEFINES group: emit a single RedefinesGroup field
+        // (don't recurse into children -- they access via byte offsets)
+        if child.redefines.is_some() {
+            generate_field(w, child, &new_prefix);
+            continue;
+        }
         if child.children.is_empty() {
             generate_field(w, child, &new_prefix);
         } else {
@@ -89,9 +175,34 @@ fn generate_group_fields(w: &mut RustWriter, entry: &DataEntry, prefix: &str) {
 /// Generate a field initialization expression.
 fn generate_field_init(w: &mut RustWriter, entry: &DataEntry, prefix: &str) {
     let field_name = cobol_to_rust_name(&entry.name, prefix);
+
+    // REDEFINES: initialize RedefinesGroup with byte size
+    if entry.redefines.is_some() {
+        let size = entry.byte_length.unwrap_or(0);
+        w.line(&format!("{field_name}: RedefinesGroup::new({size}),"));
+        return;
+    }
+
     let resolved = resolve_type(entry);
-    let init_expr = field_init_expr(entry, &resolved.rust_type);
-    w.line(&format!("{field_name}: {init_expr},"));
+    let element_init = field_init_expr(entry, &resolved.rust_type);
+
+    // OCCURS DEPENDING ON: variable-length array
+    if let Some(count) = entry.occurs {
+        if entry.occurs_depending.is_some() {
+            w.line(&format!(
+                "{field_name}: CobolVarArray::new(vec![{element_init}; {count}], {count}),"
+            ));
+            return;
+        }
+
+        // OCCURS: fixed-size array
+        w.line(&format!(
+            "{field_name}: CobolArray::new(vec![{element_init}; {count}]),"
+        ));
+        return;
+    }
+
+    w.line(&format!("{field_name}: {element_init},"));
 }
 
 /// Generate field initializations for a group.
@@ -104,6 +215,11 @@ fn generate_group_field_inits(w: &mut RustWriter, entry: &DataEntry, prefix: &st
 
     for child in &entry.children {
         if child.level == 88 || child.level == 66 {
+            continue;
+        }
+        // REDEFINES group: single RedefinesGroup init
+        if child.redefines.is_some() {
+            generate_field_init(w, child, &new_prefix);
             continue;
         }
         if child.children.is_empty() {
@@ -288,7 +404,59 @@ fn value_to_init(lit: &Literal, rt: &RustType) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ast::Usage;
+    use crate::ast::{PicCategory, PicClause, Usage};
+
+    fn make_entry(name: &str, level: u8) -> DataEntry {
+        DataEntry {
+            level,
+            name: name.to_string(),
+            pic: None,
+            usage: Usage::Display,
+            value: None,
+            redefines: None,
+            occurs: None,
+            occurs_depending: None,
+            sign: None,
+            justified_right: false,
+            blank_when_zero: false,
+            children: Vec::new(),
+            condition_values: Vec::new(),
+            byte_offset: None,
+            byte_length: Some(5),
+        }
+    }
+
+    fn make_picx_entry(name: &str, level: u8, length: u32) -> DataEntry {
+        DataEntry {
+            pic: Some(PicClause {
+                category: PicCategory::Alphanumeric,
+                total_digits: length,
+                scale: 0,
+                raw: format!("X({})", length),
+                signed: false,
+                display_length: length,
+                edit_symbols: Vec::new(),
+            }),
+            byte_length: Some(length as usize),
+            ..make_entry(name, level)
+        }
+    }
+
+    fn make_numeric_entry(name: &str, level: u8, prec: u32, scale: u32) -> DataEntry {
+        DataEntry {
+            pic: Some(PicClause {
+                category: PicCategory::Numeric,
+                total_digits: prec,
+                scale,
+                raw: format!("9({})", prec),
+                signed: false,
+                display_length: prec,
+                edit_symbols: Vec::new(),
+            }),
+            byte_length: Some(prec as usize),
+            ..make_entry(name, level)
+        }
+    }
 
     #[test]
     fn cobol_name_to_rust() {
@@ -298,26 +466,7 @@ mod tests {
 
     #[test]
     fn generate_simple_struct() {
-        let records = vec![
-            DataEntry {
-                level: 77,
-                name: "WS-COUNT".to_string(),
-                pic: None,
-                usage: Usage::Display,
-                value: None,
-                redefines: None,
-                occurs: None,
-                occurs_depending: None,
-                sign: None,
-                justified_right: false,
-                blank_when_zero: false,
-                children: Vec::new(),
-                condition_values: Vec::new(),
-                byte_offset: None,
-                byte_length: Some(5),
-            },
-        ];
-
+        let records = vec![make_entry("WS-COUNT", 77)];
         let mut w = RustWriter::new();
         generate_working_storage(&mut w, &records);
         let output = w.finish();
@@ -325,5 +474,149 @@ mod tests {
         assert!(output.contains("ws_count"));
         assert!(output.contains("impl WorkingStorage"));
         assert!(output.contains("fn new()"));
+    }
+
+    #[test]
+    fn generate_occurs_array() {
+        let mut entry = make_picx_entry("WS-TABLE-ITEM", 77, 10);
+        entry.occurs = Some(5);
+
+        let records = vec![entry];
+        let mut w = RustWriter::new();
+        generate_working_storage(&mut w, &records);
+        let output = w.finish();
+
+        assert!(output.contains("CobolArray<PicX"), "should wrap in CobolArray: {output}");
+        assert!(output.contains("OCCURS 5"), "should note OCCURS count: {output}");
+        assert!(
+            output.contains("CobolArray::new(vec![PicX::spaces(10); 5])"),
+            "should init with vec!: {output}"
+        );
+    }
+
+    #[test]
+    fn generate_occurs_depending_var_array() {
+        let mut entry = make_picx_entry("WS-VAR-ITEM", 77, 8);
+        entry.occurs = Some(100);
+        entry.occurs_depending = Some("WS-COUNT".to_string());
+
+        let records = vec![entry];
+        let mut w = RustWriter::new();
+        generate_working_storage(&mut w, &records);
+        let output = w.finish();
+
+        assert!(
+            output.contains("CobolVarArray<PicX"),
+            "should wrap in CobolVarArray: {output}"
+        );
+        assert!(
+            output.contains("OCCURS DEPENDING ON"),
+            "should note DEPENDING ON: {output}"
+        );
+        assert!(
+            output.contains("CobolVarArray::new(vec![PicX::spaces(8); 100], 100)"),
+            "should init with max count: {output}"
+        );
+    }
+
+    #[test]
+    fn generate_redefines_field() {
+        let mut entry = make_entry("WS-DATE-PARTS", 5);
+        entry.redefines = Some("WS-DATE".to_string());
+        entry.byte_length = Some(8);
+
+        let records = vec![
+            // 01-level group with two children
+            DataEntry {
+                children: vec![
+                    make_picx_entry("WS-DATE", 5, 8),
+                    entry,
+                ],
+                ..make_entry("WS-RECORD", 1)
+            },
+        ];
+
+        let mut w = RustWriter::new();
+        generate_working_storage(&mut w, &records);
+        let output = w.finish();
+
+        assert!(
+            output.contains("RedefinesGroup"),
+            "should generate RedefinesGroup type: {output}"
+        );
+        assert!(
+            output.contains("REDEFINES"),
+            "should note REDEFINES: {output}"
+        );
+        assert!(
+            output.contains("RedefinesGroup::new(8)"),
+            "should init with byte size: {output}"
+        );
+    }
+
+    #[test]
+    fn generate_redefines_group_not_flattened() {
+        // REDEFINES group with children should NOT flatten its children
+        let mut redef_entry = DataEntry {
+            children: vec![
+                make_numeric_entry("WS-YEAR", 10, 4, 0),
+                make_numeric_entry("WS-MONTH", 10, 2, 0),
+                make_numeric_entry("WS-DAY", 10, 2, 0),
+            ],
+            ..make_entry("WS-DATE-PARTS", 5)
+        };
+        redef_entry.redefines = Some("WS-DATE".to_string());
+        redef_entry.byte_length = Some(8);
+
+        let records = vec![
+            DataEntry {
+                children: vec![
+                    make_picx_entry("WS-DATE", 5, 8),
+                    redef_entry,
+                ],
+                ..make_entry("WS-RECORD", 1)
+            },
+        ];
+
+        let mut w = RustWriter::new();
+        generate_working_storage(&mut w, &records);
+        let output = w.finish();
+
+        // Should have WS-DATE as PicX and WS-DATE-PARTS as RedefinesGroup
+        assert!(output.contains("ws_record_ws_date: PicX"), "original field: {output}");
+        assert!(
+            output.contains("ws_record_ws_date_parts: RedefinesGroup"),
+            "redefines field: {output}"
+        );
+
+        // Should NOT have the children flattened (WS-YEAR, WS-MONTH, WS-DAY)
+        assert!(
+            !output.contains("ws_year"),
+            "should not flatten redefines children: {output}"
+        );
+        assert!(
+            !output.contains("ws_month"),
+            "should not flatten redefines children: {output}"
+        );
+    }
+
+    #[test]
+    fn generate_numeric_occurs_array() {
+        let mut entry = make_numeric_entry("WS-AMOUNTS", 77, 9, 2);
+        entry.occurs = Some(10);
+
+        let records = vec![entry];
+        let mut w = RustWriter::new();
+        generate_working_storage(&mut w, &records);
+        let output = w.finish();
+
+        assert!(
+            output.contains("CobolArray<PackedDecimal"),
+            "numeric array wraps PackedDecimal: {output}"
+        );
+        assert!(
+            output.contains("CobolArray::new(vec![PackedDecimal::new(9, 2, false); 10])"),
+            "init with vec!: {output}"
+        );
     }
 }

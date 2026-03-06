@@ -12,6 +12,9 @@ pub enum CobolError {
     #[error("Arithmetic error: {0}")]
     Arith(#[from] ArithError),
 
+    #[error("Call error: {0}")]
+    Call(#[from] CallError),
+
     #[error("Configuration error: {0}")]
     Config(String),
 }
@@ -65,4 +68,14 @@ pub enum ArithError {
 
     #[error("Exponentiation overflow")]
     ExponentiationOverflow,
+}
+
+/// CALL/CANCEL operation errors.
+#[derive(Error, Debug)]
+pub enum CallError {
+    #[error("program not found: {0}")]
+    ProgramNotFound(String),
+
+    #[error("call failed: {0}")]
+    CallFailed(String),
 }

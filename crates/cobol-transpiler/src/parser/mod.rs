@@ -8,6 +8,8 @@
 //! the coqu-di pattern) because the ANTLR4 parse tree has lifetime ties
 //! to the parser/token stream.
 
+pub mod copy_expand;
+pub mod copybook;
 pub(crate) mod data_listener;
 pub mod hierarchy;
 pub mod pic_parser;
@@ -44,6 +46,40 @@ pub fn parse_cobol(source: &str) -> Result<CobolProgram> {
 
     // Wrap standalone copybooks in a minimal program skeleton
     let input = wrap_if_copybook(&preprocessed);
+
+    // Parse DATA DIVISION
+    let working_storage = parse_data_division(&input)?;
+
+    // Parse PROCEDURE DIVISION
+    let procedure_division = parse_procedure_division(&input)?;
+
+    // Extract PROGRAM-ID
+    let program_id = extract_program_id(&input);
+
+    Ok(CobolProgram {
+        program_id,
+        data_division: Some(DataDivision {
+            working_storage,
+            local_storage: Vec::new(),
+            linkage: Vec::new(),
+            file_section: Vec::new(),
+        }),
+        procedure_division,
+        source_path: None,
+    })
+}
+
+/// Parse already-preprocessed COBOL source into a typed AST.
+///
+/// Unlike `parse_cobol()`, this skips the preprocessing step. Use when
+/// the source has already been through `preprocess()` and COPY expansion.
+///
+/// # Errors
+///
+/// Returns `TranspileError::AntlrError` if the ANTLR4 parser fails.
+pub fn parse_cobol_from_source(source: &str) -> Result<CobolProgram> {
+    // Wrap standalone copybooks in a minimal program skeleton
+    let input = wrap_if_copybook(source);
 
     // Parse DATA DIVISION
     let working_storage = parse_data_division(&input)?;
@@ -445,5 +481,28 @@ mod tests {
         assert!(result.is_ok(), "parse_cobol fixed-format failed: {result:?}");
         let program = result.unwrap();
         assert_eq!(program.program_id, "TESTPG");
+    }
+
+    #[test]
+    fn parse_cobol_from_source_pre_expanded() {
+        // Source that has already been preprocessed (free format, no columns)
+        let source = concat!(
+            "IDENTIFICATION DIVISION.\n",
+            "PROGRAM-ID. EXPANDED.\n",
+            "DATA DIVISION.\n",
+            "WORKING-STORAGE SECTION.\n",
+            "01  WS-FLD PIC X(10).\n",
+            "PROCEDURE DIVISION.\n",
+            "MAIN-PARA.\n",
+            "    DISPLAY WS-FLD.\n",
+            "    STOP RUN.\n",
+        );
+
+        let result = parse_cobol_from_source(source);
+        assert!(result.is_ok(), "parse_cobol_from_source failed: {result:?}");
+        let program = result.unwrap();
+        assert_eq!(program.program_id, "EXPANDED");
+        assert!(program.data_division.is_some());
+        assert!(program.procedure_division.is_some());
     }
 }
