@@ -22,12 +22,12 @@ pub fn cobol_move(src: &dyn CobolField, dest: &mut dyn CobolField, config: &Runt
 
     match dest_cat {
         DataCategory::Alphabetic => move_to_alphabetic(src, dest, diag),
-        DataCategory::Alphanumeric => move_to_alphanumeric(src, dest, diag),
-        DataCategory::AlphanumericEdited => move_to_alphanumeric(src, dest, diag),
-        DataCategory::Numeric => move_to_numeric_field(src, dest, config),
-        DataCategory::NumericEdited => move_to_numeric_field(src, dest, config),
+        DataCategory::Alphanumeric
+        | DataCategory::AlphanumericEdited
+        | DataCategory::National => move_to_alphanumeric(src, dest, diag),
+        DataCategory::Numeric
+        | DataCategory::NumericEdited => move_to_numeric_field(src, dest, config),
         DataCategory::Group => move_to_group(src, dest, diag),
-        DataCategory::National => move_to_alphanumeric(src, dest, diag),
     }
 }
 
@@ -73,30 +73,22 @@ pub fn is_legal_move(
 ) -> bool {
     use DataCategory::{Group, Alphanumeric, National, Alphabetic, AlphanumericEdited, Numeric, NumericEdited};
     match (src_cat, dest_cat) {
-        // Group destination always accepts anything
-        (_, Group) => true,
-        // Group source treated as alphanumeric
-        (Group, _) => true,
-        // Alphanumeric source can go anywhere
-        (Alphanumeric, _) => true,
-        // National can go anywhere
-        (National, _) | (_, National) => true,
-        // Alphabetic -> alphabetic, alphanumeric, alpha-edited
-        (Alphabetic, Alphabetic | Alphanumeric | AlphanumericEdited) => true,
-        (Alphabetic, Numeric | NumericEdited) => false,
-        // Alpha-edited -> alphabetic, alphanumeric, alpha-edited
-        (AlphanumericEdited, Alphabetic | Alphanumeric | AlphanumericEdited) => true,
-        (AlphanumericEdited, Numeric | NumericEdited) => false,
-        // Numeric -> alphanumeric, alpha-edited, numeric, numeric-edited (not alphabetic)
-        (Numeric, Alphabetic) => false,
-        (Numeric, Alphanumeric | AlphanumericEdited | Numeric | NumericEdited) => true,
-        // Numeric-edited -> alphanumeric, alpha-edited
-        (NumericEdited, Alphanumeric | AlphanumericEdited) => true,
-        (NumericEdited, Numeric | NumericEdited) => {
-            // IBM extension: allow with de-editing
-            config.allow_de_editing
-        }
-        (NumericEdited, Alphabetic) => false,
+        // Group destination/source always accepts; alphanumeric/national source can go anywhere;
+        // alphabetic/alpha-edited -> alphabetic, alphanumeric, alpha-edited;
+        // numeric -> alphanumeric, alpha-edited, numeric, numeric-edited;
+        // numeric-edited -> alphanumeric, alpha-edited
+        (_, Group | National)
+        | (Group | Alphanumeric | National, _)
+        | (Alphabetic | AlphanumericEdited,
+           Alphabetic | Alphanumeric | AlphanumericEdited)
+        | (Numeric, Alphanumeric | AlphanumericEdited | Numeric | NumericEdited)
+        | (NumericEdited, Alphanumeric | AlphanumericEdited) => true,
+        // Alphabetic/alpha-edited -> numeric or numeric-edited is illegal;
+        // numeric/numeric-edited -> alphabetic is illegal
+        (Alphabetic | AlphanumericEdited, Numeric | NumericEdited)
+        | (Numeric | NumericEdited, Alphabetic) => false,
+        // NumericEdited -> numeric/numeric-edited: IBM extension with de-editing
+        (NumericEdited, Numeric | NumericEdited) => config.allow_de_editing,
     }
 }
 
@@ -301,8 +293,8 @@ mod tests {
 
     #[test]
     fn legality_matrix_basic() {
-        let config = default_config();
         use DataCategory::*;
+        let config = default_config();
 
         // Legal moves
         assert!(is_legal_move(Alphanumeric, Numeric, &config));

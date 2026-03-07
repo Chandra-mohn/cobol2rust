@@ -207,8 +207,7 @@ fn generate_statement(w: &mut RustWriter, stmt: &Statement, cmap: &ConditionMap,
             w.line("ctx.exit_program = true;");
             w.line("return;");
         }
-        Statement::ExitParagraph => w.line("return;"),
-        Statement::ExitSection => w.line("return;"),
+        Statement::ExitParagraph | Statement::ExitSection => w.line("return;"),
         Statement::Initialize(init) => generate_initialize(w, init),
         Statement::Call(call) => generate_call(w, call, cmap, ptable),
         Statement::Cancel(cancel) => generate_cancel(w, cancel),
@@ -228,7 +227,7 @@ fn generate_statement(w: &mut RustWriter, stmt: &Statement, cmap: &ConditionMap,
         Statement::Unstring(u) => generate_unstring(w, u, cmap, ptable),
         Statement::Set(set) => generate_set(w, set, cmap),
         Statement::Start(start) => generate_start(w, start, cmap, ptable),
-        _ => {
+        Statement::Alter(_) => {
             w.line(&format!("// TODO: unsupported statement: {stmt:?}"));
         }
     }
@@ -258,10 +257,9 @@ fn generate_move(w: &mut RustWriter, m: &MoveStatement) {
         }
     } else {
         for dest in &m.destinations {
-            if dest.ref_mod.is_some() {
+            if let Some(rm) = &dest.ref_mod {
                 // Destination has reference modification -- use ref_mod_write
                 let dest_base = data_ref_base_expr(dest);
-                let rm = dest.ref_mod.as_ref().unwrap();
                 let offset = ref_mod_index_expr(&rm.offset);
                 // Get source bytes expression
                 let src_bytes = operand_to_source_bytes(&m.source);
@@ -292,16 +290,12 @@ fn operand_to_source_bytes(op: &Operand) -> String {
     match op {
         Operand::Literal(Literal::Alphanumeric(s)) => format!("b\"{s}\""),
         Operand::Literal(Literal::Numeric(n)) => format!("b\"{n}\""),
-        Operand::Literal(Literal::Figurative(fig)) => match fig {
-            FigurativeConstant::Spaces => "b\" \"".to_string(),
-            FigurativeConstant::Zeros => "b\"0\"".to_string(),
-            _ => "b\" \"".to_string(),
-        },
+        Operand::Literal(Literal::Figurative(FigurativeConstant::Zeros)) => "b\"0\"".to_string(),
+        Operand::Literal(Literal::Figurative(_)) => "b\" \"".to_string(),
         Operand::DataRef(dr) => {
-            if dr.ref_mod.is_some() {
+            if let Some(rm) = &dr.ref_mod {
                 // Source also has ref_mod -- use ref_mod_read directly
                 let base = data_ref_base_expr(dr);
-                let rm = dr.ref_mod.as_ref().unwrap();
                 let offset = ref_mod_index_expr(&rm.offset);
                 if let Some(ref len) = rm.length {
                     let length = ref_mod_index_expr(len);
@@ -687,8 +681,8 @@ fn generate_perform_thru_inline(w: &mut RustWriter, target_name: &str, thru_name
         w.line(&format!("let mut _perf_pc: usize = {s};"));
         w.open_block(&format!("while _perf_pc <= {e} {{"));
         w.open_block("match _perf_pc {");
-        for i in s..=e {
-            w.line(&format!("{} => {}(ws, ctx),", ptable[i].index, ptable[i].rust_name));
+        for pi in &ptable[s..=e] {
+            w.line(&format!("{} => {}(ws, ctx),", pi.index, pi.rust_name));
         }
         w.line("_ => break,");
         w.close_block("}");
@@ -1150,10 +1144,8 @@ fn generate_start(w: &mut RustWriter, start: &StartStatement, cmap: &ConditionMa
     let start_call = if let Some(ref cond) = start.key_condition {
         let key_expr = data_ref_expr(&cond.key);
         let op_str = match cond.op {
-            ComparisonOp::Equal => "std::cmp::Ordering::Equal",
-            ComparisonOp::GreaterThan => "std::cmp::Ordering::Greater",
-            ComparisonOp::GreaterOrEqual => "std::cmp::Ordering::Greater", // start treats >= as >=
-            _ => "std::cmp::Ordering::Equal", // fallback
+            ComparisonOp::GreaterThan | ComparisonOp::GreaterOrEqual => "std::cmp::Ordering::Greater",
+            _ => "std::cmp::Ordering::Equal",
         };
         format!(
             "ws.{fname}.start({key_expr}.as_bytes(), {op_str})"
@@ -1601,10 +1593,7 @@ fn literal_to_decimal_expr(lit: &Literal) -> String {
     match lit {
         Literal::Numeric(n) => format!("dec!({n})"),
         Literal::Alphanumeric(s) => format!("dec!({s})"),
-        Literal::Figurative(fig) => match fig {
-            FigurativeConstant::Zeros => "dec!(0)".to_string(),
-            _ => "dec!(0)".to_string(),
-        },
+        Literal::Figurative(_) => "dec!(0)".to_string(),
     }
 }
 
@@ -1620,9 +1609,8 @@ fn literal_to_bytes_expr(lit: &Literal) -> String {
             FigurativeConstant::Spaces => "b\" \"".to_string(),
             FigurativeConstant::Zeros => "b\"0\"".to_string(),
             FigurativeConstant::HighValues => "b\"\\xFF\"".to_string(),
-            FigurativeConstant::LowValues => "b\"\\x00\"".to_string(),
+            FigurativeConstant::LowValues | FigurativeConstant::Nulls => "b\"\\x00\"".to_string(),
             FigurativeConstant::Quotes => "b\"\\\"\"".to_string(),
-            FigurativeConstant::Nulls => "b\"\\x00\"".to_string(),
         },
     }
 }
@@ -1908,10 +1896,9 @@ fn operand_to_bytes_expr(op: &Operand) -> String {
         Operand::Literal(Literal::Alphanumeric(s)) => format!("b\"{s}\""),
         Operand::Literal(Literal::Numeric(n)) => format!("b\"{n}\""),
         Operand::DataRef(dr) => {
-            if dr.ref_mod.is_some() {
+            if let Some(rm) = &dr.ref_mod {
                 // ref_mod_read returns Vec<u8>, use directly
                 let base = data_ref_base_expr(dr);
-                let rm = dr.ref_mod.as_ref().unwrap();
                 let offset = ref_mod_index_expr(&rm.offset);
                 if let Some(ref len) = rm.length {
                     let length = ref_mod_index_expr(len);
@@ -2103,6 +2090,11 @@ fn generate_unstring(w: &mut RustWriter, u: &UnstringStatement, cmap: &Condition
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ast::{
+        CallParam, DisplayTarget, InspectConverting, InspectReplacing, InspectTallying,
+        OpenFile, PerformTarget, RefMod, SortKey, StartKeyCondition, StringSource,
+        UnstringDelimiter, UnstringInto, Usage,
+    };
 
     fn empty_cmap() -> ConditionMap {
         ConditionMap::new()

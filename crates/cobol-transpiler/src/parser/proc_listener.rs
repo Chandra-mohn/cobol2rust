@@ -719,9 +719,7 @@ fn extract_evaluate(ctx: &EvaluateStatementContext<'_>) -> Statement {
                 .map(|w| {
                     let text = w.get_text().to_uppercase();
                     let text = text.strip_prefix("WHEN").unwrap_or(&text).trim();
-                    if text == "ANY" {
-                        WhenValue::Any
-                    } else if text == "OTHER" {
+                    if text == "ANY" || text == "OTHER" {
                         WhenValue::Any
                     } else {
                         WhenValue::Value(extract_identifier_or_literal_from_text(text))
@@ -834,12 +832,8 @@ fn extract_goto(ctx: &GoToStatementContext<'_>) -> Statement {
     }
 }
 
-fn extract_stop(ctx: &StopStatementContext<'_>) -> Statement {
-    if ctx.RUN().is_some() {
-        Statement::StopRun
-    } else {
-        Statement::StopRun
-    }
+fn extract_stop(_ctx: &StopStatementContext<'_>) -> Statement {
+    Statement::StopRun
 }
 
 fn extract_initialize(ctx: &InitializeStatementContext<'_>) -> Statement {
@@ -1460,9 +1454,8 @@ fn extract_perform_varying(
     let from_text = phrase
         .as_ref()
         .and_then(|p| p.performFrom())
-        .map(|pf| {
+        .map_or_else(|| "1".to_string(), |pf| {
             // performFrom = FROM (identifier | literal | arithmeticExpression)
-            // Get everything after FROM keyword
             if let Some(id) = pf.identifier() {
                 id.get_text().to_uppercase()
             } else if let Some(lit) = pf.literal() {
@@ -1472,14 +1465,13 @@ fn extract_perform_varying(
             } else {
                 "1".to_string()
             }
-        })
-        .unwrap_or_else(|| "1".to_string());
+        });
 
     // Extract BY value from performBy child
     let by_text = phrase
         .as_ref()
         .and_then(|p| p.performBy())
-        .map(|pb| {
+        .map_or_else(|| "1".to_string(), |pb| {
             if let Some(id) = pb.identifier() {
                 id.get_text().to_uppercase()
             } else if let Some(lit) = pb.literal() {
@@ -1489,8 +1481,7 @@ fn extract_perform_varying(
             } else {
                 "1".to_string()
             }
-        })
-        .unwrap_or_else(|| "1".to_string());
+        });
 
     // Extract UNTIL condition from performUntil -> condition child
     let condition = phrase
@@ -1653,16 +1644,13 @@ fn extract_relational_op(ctx: &RelationalOperatorContext<'_>) -> ComparisonOp {
     let has_less = ctx.LESS().is_some() || ctx.LESSTHANCHAR().is_some();
     let has_equal = ctx.EQUAL().is_some() || ctx.EQUALCHAR().is_some();
 
+    let has_or_equal = ctx.OR().is_some() && has_equal;
     if has_not && has_equal {
         ComparisonOp::NotEqual
-    } else if has_not && has_greater {
+    } else if has_not && has_greater || (has_less && has_or_equal) {
         ComparisonOp::LessOrEqual
-    } else if has_not && has_less {
+    } else if has_not && has_less || (has_greater && has_or_equal) {
         ComparisonOp::GreaterOrEqual
-    } else if has_greater && ctx.OR().is_some() && has_equal {
-        ComparisonOp::GreaterOrEqual
-    } else if has_less && ctx.OR().is_some() && has_equal {
-        ComparisonOp::LessOrEqual
     } else if has_greater {
         ComparisonOp::GreaterThan
     } else if has_less {

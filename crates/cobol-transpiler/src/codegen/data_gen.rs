@@ -423,7 +423,8 @@ fn field_init_expr(entry: &DataEntry, rt: &RustType) -> String {
 
     // Default initialization
     match rt {
-        RustType::PackedDecimal { precision, scale, signed } => {
+        RustType::PackedDecimal { precision, scale, signed }
+        | RustType::DisplayNumeric { precision, scale, signed } => {
             format!("PackedDecimal::new({precision}, {scale}, {signed})")
         }
         RustType::PicX { length } => {
@@ -444,9 +445,6 @@ fn field_init_expr(entry: &DataEntry, rt: &RustType) -> String {
                 if *signed { "0i64" } else { "0u64" }.to_string()
             }
         }
-        RustType::DisplayNumeric { precision, scale, signed } => {
-            format!("PackedDecimal::new({precision}, {scale}, {signed})")
-        }
         RustType::Float32 => "Comp1Float::new()".to_string(),
         RustType::Float64 => "Comp2Float::new()".to_string(),
         RustType::Index => "0usize".to_string(),
@@ -458,7 +456,8 @@ fn field_init_expr(entry: &DataEntry, rt: &RustType) -> String {
 /// Convert a VALUE literal to a Rust initialization expression.
 fn value_to_init(lit: &Literal, rt: &RustType) -> String {
     match (lit, rt) {
-        (Literal::Numeric(n), RustType::PackedDecimal { precision, scale, signed }) => {
+        (Literal::Numeric(n), RustType::PackedDecimal { precision, scale, signed }
+        | RustType::DisplayNumeric { precision, scale, signed }) => {
             format!(
                 "{{ let mut _p = PackedDecimal::new({precision}, {scale}, {signed}); _p.pack(dec!({n})); _p }}"
             )
@@ -482,11 +481,6 @@ fn value_to_init(lit: &Literal, rt: &RustType) -> String {
                 format!("{n}u64")
             }
         }
-        (Literal::Numeric(n), RustType::DisplayNumeric { precision, scale, signed }) => {
-            format!(
-                "{{ let mut _p = PackedDecimal::new({precision}, {scale}, {signed}); _p.pack(dec!({n})); _p }}"
-            )
-        }
         (Literal::Numeric(n), RustType::Float32) => format!("Comp1Float::from_f32({n}f32)"),
         (Literal::Numeric(n), RustType::Float64) => format!("Comp2Float::from_f64({n}f64)"),
         (Literal::Numeric(n), _) => n.clone(),
@@ -506,10 +500,8 @@ fn value_to_init(lit: &Literal, rt: &RustType) -> String {
                     _ => "Default::default()".to_string(),
                 },
                 FigurativeConstant::Zeros => match rt {
-                    RustType::PackedDecimal { precision, scale, signed } => {
-                        format!("PackedDecimal::new({precision}, {scale}, {signed})")
-                    }
-                    RustType::DisplayNumeric { precision, scale, signed } => {
+                    RustType::PackedDecimal { precision, scale, signed }
+                    | RustType::DisplayNumeric { precision, scale, signed } => {
                         format!("PackedDecimal::new({precision}, {scale}, {signed})")
                     }
                     RustType::CompBinary { .. } => "0".to_string(),
@@ -532,7 +524,6 @@ fn alpha_edited_init_expr(entry: &DataEntry) -> String {
             let symbols: Vec<&str> = pattern
                 .iter()
                 .map(|ch| match ch {
-                    'X' => "AlphaEditSymbol::Data",
                     'B' => "AlphaEditSymbol::Space",
                     '0' => "AlphaEditSymbol::Zero",
                     '/' => "AlphaEditSymbol::Slash",
@@ -588,7 +579,7 @@ mod tests {
                 category: PicCategory::Alphanumeric,
                 total_digits: length,
                 scale: 0,
-                raw: format!("X({})", length),
+                raw: format!("X({length})"),
                 signed: false,
                 display_length: length,
                 edit_symbols: Vec::new(),
@@ -622,7 +613,7 @@ mod tests {
                 category: PicCategory::Numeric,
                 total_digits: prec,
                 scale,
-                raw: format!("9({})", prec),
+                raw: format!("9({prec})"),
                 signed: false,
                 display_length: prec,
                 edit_symbols: Vec::new(),

@@ -261,7 +261,7 @@ mod tests {
         assert_eq!(result.len(), 9);
         for (i, rec) in result.iter().enumerate() {
             let expected = (b'A' + i as u8) as char;
-            assert_eq!(rec[0] as char, expected, "Mismatch at index {}", i);
+            assert_eq!(rec[0] as char, expected, "Mismatch at index {i}");
         }
     }
 

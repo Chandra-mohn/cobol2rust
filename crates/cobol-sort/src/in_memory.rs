@@ -85,7 +85,9 @@ mod tests {
 
     use super::*;
 
-    fn ascii_comparator() -> Box<dyn Fn(&[u8], &[u8]) -> Ordering + Send + Sync> {
+    type SortComparator = Box<dyn Fn(&[u8], &[u8]) -> Ordering + Send + Sync>;
+
+    fn ascii_comparator() -> SortComparator {
         Box::new(|a: &[u8], b: &[u8]| a.cmp(b))
     }
 
@@ -121,7 +123,7 @@ mod tests {
     #[test]
     fn test_stable_sort_preserves_order() {
         // Records with same key prefix but different suffixes
-        let cmp: Box<dyn Fn(&[u8], &[u8]) -> Ordering + Send + Sync> =
+        let cmp: SortComparator =
             Box::new(|a: &[u8], b: &[u8]| {
                 // Compare only first 3 bytes
                 a[..3].cmp(&b[..3])

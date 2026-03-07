@@ -141,7 +141,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic]
+    #[should_panic(expected = "index out of bounds")]
     fn out_of_bounds_panics() {
         let arr = CobolArray::new(vec![PicX::new(5, b"TEST")]);
         let _ = arr.get(2);

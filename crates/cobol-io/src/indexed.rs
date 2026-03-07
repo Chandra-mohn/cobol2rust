@@ -8,8 +8,6 @@
 //!
 //! Requires the `sqlite` feature (enabled by default).
 
-#![cfg(feature = "sqlite")]
-
 use std::path::PathBuf;
 
 use rusqlite::{params, Connection};
@@ -129,9 +127,8 @@ impl IndexedFile {
         }
 
         let conn = self.conn.as_ref().unwrap();
-        let mut stmt = match conn.prepare("SELECT data FROM records WHERE pkey = ?1") {
-            Ok(s) => s,
-            Err(_) => return (FileStatusCode::PERM_ERROR, None),
+        let Ok(mut stmt) = conn.prepare("SELECT data FROM records WHERE pkey = ?1") else {
+            return (FileStatusCode::PERM_ERROR, None);
         };
 
         match stmt.query_row(params![key], |row| {
@@ -164,9 +161,8 @@ impl IndexedFile {
         }
 
         let conn = self.conn.as_ref().unwrap();
-        let mut stmt = match conn.prepare("SELECT pkey FROM records WHERE pkey >= ?1 ORDER BY pkey LIMIT 1") {
-            Ok(s) => s,
-            Err(_) => return FileStatusCode::PERM_ERROR,
+        let Ok(mut stmt) = conn.prepare("SELECT pkey FROM records WHERE pkey >= ?1 ORDER BY pkey LIMIT 1") else {
+            return FileStatusCode::PERM_ERROR;
         };
 
         match stmt.query_row(params![key], |row| {
@@ -210,9 +206,8 @@ impl CobolFile for IndexedFile {
         }
 
         // For OUTPUT mode, we truncate (delete all records)
-        let conn = match Connection::open(&self.path) {
-            Ok(c) => c,
-            Err(_) => return FileStatusCode::PERM_ERROR,
+        let Ok(conn) = Connection::open(&self.path) else {
+            return FileStatusCode::PERM_ERROR;
         };
 
         self.conn = Some(conn);
@@ -269,9 +264,8 @@ impl CobolFile for IndexedFile {
         let result = if let Some(ref key) = self.current_key.clone() {
             // Read the next record after current_key
             query = "SELECT pkey, data FROM records WHERE pkey > ?1 ORDER BY pkey LIMIT 1";
-            let mut stmt = match conn.prepare(query) {
-                Ok(s) => s,
-                Err(_) => return (FileStatusCode::PERM_ERROR, None),
+            let Ok(mut stmt) = conn.prepare(query) else {
+                return (FileStatusCode::PERM_ERROR, None);
             };
             stmt.query_row(params![key], |row| {
                 let k: Vec<u8> = row.get(0)?;
@@ -281,9 +275,8 @@ impl CobolFile for IndexedFile {
         } else {
             // Read the first record
             query = "SELECT pkey, data FROM records ORDER BY pkey LIMIT 1";
-            let mut stmt = match conn.prepare(query) {
-                Ok(s) => s,
-                Err(_) => return (FileStatusCode::PERM_ERROR, None),
+            let Ok(mut stmt) = conn.prepare(query) else {
+                return (FileStatusCode::PERM_ERROR, None);
             };
             stmt.query_row([], |row| {
                 let k: Vec<u8> = row.get(0)?;

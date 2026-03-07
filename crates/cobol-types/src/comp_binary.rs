@@ -64,8 +64,7 @@ impl CompBinary {
         match self.precision {
             1..=4 => 2,
             5..=9 => 4,
-            10..=18 => 8,
-            _ => 8, // Default to 8 for anything larger
+            _ => 8, // 10..=18 and anything larger
         }
     }
 

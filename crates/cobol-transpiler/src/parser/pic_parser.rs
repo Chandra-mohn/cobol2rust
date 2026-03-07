@@ -386,10 +386,8 @@ pub fn compute_storage_size(pic: &PicClause, usage: crate::ast::Usage) -> u32 {
                 _ => 8,      // doubleword
             }
         }
-        crate::ast::Usage::Comp1 => 4,  // single-precision float
-        crate::ast::Usage::Comp2 => 8,  // double-precision float
-        crate::ast::Usage::Index => 4,  // index
-        crate::ast::Usage::Pointer => 8, // pointer (64-bit)
+        crate::ast::Usage::Comp1 | crate::ast::Usage::Index => 4, // float/index
+        crate::ast::Usage::Comp2 | crate::ast::Usage::Pointer => 8, // double/pointer
     }
 }
 

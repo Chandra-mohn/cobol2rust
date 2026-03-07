@@ -46,8 +46,8 @@ pub fn preprocess_fixed_format(source: &str) -> Result<String> {
         let code_area = &line[7..code_end];
 
         match indicator {
-            // Comment lines -- skip entirely
-            '*' | '/' => {
+            // Comment lines and debugging lines -- skip entirely
+            '*' | '/' | 'D' | 'd' => {
                 output_lines.push(String::new());
             }
             // Continuation line -- append to previous non-empty line
@@ -69,10 +69,6 @@ pub fn preprocess_fixed_format(source: &str) -> Result<String> {
                         message: "continuation line with no preceding line".to_string(),
                     });
                 }
-            }
-            // Debugging lines -- strip in production mode
-            'D' | 'd' => {
-                output_lines.push(String::new());
             }
             // Normal code line (space or any other indicator)
             _ => {
@@ -182,9 +178,9 @@ fn strip_continuation_quote<'a>(prev_line: &str, continuation: &'a str) -> &'a s
     let in_single_quote = single_count % 2 != 0;
     let in_double_quote = double_count % 2 != 0;
 
-    if in_single_quote && continuation.starts_with('\'') {
-        &continuation[1..]
-    } else if in_double_quote && continuation.starts_with('"') {
+    if (in_single_quote && continuation.starts_with('\''))
+        || (in_double_quote && continuation.starts_with('"'))
+    {
         &continuation[1..]
     } else {
         continuation

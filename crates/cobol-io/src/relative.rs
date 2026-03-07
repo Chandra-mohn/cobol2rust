@@ -132,11 +132,10 @@ impl RelativeFile {
                 }
             }
             Ok(SLOT_EMPTY) => (FileStatusCode::RECORD_NOT_FOUND, None),
-            Ok(_) => (FileStatusCode::PERM_ERROR, None),
             Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
                 (FileStatusCode::RECORD_NOT_FOUND, None)
             }
-            Err(_) => (FileStatusCode::PERM_ERROR, None),
+            Ok(_) | Err(_) => (FileStatusCode::PERM_ERROR, None),
         }
     }
 
@@ -199,8 +198,7 @@ impl RelativeFile {
         // Verify slot is occupied
         match self.read_control() {
             Ok(SLOT_OCCUPIED) => {}
-            Ok(_) => return FileStatusCode::RECORD_NOT_FOUND,
-            Err(_) => return FileStatusCode::RECORD_NOT_FOUND,
+            Ok(_) | Err(_) => return FileStatusCode::RECORD_NOT_FOUND,
         }
 
         // Write record data (control byte already read, file is positioned at record)
@@ -231,8 +229,7 @@ impl RelativeFile {
 
         match self.read_control() {
             Ok(SLOT_OCCUPIED) => {}
-            Ok(_) => return FileStatusCode::RECORD_NOT_FOUND,
-            Err(_) => return FileStatusCode::RECORD_NOT_FOUND,
+            Ok(_) | Err(_) => return FileStatusCode::RECORD_NOT_FOUND,
         }
 
         // Seek back to control byte and write EMPTY
@@ -281,6 +278,7 @@ impl CobolFile for RelativeFile {
                     .read(true)
                     .write(true)
                     .create(true)
+                    .truncate(false)
                     .open(&self.path)
                 {
                     Ok(f) => f,
@@ -331,12 +329,11 @@ impl CobolFile for RelativeFile {
                         Err(_) => return (FileStatusCode::PERM_ERROR, None),
                     }
                 }
-                Ok(SLOT_EMPTY) => continue, // Skip empty slots
-                Ok(_) => return (FileStatusCode::PERM_ERROR, None),
+                Ok(SLOT_EMPTY) => {} // Skip empty slots
                 Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
                     return (FileStatusCode::AT_END, None);
                 }
-                Err(_) => return (FileStatusCode::PERM_ERROR, None),
+                Ok(_) | Err(_) => return (FileStatusCode::PERM_ERROR, None),
             }
         }
     }

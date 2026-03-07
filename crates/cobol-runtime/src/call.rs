@@ -34,7 +34,7 @@ pub struct CallParam<'a> {
     pub value: Option<i64>,
 }
 
-impl<'a> std::fmt::Debug for CallParam<'a> {
+impl std::fmt::Debug for CallParam<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("CallParam")
             .field("mode", &self.mode)
@@ -159,7 +159,7 @@ pub fn cobol_cancel(
 }
 
 /// Create a BY REFERENCE parameter.
-pub fn call_param_by_ref<'a>(field: &'a mut dyn CobolField) -> CallParam<'a> {
+pub fn call_param_by_ref(field: &mut dyn CobolField) -> CallParam<'_> {
     CallParam {
         mode: CallParamMode::ByReference,
         field: Some(field),
@@ -168,7 +168,7 @@ pub fn call_param_by_ref<'a>(field: &'a mut dyn CobolField) -> CallParam<'a> {
 }
 
 /// Create a BY CONTENT parameter (caller passes a temporary copy).
-pub fn call_param_by_content<'a>(field: &'a mut dyn CobolField) -> CallParam<'a> {
+pub fn call_param_by_content(field: &mut dyn CobolField) -> CallParam<'_> {
     CallParam {
         mode: CallParamMode::ByContent,
         field: Some(field),
@@ -239,7 +239,7 @@ mod tests {
         ) -> Result<i32, CallError> {
             self.call_count += 1;
             self.cancelled = false;
-            Ok(self.call_count as i32)
+            Ok(i32::try_from(self.call_count).unwrap_or(i32::MAX))
         }
 
         fn cancel(&mut self) {
@@ -271,7 +271,7 @@ mod tests {
         assert!(result.is_err());
         match result.unwrap_err() {
             CallError::ProgramNotFound(name) => assert_eq!(name, "NOSUCH"),
-            other => panic!("expected ProgramNotFound, got {other:?}"),
+            other @ CallError::CallFailed(_) => panic!("expected ProgramNotFound, got {other:?}"),
         }
     }
 
@@ -300,7 +300,7 @@ mod tests {
         assert!(result.is_err());
         match result.unwrap_err() {
             CallError::ProgramNotFound(name) => assert_eq!(name, "NOSUCH"),
-            other => panic!("expected ProgramNotFound, got {other:?}"),
+            other @ CallError::CallFailed(_) => panic!("expected ProgramNotFound, got {other:?}"),
         }
     }
 

@@ -52,12 +52,12 @@ pub fn cobol_function_integer_part(x: Decimal) -> Decimal {
 
 /// FUNCTION MAX(args) -- maximum of N values.
 pub fn cobol_function_max(args: &[Decimal]) -> Decimal {
-    args.iter().copied().fold(Decimal::MIN, |a, b| a.max(b))
+    args.iter().copied().fold(Decimal::MIN, Decimal::max)
 }
 
 /// FUNCTION MIN(args) -- minimum of N values.
 pub fn cobol_function_min(args: &[Decimal]) -> Decimal {
-    args.iter().copied().fold(Decimal::MAX, |a, b| a.min(b))
+    args.iter().copied().fold(Decimal::MAX, Decimal::min)
 }
 
 /// FUNCTION ORD(x) -- ordinal position of character (1-based).
@@ -269,8 +269,7 @@ pub fn cobol_function_current_date() -> Vec<u8> {
     let (year, month, day) = days_to_date(days);
 
     format!(
-        "{:04}{:02}{:02}{:02}{:02}{:02}{:02}+0000",
-        year, month, day, hours, minutes, seconds, hundredths
+        "{year:04}{month:02}{day:02}{hours:02}{minutes:02}{seconds:02}{hundredths:02}+0000"
     )
     .into_bytes()
 }
@@ -278,10 +277,10 @@ pub fn cobol_function_current_date() -> Vec<u8> {
 /// Convert days since Unix epoch to (year, month, day).
 fn days_to_date(days: u64) -> (u64, u64, u64) {
     // Algorithm from https://howardhinnant.github.io/date_algorithms.html
-    let z = days + 719468;
-    let era = z / 146097;
-    let doe = z - era * 146097;
-    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let z = days + 719_468;
+    let era = z / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
     let y = yoe + era * 400;
     let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
     let mp = (5 * doy + 2) / 153;
@@ -311,8 +310,7 @@ pub fn cobol_function_trim(data: &[u8], trim_type: u8) -> Vec<u8> {
     let end = if trim_type == 2 || trim_type == 3 {
         data.iter()
             .rposition(|&b| b != b' ')
-            .map(|p| p + 1)
-            .unwrap_or(0)
+            .map_or(0, |p| p + 1)
     } else {
         data.len()
     };

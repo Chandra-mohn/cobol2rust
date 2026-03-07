@@ -238,7 +238,7 @@ mod tests {
         let config = SortConfig::new(3).with_memory_limit(20);
         let mut engine = CobolSortEngine::new(&keys, config, None);
 
-        for ch in b"ZYXWVUTSRQPONMLKJIHGFEDCBA".iter() {
+        for ch in b"ZYXWVUTSRQPONMLKJIHGFEDCBA" {
             engine.add_record(vec![*ch; 3]).unwrap();
         }
 
@@ -248,7 +248,7 @@ mod tests {
         assert_eq!(result.len(), 26);
         // Verify sorted
         for i in 1..result.len() {
-            assert!(result[i - 1] <= result[i], "Not sorted at index {}", i);
+            assert!(result[i - 1] <= result[i], "Not sorted at index {i}");
         }
     }
 

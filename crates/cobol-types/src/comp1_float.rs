@@ -174,9 +174,9 @@ mod tests {
 
     #[test]
     fn comp1_from_f32() {
-        let c = Comp1Float::from_f32(3.14);
-        // f32 precision: 3.14 -> 3.140000104904175 (IEEE 754 artifact)
-        assert!((c.as_f32() - 3.14).abs() < 0.001);
+        let c = Comp1Float::from_f32(std::f32::consts::PI);
+        // f32 precision: roundtrip through f32 storage
+        assert!((c.as_f32() - std::f32::consts::PI).abs() < 0.001);
     }
 
     #[test]

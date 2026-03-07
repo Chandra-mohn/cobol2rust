@@ -317,14 +317,7 @@ pub fn ascii_to_ebcdic_copy(cp: CodePage, src: &[u8], dst: &mut [u8]) {
 /// point. Comparing ASCII strings by these weights produces EBCDIC ordering.
 #[must_use]
 pub fn ebcdic_collating_weights(cp: CodePage) -> [u8; 256] {
-    let rev = reverse_table(cp);
-    let mut weights = [0u8; 256];
-    #[allow(clippy::needless_range_loop)]
-    for i in 0..256 {
-        // The weight of ASCII byte `i` is its EBCDIC code point.
-        weights[i] = rev[i];
-    }
-    weights
+    *reverse_table(cp)
 }
 
 // ---------------------------------------------------------------------------

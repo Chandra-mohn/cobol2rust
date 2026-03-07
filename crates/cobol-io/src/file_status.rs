@@ -76,11 +76,10 @@ impl FileStatusCode {
     pub fn from_error(err: &FileError) -> Self {
         match err {
             FileError::EndOfFile => Self::AT_END,
-            FileError::NotFound(_) => Self::RECORD_NOT_FOUND,
+            FileError::NotFound(_) | FileError::RecordNotFound => Self::RECORD_NOT_FOUND,
             FileError::AlreadyOpen(_) => Self::ALREADY_OPEN,
             FileError::NotOpen(_) => Self::NOT_OPEN,
             FileError::DuplicateKey => Self::DUPLICATE_KEY,
-            FileError::RecordNotFound => Self::RECORD_NOT_FOUND,
             FileError::SequenceError => Self::SEQUENCE_ERROR,
             FileError::Io(_) => Self::PERM_ERROR,
         }

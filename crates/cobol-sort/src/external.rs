@@ -333,7 +333,7 @@ mod tests {
     fn test_many_runs_with_small_fan_in() {
         // Force multi-pass merge: fan_in=2, create 4 runs
         let mut ext = ExternalMergeSort::new(ascii_cmp(), 5, 2, 3, false);
-        for ch in b"HGFEDCBA".iter() {
+        for ch in b"HGFEDCBA" {
             ext.add_record(vec![*ch; 3]).unwrap();
         }
 
@@ -341,7 +341,7 @@ mod tests {
         assert_eq!(result.len(), 8);
         // Verify sorted order
         for i in 1..result.len() {
-            assert!(result[i - 1] <= result[i], "Not sorted at index {}", i);
+            assert!(result[i - 1] <= result[i], "Not sorted at index {i}");
         }
     }
 }

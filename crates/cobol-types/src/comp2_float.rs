@@ -147,7 +147,7 @@ mod tests {
 
     #[test]
     fn comp2_from_f64() {
-        let c = Comp2Float::from_f64(3.141592653589793);
+        let c = Comp2Float::from_f64(std::f64::consts::PI);
         assert!((c.as_f64() - std::f64::consts::PI).abs() < 1e-15);
     }
 
@@ -246,7 +246,7 @@ mod tests {
 
     #[test]
     fn comp2_high_precision() {
-        let c = Comp2Float::from_f64(1.23456789012345);
+        let c = Comp2Float::from_f64(1.234_567_890_123_45);
         let d = c.to_decimal();
         // Should preserve ~15 significant digits
         let diff = (d - dec!(1.23456789012345)).abs();
