@@ -1,0 +1,22 @@
+[package]
+name = "cobol-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "cobol2rust CLI: transpile COBOL to Rust, validate, preprocess"
+
+[[bin]]
+name = "cobol2rust"
+path = "src/main.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+cobol-transpiler = { workspace = true }
+clap = { workspace = true }
+miette = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }

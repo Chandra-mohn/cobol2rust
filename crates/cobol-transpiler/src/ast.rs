@@ -4,6 +4,7 @@
 //! It captures the semantically meaningful structure of a COBOL program
 //! while discarding syntactic noise.
 
+use serde::Serialize;
 use std::fmt;
 
 // ---------------------------------------------------------------------------
@@ -11,7 +12,7 @@ use std::fmt;
 // ---------------------------------------------------------------------------
 
 /// A complete COBOL compilation unit.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct CobolProgram {
     /// PROGRAM-ID from IDENTIFICATION DIVISION.
     pub program_id: String,
@@ -28,7 +29,7 @@ pub struct CobolProgram {
 // ---------------------------------------------------------------------------
 
 /// The DATA DIVISION, containing all data definitions.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize)]
 pub struct DataDivision {
     /// WORKING-STORAGE SECTION items.
     pub working_storage: Vec<DataEntry>,
@@ -41,7 +42,7 @@ pub struct DataDivision {
 }
 
 /// A single data entry (level number item).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct DataEntry {
     /// Level number (01-49, 66, 77, 88).
     pub level: u8,
@@ -80,7 +81,7 @@ pub struct DataEntry {
 }
 
 /// Parsed PIC clause.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct PicClause {
     /// Raw PIC string as written (e.g., "S9(5)V99").
     pub raw: String,
@@ -99,7 +100,7 @@ pub struct PicClause {
 }
 
 /// Category derived from PIC clause analysis.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum PicCategory {
     /// PIC A -- alphabetic only.
     Alphabetic,
@@ -114,7 +115,7 @@ pub enum PicCategory {
 }
 
 /// A single editing symbol in a PIC clause.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct EditSymbolEntry {
     /// The symbol character (Z, *, $, +, -, B, 0, /).
     pub symbol: char,
@@ -123,7 +124,7 @@ pub struct EditSymbolEntry {
 }
 
 /// USAGE clause values.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
 pub enum Usage {
     /// DISPLAY (default) -- character representation.
     #[default]
@@ -145,7 +146,7 @@ pub enum Usage {
 }
 
 /// SIGN clause specification.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct SignClause {
     /// LEADING or TRAILING.
     pub position: SignPosition,
@@ -154,14 +155,14 @@ pub struct SignClause {
 }
 
 /// Sign position within a numeric field.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum SignPosition {
     Leading,
     Trailing,
 }
 
 /// A literal value (for VALUE clauses, condition values, etc.).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub enum Literal {
     /// Numeric literal (e.g., 42, -3.14, +100).
     Numeric(String),
@@ -172,7 +173,7 @@ pub enum Literal {
 }
 
 /// Figurative constants in COBOL.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum FigurativeConstant {
     Spaces,
     Zeros,
@@ -183,7 +184,7 @@ pub enum FigurativeConstant {
 }
 
 /// Condition value for 88-level items.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub enum ConditionValue {
     /// Single value: VALUE IS literal.
     Single(Literal),
@@ -192,7 +193,7 @@ pub enum ConditionValue {
 }
 
 /// FILE SECTION file description (FD/SD).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct FileDescription {
     /// FD or SD.
     pub descriptor_type: FileDescriptorType,
@@ -221,7 +222,7 @@ pub struct FileDescription {
 }
 
 /// FD vs SD.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum FileDescriptorType {
     /// File Description.
     Fd,
@@ -230,7 +231,7 @@ pub enum FileDescriptorType {
 }
 
 /// File organization.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
 pub enum FileOrganization {
     #[default]
     Sequential,
@@ -240,7 +241,7 @@ pub enum FileOrganization {
 }
 
 /// File access mode.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
 pub enum AccessMode {
     #[default]
     Sequential,
@@ -249,7 +250,7 @@ pub enum AccessMode {
 }
 
 /// Recording mode (F, V, U).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum RecordingMode {
     Fixed,
     Variable,
@@ -257,7 +258,7 @@ pub enum RecordingMode {
 }
 
 /// Record size specification.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum RecordSize {
     /// RECORD CONTAINS n CHARACTERS.
     Fixed(u32),
@@ -270,7 +271,7 @@ pub enum RecordSize {
 // ---------------------------------------------------------------------------
 
 /// The PROCEDURE DIVISION, containing executable code.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct ProcedureDivision {
     /// USING parameters (for called programs).
     pub using_params: Vec<UsingParam>,
@@ -283,7 +284,7 @@ pub struct ProcedureDivision {
 }
 
 /// A USING parameter specification.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct UsingParam {
     /// Parameter name (data item reference).
     pub name: String,
@@ -292,7 +293,7 @@ pub struct UsingParam {
 }
 
 /// Parameter passing mode.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
 pub enum PassingMode {
     #[default]
     ByReference,
@@ -302,7 +303,7 @@ pub enum PassingMode {
 }
 
 /// A section in the PROCEDURE DIVISION.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct Section {
     /// Section name.
     pub name: String,
@@ -311,7 +312,7 @@ pub struct Section {
 }
 
 /// A paragraph (basic unit of executable code).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct Paragraph {
     /// Paragraph name.
     pub name: String,
@@ -320,13 +321,13 @@ pub struct Paragraph {
 }
 
 /// A sentence (one or more statements terminated by a period).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct Sentence {
     pub statements: Vec<Statement>,
 }
 
 /// A COBOL statement (verb + operands).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub enum Statement {
     // -- Data manipulation --
     Move(MoveStatement),
@@ -388,7 +389,7 @@ pub enum Statement {
 // ---------------------------------------------------------------------------
 
 /// MOVE src TO dest1 dest2 ...
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct MoveStatement {
     /// MOVE CORRESPONDING flag.
     pub corresponding: bool,
@@ -399,7 +400,7 @@ pub struct MoveStatement {
 }
 
 /// INITIALIZE field REPLACING ...
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct InitializeStatement {
     /// Fields to initialize.
     pub targets: Vec<DataReference>,
@@ -408,7 +409,7 @@ pub struct InitializeStatement {
 }
 
 /// INITIALIZE REPLACING clause.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct InitializeReplacing {
     /// Category to replace.
     pub category: InitializeCategory,
@@ -417,7 +418,7 @@ pub struct InitializeReplacing {
 }
 
 /// Categories for INITIALIZE REPLACING.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum InitializeCategory {
     Alphabetic,
     Alphanumeric,
@@ -428,7 +429,7 @@ pub enum InitializeCategory {
 }
 
 /// ADD a TO b GIVING c ...
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct AddStatement {
     /// Addends.
     pub operands: Vec<Operand>,
@@ -445,7 +446,7 @@ pub struct AddStatement {
 }
 
 /// SUBTRACT a FROM b GIVING c ...
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct SubtractStatement {
     /// Subtrahends.
     pub operands: Vec<Operand>,
@@ -462,7 +463,7 @@ pub struct SubtractStatement {
 }
 
 /// MULTIPLY a BY b GIVING c ...
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct MultiplyStatement {
     /// Multiplicand.
     pub operand: Operand,
@@ -477,7 +478,7 @@ pub struct MultiplyStatement {
 }
 
 /// DIVIDE a INTO/BY b GIVING c REMAINDER d ...
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct DivideStatement {
     /// Dividend/divisor.
     pub operand: Operand,
@@ -496,7 +497,7 @@ pub struct DivideStatement {
 }
 
 /// DIVIDE direction.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum DivideDirection {
     /// DIVIDE x INTO y (y = y / x).
     Into,
@@ -505,7 +506,7 @@ pub enum DivideDirection {
 }
 
 /// COMPUTE dest = expression.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct ComputeStatement {
     /// Destination targets.
     pub targets: Vec<ArithTarget>,
@@ -518,7 +519,7 @@ pub struct ComputeStatement {
 }
 
 /// Arithmetic target (field reference + optional ROUNDED).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct ArithTarget {
     /// Target field.
     pub field: DataReference,
@@ -527,7 +528,7 @@ pub struct ArithTarget {
 }
 
 /// Arithmetic expression (for COMPUTE).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub enum ArithExpr {
     /// Literal or field reference.
     Operand(Operand),
@@ -544,7 +545,7 @@ pub enum ArithExpr {
 }
 
 /// Binary arithmetic operators.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum ArithOp {
     Add,
     Subtract,
@@ -554,7 +555,7 @@ pub enum ArithOp {
 }
 
 /// IF condition THEN ... ELSE ... END-IF.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct IfStatement {
     /// Condition to test.
     pub condition: Condition,
@@ -565,7 +566,7 @@ pub struct IfStatement {
 }
 
 /// EVALUATE subject WHEN ... END-EVALUATE.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct EvaluateStatement {
     /// EVALUATE subjects (ALSO).
     pub subjects: Vec<EvaluateSubject>,
@@ -576,7 +577,7 @@ pub struct EvaluateStatement {
 }
 
 /// EVALUATE subject.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub enum EvaluateSubject {
     /// EVALUATE expression.
     Expr(Operand),
@@ -585,7 +586,7 @@ pub enum EvaluateSubject {
 }
 
 /// A WHEN branch.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct WhenBranch {
     /// Values to match (ALSO).
     pub values: Vec<WhenValue>,
@@ -594,7 +595,7 @@ pub struct WhenBranch {
 }
 
 /// A single WHEN value.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub enum WhenValue {
     /// A single value.
     Value(Operand),
@@ -607,7 +608,7 @@ pub enum WhenValue {
 }
 
 /// PERFORM [TIMES | UNTIL | VARYING] ...
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct PerformStatement {
     /// Target paragraph/section (None for inline PERFORM).
     pub target: Option<PerformTarget>,
@@ -620,13 +621,13 @@ pub struct PerformStatement {
 }
 
 /// PERFORM target.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct PerformTarget {
     pub name: String,
 }
 
 /// PERFORM loop variants.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 #[allow(clippy::large_enum_variant)]
 pub enum PerformLoopType {
     /// Simple PERFORM (execute once).
@@ -654,7 +655,7 @@ pub enum PerformLoopType {
 }
 
 /// AFTER clause in PERFORM VARYING.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct VaryingAfter {
     pub counter: DataReference,
     pub from: Operand,
@@ -663,7 +664,7 @@ pub struct VaryingAfter {
 }
 
 /// GO TO paragraph.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct GoToStatement {
     /// Target paragraph(s).
     pub targets: Vec<String>,
@@ -672,7 +673,7 @@ pub struct GoToStatement {
 }
 
 /// DISPLAY items UPON target.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct DisplayStatement {
     /// Items to display.
     pub items: Vec<Operand>,
@@ -683,7 +684,7 @@ pub struct DisplayStatement {
 }
 
 /// DISPLAY target device.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
 pub enum DisplayTarget {
     #[default]
     Sysout,
@@ -692,7 +693,7 @@ pub enum DisplayTarget {
 }
 
 /// ACCEPT field FROM source.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct AcceptStatement {
     /// Destination field.
     pub target: DataReference,
@@ -701,7 +702,7 @@ pub struct AcceptStatement {
 }
 
 /// ACCEPT source.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
 pub enum AcceptSource {
     #[default]
     Sysin,
@@ -714,20 +715,20 @@ pub enum AcceptSource {
 }
 
 /// OPEN mode file-name.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct OpenStatement {
     pub files: Vec<OpenFile>,
 }
 
 /// A single file in an OPEN statement.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct OpenFile {
     pub mode: OpenMode,
     pub file_name: String,
 }
 
 /// OPEN modes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum OpenMode {
     Input,
     Output,
@@ -736,13 +737,13 @@ pub enum OpenMode {
 }
 
 /// CLOSE file-name.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct CloseStatement {
     pub files: Vec<String>,
 }
 
 /// READ file INTO dest.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct ReadStatement {
     pub file_name: String,
     pub into: Option<DataReference>,
@@ -754,7 +755,7 @@ pub struct ReadStatement {
 }
 
 /// WRITE record FROM src.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct WriteStatement {
     pub record_name: String,
     pub from: Option<DataReference>,
@@ -766,14 +767,14 @@ pub struct WriteStatement {
 }
 
 /// WRITE ADVANCING clause.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub enum Advancing {
     Lines(Operand),
     Page,
 }
 
 /// REWRITE record FROM src.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct RewriteStatement {
     pub record_name: String,
     pub from: Option<DataReference>,
@@ -782,7 +783,7 @@ pub struct RewriteStatement {
 }
 
 /// DELETE file.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct DeleteStatement {
     pub file_name: String,
     pub invalid_key: Vec<Statement>,
@@ -790,7 +791,7 @@ pub struct DeleteStatement {
 }
 
 /// START file KEY condition.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct StartStatement {
     pub file_name: String,
     pub key_condition: Option<StartKeyCondition>,
@@ -799,14 +800,14 @@ pub struct StartStatement {
 }
 
 /// START key comparison.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct StartKeyCondition {
     pub key: DataReference,
     pub op: ComparisonOp,
 }
 
 /// STRING ... DELIMITED BY ... INTO dest.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct StringStatement {
     pub sources: Vec<StringSource>,
     pub into: DataReference,
@@ -816,21 +817,21 @@ pub struct StringStatement {
 }
 
 /// STRING source item.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct StringSource {
     pub operand: Operand,
     pub delimited_by: StringDelimiter,
 }
 
 /// STRING delimiter.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub enum StringDelimiter {
     Size,
     Literal(Operand),
 }
 
 /// UNSTRING source DELIMITED BY ... INTO dest1 dest2 ...
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct UnstringStatement {
     pub source: DataReference,
     pub delimiters: Vec<UnstringDelimiter>,
@@ -842,14 +843,14 @@ pub struct UnstringStatement {
 }
 
 /// UNSTRING delimiter.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct UnstringDelimiter {
     pub value: Operand,
     pub all: bool,
 }
 
 /// UNSTRING INTO target.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct UnstringInto {
     pub target: DataReference,
     pub delimiter_in: Option<DataReference>,
@@ -857,7 +858,7 @@ pub struct UnstringInto {
 }
 
 /// INSPECT field TALLYING/REPLACING ...
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct InspectStatement {
     pub target: DataReference,
     pub tallying: Vec<InspectTallying>,
@@ -866,21 +867,21 @@ pub struct InspectStatement {
 }
 
 /// INSPECT TALLYING clause.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct InspectTallying {
     pub counter: DataReference,
     pub what: InspectWhat,
 }
 
 /// INSPECT REPLACING clause.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct InspectReplacing {
     pub what: InspectWhat,
     pub by: Operand,
 }
 
 /// What to tally/replace in INSPECT.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub enum InspectWhat {
     Characters,
     All(Operand),
@@ -889,14 +890,14 @@ pub enum InspectWhat {
 }
 
 /// INSPECT CONVERTING clause.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct InspectConverting {
     pub from: Operand,
     pub to: Operand,
 }
 
 /// CALL program-name USING params.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct CallStatement {
     /// Program name (literal or identifier).
     pub program: Operand,
@@ -911,7 +912,7 @@ pub struct CallStatement {
 }
 
 /// CALL USING parameter.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct CallParam {
     pub mode: PassingMode,
     /// The operand. `None` when OMITTED.
@@ -919,13 +920,13 @@ pub struct CallParam {
 }
 
 /// CANCEL program-name ...
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct CancelStatement {
     pub programs: Vec<Operand>,
 }
 
 /// SORT file ON KEY ... USING/INPUT PROCEDURE ... GIVING/OUTPUT PROCEDURE ...
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct SortStatement {
     pub file_name: String,
     pub keys: Vec<SortKey>,
@@ -936,14 +937,14 @@ pub struct SortStatement {
 }
 
 /// SORT key specification.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct SortKey {
     pub ascending: bool,
     pub field: DataReference,
 }
 
 /// SORT input source.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub enum SortInput {
     /// USING file-name.
     Using(Vec<String>),
@@ -952,7 +953,7 @@ pub enum SortInput {
 }
 
 /// SORT output destination.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub enum SortOutput {
     /// GIVING file-name.
     Giving(Vec<String>),
@@ -961,7 +962,7 @@ pub enum SortOutput {
 }
 
 /// MERGE file ON KEY ...
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct MergeStatement {
     pub file_name: String,
     pub keys: Vec<SortKey>,
@@ -971,14 +972,14 @@ pub struct MergeStatement {
 }
 
 /// RELEASE record FROM src.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct ReleaseStatement {
     pub record_name: String,
     pub from: Option<DataReference>,
 }
 
 /// RETURN file INTO dest AT END ...
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct ReturnStatement {
     pub file_name: String,
     pub into: Option<DataReference>,
@@ -987,14 +988,14 @@ pub struct ReturnStatement {
 }
 
 /// SET field TO/UP/DOWN value.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct SetStatement {
     pub targets: Vec<DataReference>,
     pub action: SetAction,
 }
 
 /// SET action.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub enum SetAction {
     /// SET field TO value.
     To(Operand),
@@ -1007,7 +1008,7 @@ pub enum SetAction {
 }
 
 /// ALTER paragraph TO PROCEED TO target.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct AlterStatement {
     pub source: String,
     pub target: String,
@@ -1018,7 +1019,7 @@ pub struct AlterStatement {
 // ---------------------------------------------------------------------------
 
 /// A COBOL condition expression.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub enum Condition {
     /// Simple comparison: field op value.
     Comparison {
@@ -1047,7 +1048,7 @@ pub enum Condition {
 }
 
 /// Comparison operators.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum ComparisonOp {
     Equal,
     NotEqual,
@@ -1058,7 +1059,7 @@ pub enum ComparisonOp {
 }
 
 /// Class conditions for IS NUMERIC, IS ALPHABETIC, etc.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum ClassCondition {
     Numeric,
     Alphabetic,
@@ -1067,7 +1068,7 @@ pub enum ClassCondition {
 }
 
 /// Sign conditions for IS POSITIVE, IS NEGATIVE, IS ZERO.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum SignCondition {
     Positive,
     Negative,
@@ -1079,7 +1080,7 @@ pub enum SignCondition {
 // ---------------------------------------------------------------------------
 
 /// An operand (value source in a statement).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub enum Operand {
     /// A literal value.
     Literal(Literal),
@@ -1090,7 +1091,7 @@ pub enum Operand {
 }
 
 /// Reference to a data item.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct DataReference {
     /// Data item name.
     pub name: String,
@@ -1103,7 +1104,7 @@ pub struct DataReference {
 }
 
 /// A subscript expression (for OCCURS items).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub enum Subscript {
     /// Integer literal subscript.
     IntLiteral(i32),
@@ -1114,7 +1115,7 @@ pub enum Subscript {
 }
 
 /// Reference modification (field(offset:length)).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct RefMod {
     /// Starting position (1-based).
     pub offset: Box<ArithExpr>,
@@ -1123,7 +1124,7 @@ pub struct RefMod {
 }
 
 /// Intrinsic function call.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct FunctionCall {
     /// Function name (e.g., LENGTH, CURRENT-DATE, TRIM).
     pub name: String,

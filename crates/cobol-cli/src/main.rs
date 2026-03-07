@@ -1,0 +1,122 @@
+//! cobol2rust CLI: transpile COBOL to Rust, validate, preprocess.
+
+mod check;
+mod init_cmd;
+mod parse_cmd;
+mod preprocess;
+mod transpile_cmd;
+mod workspace;
+
+use std::path::PathBuf;
+use std::process::ExitCode;
+
+use clap::{Parser, Subcommand, ValueEnum};
+
+/// cobol2rust -- transpile COBOL source code to Rust.
+#[derive(Debug, Parser)]
+#[command(name = "cobol2rust", version, about)]
+pub struct Cli {
+    /// Subcommand to execute.
+    #[command(subcommand)]
+    pub command: Command,
+
+    /// Copybook search directory (repeatable).
+    #[arg(short = 'C', long = "copybook-path", global = true)]
+    pub copybook_paths: Vec<PathBuf>,
+
+    /// Override source format detection.
+    #[arg(short = 'f', long = "source-format", global = true, default_value = "auto")]
+    pub source_format: SourceFormatArg,
+
+    /// Increase output verbosity (repeatable: -v, -vv, -vvv).
+    #[arg(short, long, global = true, action = clap::ArgAction::Count)]
+    pub verbose: u8,
+
+    /// Suppress non-error output.
+    #[arg(short, long, global = true)]
+    pub quiet: bool,
+
+    /// Color output control.
+    #[arg(long, global = true, default_value = "auto")]
+    pub color: ColorArg,
+
+    /// Configuration file path (TOML).
+    #[arg(long, global = true)]
+    pub config: Option<PathBuf>,
+}
+
+/// Source format override.
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum SourceFormatArg {
+    Auto,
+    Fixed,
+    Free,
+}
+
+/// Color output control.
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum ColorArg {
+    Auto,
+    Always,
+    Never,
+}
+
+/// CLI subcommands.
+#[derive(Debug, Subcommand)]
+pub enum Command {
+    /// Transpile COBOL source to Rust.
+    Transpile(transpile_cmd::TranspileArgs),
+    /// Validate COBOL source without transpiling.
+    Check(check::CheckArgs),
+    /// Expand COPY statements and clean source format.
+    Preprocess(preprocess::PreprocessArgs),
+    /// Parse COBOL source to AST (tree or JSON).
+    Parse(parse_cmd::ParseArgs),
+    /// Scaffold a Cargo workspace from COBOL sources.
+    Init(init_cmd::InitArgs),
+}
+
+fn main() -> ExitCode {
+    let cli = Cli::parse();
+
+    // Configure miette color based on --color flag.
+    match cli.color {
+        ColorArg::Never => {
+            miette::set_hook(Box::new(|_| {
+                Box::new(
+                    miette::MietteHandlerOpts::new()
+                        .color(false)
+                        .build(),
+                )
+            }))
+            .ok();
+        }
+        ColorArg::Always => {
+            miette::set_hook(Box::new(|_| {
+                Box::new(
+                    miette::MietteHandlerOpts::new()
+                        .color(true)
+                        .build(),
+                )
+            }))
+            .ok();
+        }
+        ColorArg::Auto => {}
+    }
+
+    let result = match cli.command {
+        Command::Transpile(ref args) => transpile_cmd::run(&cli, args),
+        Command::Check(ref args) => check::run(&cli, args),
+        Command::Preprocess(ref args) => preprocess::run(&cli, args),
+        Command::Parse(ref args) => parse_cmd::run(&cli, args),
+        Command::Init(ref args) => init_cmd::run(&cli, args),
+    };
+
+    match result {
+        Ok(code) => code,
+        Err(e) => {
+            eprintln!("{e:?}");
+            ExitCode::from(1)
+        }
+    }
+}

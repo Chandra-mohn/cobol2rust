@@ -14,6 +14,7 @@ workspace = true
 antlr-rust = { workspace = true }
 thiserror = { workspace = true }
 miette = { workspace = true }
+serde = { workspace = true }
 
 [features]
 compile_tests = []

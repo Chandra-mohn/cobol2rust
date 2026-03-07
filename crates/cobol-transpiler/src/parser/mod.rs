@@ -237,7 +237,7 @@ fn wrap_if_copybook(source: &str) -> String {
 /// Extract PROGRAM-ID from preprocessed source via simple text scan.
 ///
 /// Falls back to "UNKNOWN" if not found.
-fn extract_program_id(source: &str) -> String {
+pub fn extract_program_id(source: &str) -> String {
     for line in source.lines() {
         let trimmed = line.trim().to_uppercase();
         if trimmed.starts_with("PROGRAM-ID") {
