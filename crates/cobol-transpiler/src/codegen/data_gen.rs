@@ -285,7 +285,8 @@ fn has_data_children(entry: &DataEntry) -> bool {
 }
 
 /// Collect all leaf field names to detect duplicates.
-fn collect_leaf_names(entry: &DataEntry, counts: &mut std::collections::HashMap<String, usize>) {
+/// Public so transpile.rs/proc_gen can reuse the same logic.
+pub fn collect_leaf_names(entry: &DataEntry, counts: &mut std::collections::HashMap<String, usize>) {
     if entry.level == 88 || entry.level == 66 {
         return;
     }

@@ -137,8 +137,14 @@ fn generate_rust(program: &crate::ast::CobolProgram) -> Result<String> {
     w.blank_line();
 
     // Build condition map from data division for 88-level codegen
+    // Include both WORKING-STORAGE and FILE SECTION records
     let cmap = if let Some(ref data_div) = program.data_division {
-        build_condition_map(&data_div.working_storage)
+        let mut cm = build_condition_map(&data_div.working_storage);
+        for fd in &data_div.file_section {
+            let file_cmap = build_condition_map(&fd.records);
+            cm.extend(file_cmap);
+        }
+        cm
     } else {
         build_condition_map(&[])
     };
@@ -191,7 +197,13 @@ fn generate_rust(program: &crate::ast::CobolProgram) -> Result<String> {
 
     // Generate procedure division
     if let Some(ref proc_div) = program.procedure_division {
-        generate_procedure_division(&mut w, proc_div, &cmap, &record_file_map, &sort_field_map);
+        let (ws_records, file_records) = if let Some(ref dd) = program.data_division {
+            let fr: Vec<_> = dd.file_section.iter().flat_map(|fd| fd.records.clone()).collect();
+            (dd.working_storage.as_slice(), fr)
+        } else {
+            (&[][..], Vec::new())
+        };
+        generate_procedure_division(&mut w, proc_div, &cmap, &record_file_map, &sort_field_map, ws_records, &file_records);
         w.blank_line();
     }
 

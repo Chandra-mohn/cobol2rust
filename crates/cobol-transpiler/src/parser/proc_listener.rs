@@ -367,7 +367,7 @@ fn extract_add(ctx: &AddStatementContext<'_>) -> Statement {
             .map(|t| ArithTarget {
                 field: t.identifier().map_or_else(
                     || extract_data_ref_from_identifier_text(&t.get_text()),
-                    |id| extract_data_ref_from_identifier_text(&id.get_text()),
+                    |id| extract_data_ref_from_identifier(&id),
                 ),
                 rounded: t.ROUNDED().is_some(),
             })
@@ -2213,10 +2213,37 @@ fn extract_not_size_error_stmts(
 // ---------------------------------------------------------------------------
 
 /// Create a simple `DataReference` from a name string.
+/// Handles qualified names (X IN Y) and subscripts (X(SUB)).
 fn make_data_ref(name: &str) -> DataReference {
     let clean = name.trim().to_uppercase();
+
+    // Extract subscripts from parenthesized notation: FIELD(SUB1, SUB2)
+    let (base_text, subscripts) = if let Some(paren_pos) = clean.find('(') {
+        let base = clean[..paren_pos].trim().to_string();
+        let subs_text = clean[paren_pos + 1..].trim_end_matches(')').trim();
+        let subs: Vec<Subscript> = subs_text
+            .split(',')
+            .map(|s| {
+                let s = s.trim();
+                if let Ok(n) = s.parse::<i32>() {
+                    Subscript::IntLiteral(n)
+                } else {
+                    Subscript::DataRef(DataReference {
+                        name: s.to_string(),
+                        qualifiers: Vec::new(),
+                        subscripts: Vec::new(),
+                        ref_mod: None,
+                    })
+                }
+            })
+            .collect();
+        (base, subs)
+    } else {
+        (clean.clone(), Vec::new())
+    };
+
     // Handle qualified names (X IN Y)
-    let parts: Vec<&str> = clean.split(' ').collect();
+    let parts: Vec<&str> = base_text.split(' ').collect();
     let (data_name, qualifiers) = if parts.len() >= 3 {
         let mut quals = Vec::new();
         let mut i = 2;
@@ -2228,13 +2255,13 @@ fn make_data_ref(name: &str) -> DataReference {
         }
         (parts[0].to_string(), quals)
     } else {
-        (clean.clone(), Vec::new())
+        (base_text.clone(), Vec::new())
     };
 
     DataReference {
         name: data_name,
         qualifiers,
-        subscripts: Vec::new(),
+        subscripts,
         ref_mod: None,
     }
 }

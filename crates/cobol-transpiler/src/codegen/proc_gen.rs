@@ -17,6 +17,48 @@ pub type RecordFileMap = HashMap<String, String>;
 /// Used by SORT/MERGE codegen to emit correct `SortKeySpec::new(...)`.
 pub type SortFieldMap = HashMap<String, (usize, usize)>;
 
+/// Maps group name (uppercase) to list of (child_cobol_name, is_numeric) pairs.
+/// Used by MOVE CORRESPONDING codegen to expand into individual MOVEs.
+pub type GroupChildMap = HashMap<String, Vec<(String, bool)>>;
+
+/// Build a GroupChildMap from working-storage records and file-section records.
+fn build_group_child_map(ws_records: &[DataEntry], file_records: &[DataEntry]) -> GroupChildMap {
+    let mut map = GroupChildMap::new();
+    for record in ws_records.iter().chain(file_records.iter()) {
+        collect_group_children(record, &mut map);
+    }
+    map
+}
+
+/// Recursively collect group -> children mappings.
+fn collect_group_children(entry: &DataEntry, map: &mut GroupChildMap) {
+    if entry.level == 88 || entry.level == 66 {
+        return;
+    }
+    if !entry.children.is_empty() {
+        let group_name = entry.name.to_uppercase();
+        let mut children = Vec::new();
+        for child in &entry.children {
+            if child.level == 88 || child.level == 66 {
+                continue;
+            }
+            let child_name = child.name.to_uppercase();
+            if child_name == "FILLER" || child_name.is_empty() {
+                continue;
+            }
+            let is_numeric = child.pic.as_ref().is_some_and(|p| {
+                matches!(p.category, PicCategory::Numeric | PicCategory::NumericEdited)
+            });
+            children.push((child.name.clone(), is_numeric));
+            // Recurse into sub-groups
+            collect_group_children(child, map);
+        }
+        if !children.is_empty() {
+            map.insert(group_name, children);
+        }
+    }
+}
+
 /// Names of sections/paragraphs used as INPUT or OUTPUT PROCEDURE in SORT/MERGE.
 #[derive(Debug, Default)]
 struct SortProcedureNames {
@@ -153,7 +195,10 @@ pub fn generate_procedure_division(
     cmap: &ConditionMap,
     record_file_map: &RecordFileMap,
     sort_field_map: &SortFieldMap,
+    ws_records: &[DataEntry],
+    file_section_records: &[DataEntry],
 ) {
+    let gcm = build_group_child_map(ws_records, file_section_records);
     // Collect section/paragraph names used as INPUT/OUTPUT PROCEDURE (needed early for dispatch)
     let spn = collect_sort_procedure_names(proc_div);
 
@@ -234,7 +279,7 @@ pub fn generate_procedure_division(
 
     // Generate paragraph functions (outside sections)
     for para in &proc_div.paragraphs {
-        generate_paragraph_fn(w, para, cmap, &para_table, record_file_map, sort_field_map, &spn, None);
+        generate_paragraph_fn(w, para, cmap, &para_table, record_file_map, sort_field_map, &spn, None, &gcm);
     }
 
     // Generate section paragraphs and section wrapper functions
@@ -260,7 +305,7 @@ pub fn generate_procedure_division(
 
         // Generate individual paragraph functions
         for para in &section.paragraphs {
-            generate_paragraph_fn(w, para, cmap, &para_table, record_file_map, sort_field_map, &spn, extra_param);
+            generate_paragraph_fn(w, para, cmap, &para_table, record_file_map, sort_field_map, &spn, extra_param, &gcm);
         }
 
         // Generate section-level wrapper function that calls all paragraphs
@@ -301,7 +346,7 @@ pub fn generate_procedure_division(
 ///
 /// `extra_param`: If `Some("releaser")`, adds `releaser: &mut Releaser` param.
 ///                If `Some("returner")`, adds `returner: &mut Returner` param.
-fn generate_paragraph_fn(w: &mut RustWriter, para: &Paragraph, cmap: &ConditionMap, ptable: &[ParagraphIndex], rfm: &RecordFileMap, sfm: &SortFieldMap, _spn: &SortProcedureNames, extra_param: Option<&str>) {
+fn generate_paragraph_fn(w: &mut RustWriter, para: &Paragraph, cmap: &ConditionMap, ptable: &[ParagraphIndex], rfm: &RecordFileMap, sfm: &SortFieldMap, _spn: &SortProcedureNames, extra_param: Option<&str>, gcm: &GroupChildMap) {
     let fn_name = cobol_to_rust_name(&para.name, "");
     w.line("#[allow(non_snake_case, unused_variables)]");
     match extra_param {
@@ -318,7 +363,7 @@ fn generate_paragraph_fn(w: &mut RustWriter, para: &Paragraph, cmap: &ConditionM
 
     for sentence in &para.sentences {
         for stmt in &sentence.statements {
-            generate_statement(w, stmt, cmap, ptable, rfm, sfm);
+            generate_statement(w, stmt, cmap, ptable, rfm, sfm, gcm);
         }
     }
 
@@ -327,18 +372,18 @@ fn generate_paragraph_fn(w: &mut RustWriter, para: &Paragraph, cmap: &ConditionM
 }
 
 /// Generate Rust code for a single statement.
-fn generate_statement(w: &mut RustWriter, stmt: &Statement, cmap: &ConditionMap, ptable: &[ParagraphIndex], rfm: &RecordFileMap, sfm: &SortFieldMap) {
+fn generate_statement(w: &mut RustWriter, stmt: &Statement, cmap: &ConditionMap, ptable: &[ParagraphIndex], rfm: &RecordFileMap, sfm: &SortFieldMap, gcm: &GroupChildMap) {
     match stmt {
-        Statement::Move(m) => generate_move(w, m),
+        Statement::Move(m) => generate_move(w, m, gcm),
         Statement::Display(d) => generate_display(w, d),
         Statement::Add(a) => generate_add(w, a),
         Statement::Subtract(s) => generate_subtract(w, s),
         Statement::Multiply(m) => generate_multiply(w, m),
         Statement::Divide(d) => generate_divide(w, d),
         Statement::Compute(c) => generate_compute(w, c),
-        Statement::If(i) => generate_if(w, i, cmap, ptable, rfm, sfm),
-        Statement::Evaluate(e) => generate_evaluate(w, e, cmap, ptable, rfm, sfm),
-        Statement::Perform(p) => generate_perform(w, p, cmap, ptable, rfm, sfm),
+        Statement::If(i) => generate_if(w, i, cmap, ptable, rfm, sfm, gcm),
+        Statement::Evaluate(e) => generate_evaluate(w, e, cmap, ptable, rfm, sfm, gcm),
+        Statement::Perform(p) => generate_perform(w, p, cmap, ptable, rfm, sfm, gcm),
         Statement::GoTo(g) => generate_goto(w, g),
         Statement::StopRun => {
             w.line("ctx.stop_run();");
@@ -356,24 +401,24 @@ fn generate_statement(w: &mut RustWriter, stmt: &Statement, cmap: &ConditionMap,
         }
         Statement::ExitParagraph | Statement::ExitSection => w.line("return;"),
         Statement::Initialize(init) => generate_initialize(w, init),
-        Statement::Call(call) => generate_call(w, call, cmap, ptable, rfm, sfm),
+        Statement::Call(call) => generate_call(w, call, cmap, ptable, rfm, sfm, gcm),
         Statement::Cancel(cancel) => generate_cancel(w, cancel),
         Statement::Accept(acc) => generate_accept(w, acc),
         Statement::Open(open) => generate_open(w, open),
         Statement::Close(close) => generate_close(w, close),
-        Statement::Read(read) => generate_read(w, read, cmap, ptable, rfm, sfm),
-        Statement::Write(write) => generate_write(w, write, cmap, ptable, rfm, sfm),
-        Statement::Rewrite(rw) => generate_rewrite(w, rw, cmap, ptable, rfm, sfm),
-        Statement::Delete(del) => generate_delete(w, del, cmap, ptable, rfm, sfm),
+        Statement::Read(read) => generate_read(w, read, cmap, ptable, rfm, sfm, gcm),
+        Statement::Write(write) => generate_write(w, write, cmap, ptable, rfm, sfm, gcm),
+        Statement::Rewrite(rw) => generate_rewrite(w, rw, cmap, ptable, rfm, sfm, gcm),
+        Statement::Delete(del) => generate_delete(w, del, cmap, ptable, rfm, sfm, gcm),
         Statement::Sort(sort) => generate_sort(w, sort, cmap, sfm),
         Statement::Merge(merge) => generate_merge(w, merge, cmap, sfm),
         Statement::Release(rel) => generate_release(w, rel),
-        Statement::Return(ret) => generate_return(w, ret, cmap, ptable, rfm, sfm),
+        Statement::Return(ret) => generate_return(w, ret, cmap, ptable, rfm, sfm, gcm),
         Statement::Inspect(insp) => generate_inspect(w, insp, cmap),
-        Statement::String(s) => generate_string(w, s, cmap, ptable, rfm, sfm),
-        Statement::Unstring(u) => generate_unstring(w, u, cmap, ptable, rfm, sfm),
+        Statement::String(s) => generate_string(w, s, cmap, ptable, rfm, sfm, gcm),
+        Statement::Unstring(u) => generate_unstring(w, u, cmap, ptable, rfm, sfm, gcm),
         Statement::Set(set) => generate_set(w, set, cmap),
-        Statement::Start(start) => generate_start(w, start, cmap, ptable, rfm, sfm),
+        Statement::Start(start) => generate_start(w, start, cmap, ptable, rfm, sfm, gcm),
         Statement::Alter(_) => {
             w.line(&format!("// TODO: unsupported statement: {stmt:?}"));
         }
@@ -393,14 +438,42 @@ fn rounded_str(rounded: bool) -> &'static str {
     }
 }
 
-fn generate_move(w: &mut RustWriter, m: &MoveStatement) {
+fn generate_move(w: &mut RustWriter, m: &MoveStatement, gcm: &GroupChildMap) {
     if m.corresponding {
-        let src = operand_expr(&m.source);
+        // Expand MOVE CORRESPONDING at codegen time: find matching children
+        // between source and destination groups, generate individual MOVEs.
+        let src_name = match &m.source {
+            Operand::DataRef(dr) => dr.name.to_uppercase(),
+            _ => String::new(),
+        };
+        let src_children = gcm.get(&src_name);
+
         for dest in &m.destinations {
-            let dest_expr = data_ref_base_expr(dest);
-            w.line(&format!(
-                "move_corresponding(&{src}, &mut {dest_expr}, &ctx.config);"
-            ));
+            let dest_name = dest.name.to_uppercase();
+            let dest_children = gcm.get(&dest_name);
+
+            if let (Some(sc), Some(dc)) = (src_children, dest_children) {
+                // Find matching children by COBOL name (case-insensitive)
+                let dest_names: HashSet<String> = dc.iter()
+                    .map(|(n, _)| n.to_uppercase())
+                    .collect();
+                w.line("// MOVE CORRESPONDING expanded");
+                for (child_name, _is_numeric) in sc {
+                    if dest_names.contains(&child_name.to_uppercase()) {
+                        // Build qualified field refs for src and dest children
+                        let src_field = cobol_to_rust_name(child_name, &src_name);
+                        let dst_field = cobol_to_rust_name(child_name, &dest_name);
+                        w.line(&format!(
+                            "cobol_move(&ws.{src_field}, &mut ws.{dst_field}, &ctx.config);"
+                        ));
+                    }
+                }
+            } else {
+                // Fallback: emit a comment if group not found in map
+                w.line(&format!(
+                    "// TODO: MOVE CORRESPONDING - group not found: {src_name} / {dest_name}"
+                ));
+            }
         }
     } else {
         for dest in &m.destinations {
@@ -700,11 +773,11 @@ fn generate_compute(w: &mut RustWriter, c: &ComputeStatement) {
     }
 }
 
-fn generate_if(w: &mut RustWriter, i: &IfStatement, cmap: &ConditionMap, ptable: &[ParagraphIndex], rfm: &RecordFileMap, sfm: &SortFieldMap) {
+fn generate_if(w: &mut RustWriter, i: &IfStatement, cmap: &ConditionMap, ptable: &[ParagraphIndex], rfm: &RecordFileMap, sfm: &SortFieldMap, gcm: &GroupChildMap) {
     let cond = condition_expr(&i.condition, cmap);
     w.open_block(&format!("if {cond} {{"));
     for stmt in &i.then_body {
-        generate_statement(w, stmt, cmap, ptable, rfm, sfm);
+        generate_statement(w, stmt, cmap, ptable, rfm, sfm, gcm);
     }
     if i.else_body.is_empty() {
         w.close_block("}");
@@ -712,13 +785,13 @@ fn generate_if(w: &mut RustWriter, i: &IfStatement, cmap: &ConditionMap, ptable:
         w.dedent();
         w.open_block("} else {");
         for stmt in &i.else_body {
-            generate_statement(w, stmt, cmap, ptable, rfm, sfm);
+            generate_statement(w, stmt, cmap, ptable, rfm, sfm, gcm);
         }
         w.close_block("}");
     }
 }
 
-fn generate_evaluate(w: &mut RustWriter, e: &EvaluateStatement, cmap: &ConditionMap, ptable: &[ParagraphIndex], rfm: &RecordFileMap, sfm: &SortFieldMap) {
+fn generate_evaluate(w: &mut RustWriter, e: &EvaluateStatement, cmap: &ConditionMap, ptable: &[ParagraphIndex], rfm: &RecordFileMap, sfm: &SortFieldMap, gcm: &GroupChildMap) {
     let subject_op = e.subjects.first().and_then(|subj| match subj {
         EvaluateSubject::Expr(op) => Some(op.clone()),
         EvaluateSubject::Bool(_) => None,
@@ -765,7 +838,7 @@ fn generate_evaluate(w: &mut RustWriter, e: &EvaluateStatement, cmap: &Condition
         }
         w.open_block(&format!("{keyword} {cond} {{"));
         for stmt in &branch.body {
-            generate_statement(w, stmt, cmap, ptable, rfm, sfm);
+            generate_statement(w, stmt, cmap, ptable, rfm, sfm, gcm);
         }
     }
 
@@ -773,7 +846,7 @@ fn generate_evaluate(w: &mut RustWriter, e: &EvaluateStatement, cmap: &Condition
         w.dedent();
         w.open_block("} else {");
         for stmt in &e.when_other {
-            generate_statement(w, stmt, cmap, ptable, rfm, sfm);
+            generate_statement(w, stmt, cmap, ptable, rfm, sfm, gcm);
         }
     }
 
@@ -782,7 +855,7 @@ fn generate_evaluate(w: &mut RustWriter, e: &EvaluateStatement, cmap: &Condition
     }
 }
 
-fn generate_perform(w: &mut RustWriter, p: &PerformStatement, cmap: &ConditionMap, ptable: &[ParagraphIndex], rfm: &RecordFileMap, sfm: &SortFieldMap) {
+fn generate_perform(w: &mut RustWriter, p: &PerformStatement, cmap: &ConditionMap, ptable: &[ParagraphIndex], rfm: &RecordFileMap, sfm: &SortFieldMap, gcm: &GroupChildMap) {
     match &p.loop_type {
         PerformLoopType::Once => {
             if let Some(ref target) = p.target {
@@ -795,7 +868,7 @@ fn generate_perform(w: &mut RustWriter, p: &PerformStatement, cmap: &ConditionMa
             } else {
                 // Inline perform (once)
                 for stmt in &p.body {
-                    generate_statement(w, stmt, cmap, ptable, rfm, sfm);
+                    generate_statement(w, stmt, cmap, ptable, rfm, sfm, gcm);
                 }
             }
         }
@@ -817,7 +890,7 @@ fn generate_perform(w: &mut RustWriter, p: &PerformStatement, cmap: &ConditionMa
                     "for _cobol_i in 0..{count_usize} {{"
                 ));
                 for stmt in &p.body {
-                    generate_statement(w, stmt, cmap, ptable, rfm, sfm);
+                    generate_statement(w, stmt, cmap, ptable, rfm, sfm, gcm);
                 }
                 w.close_block("}");
             }
@@ -828,9 +901,9 @@ fn generate_perform(w: &mut RustWriter, p: &PerformStatement, cmap: &ConditionMa
         } => {
             let cond = condition_expr(condition, cmap);
             if *test_before {
-                generate_perform_until_before(w, &cond, p, cmap, ptable, rfm, sfm);
+                generate_perform_until_before(w, &cond, p, cmap, ptable, rfm, sfm, gcm);
             } else {
-                generate_perform_until_after(w, &cond, p, cmap, ptable, rfm, sfm);
+                generate_perform_until_after(w, &cond, p, cmap, ptable, rfm, sfm, gcm);
             }
         }
         PerformLoopType::Varying {
@@ -865,7 +938,7 @@ fn generate_perform(w: &mut RustWriter, p: &PerformStatement, cmap: &ConditionMa
                 }
             } else {
                 for stmt in &p.body {
-                    generate_statement(w, stmt, cmap, ptable, rfm, sfm);
+                    generate_statement(w, stmt, cmap, ptable, rfm, sfm, gcm);
                 }
             }
 
@@ -912,7 +985,7 @@ fn generate_perform_thru_inline(w: &mut RustWriter, target_name: &str, thru_name
     }
 }
 
-fn generate_perform_until_before(w: &mut RustWriter, cond: &str, p: &PerformStatement, cmap: &ConditionMap, ptable: &[ParagraphIndex], rfm: &RecordFileMap, sfm: &SortFieldMap) {
+fn generate_perform_until_before(w: &mut RustWriter, cond: &str, p: &PerformStatement, cmap: &ConditionMap, ptable: &[ParagraphIndex], rfm: &RecordFileMap, sfm: &SortFieldMap, gcm: &GroupChildMap) {
     w.open_block(&format!("while !({cond}) {{"));
     if let Some(ref target) = p.target {
         if let Some(ref thru_name) = p.thru {
@@ -923,13 +996,13 @@ fn generate_perform_until_before(w: &mut RustWriter, cond: &str, p: &PerformStat
         }
     } else {
         for stmt in &p.body {
-            generate_statement(w, stmt, cmap, ptable, rfm, sfm);
+            generate_statement(w, stmt, cmap, ptable, rfm, sfm, gcm);
         }
     }
     w.close_block("}");
 }
 
-fn generate_perform_until_after(w: &mut RustWriter, cond: &str, p: &PerformStatement, cmap: &ConditionMap, ptable: &[ParagraphIndex], rfm: &RecordFileMap, sfm: &SortFieldMap) {
+fn generate_perform_until_after(w: &mut RustWriter, cond: &str, p: &PerformStatement, cmap: &ConditionMap, ptable: &[ParagraphIndex], rfm: &RecordFileMap, sfm: &SortFieldMap, gcm: &GroupChildMap) {
     w.open_block("loop {");
     if let Some(ref target) = p.target {
         if let Some(ref thru_name) = p.thru {
@@ -940,7 +1013,7 @@ fn generate_perform_until_after(w: &mut RustWriter, cond: &str, p: &PerformState
         }
     } else {
         for stmt in &p.body {
-            generate_statement(w, stmt, cmap, ptable, rfm, sfm);
+            generate_statement(w, stmt, cmap, ptable, rfm, sfm, gcm);
         }
     }
     w.open_block(&format!("if {cond} {{"));
@@ -988,7 +1061,7 @@ fn generate_initialize(w: &mut RustWriter, init: &InitializeStatement) {
     }
 }
 
-fn generate_call(w: &mut RustWriter, call: &CallStatement, cmap: &ConditionMap, ptable: &[ParagraphIndex], rfm: &RecordFileMap, sfm: &SortFieldMap) {
+fn generate_call(w: &mut RustWriter, call: &CallStatement, cmap: &ConditionMap, ptable: &[ParagraphIndex], rfm: &RecordFileMap, sfm: &SortFieldMap, gcm: &GroupChildMap) {
     let program = match &call.program {
         Operand::Literal(Literal::Alphanumeric(s)) => format!("\"{s}\""),
         other => operand_expr(other),
@@ -1061,14 +1134,14 @@ fn generate_call(w: &mut RustWriter, call: &CallStatement, cmap: &ConditionMap, 
         w.open_block("Ok(rc) => {");
         w.line("ctx.return_code = rc;");
         for stmt in &call.not_on_exception {
-            generate_statement(w, stmt, cmap, ptable, rfm, sfm);
+            generate_statement(w, stmt, cmap, ptable, rfm, sfm, gcm);
         }
         w.close_block("}");
 
         // Err path -- ON EXCEPTION
         w.open_block("Err(_e) => {");
         for stmt in &call.on_exception {
-            generate_statement(w, stmt, cmap, ptable, rfm, sfm);
+            generate_statement(w, stmt, cmap, ptable, rfm, sfm, gcm);
         }
         w.close_block("}");
 
@@ -1160,7 +1233,7 @@ fn generate_close(w: &mut RustWriter, close: &CloseStatement) {
 }
 
 #[allow(unused_variables)]
-fn generate_read(w: &mut RustWriter, read: &ReadStatement, cmap: &ConditionMap, ptable: &[ParagraphIndex], rfm: &RecordFileMap, sfm: &SortFieldMap) {
+fn generate_read(w: &mut RustWriter, read: &ReadStatement, cmap: &ConditionMap, ptable: &[ParagraphIndex], rfm: &RecordFileMap, sfm: &SortFieldMap, gcm: &GroupChildMap) {
     let fname = cobol_to_rust_name(&read.file_name, "");
 
     // read_next() and read_by_key() both return (FileStatusCode, Option<Vec<u8>>)
@@ -1186,14 +1259,14 @@ fn generate_read(w: &mut RustWriter, read: &ReadStatement, cmap: &ConditionMap, 
             w.close_block("}");
         }
         for stmt in &read.not_at_end {
-            generate_statement(w, stmt, cmap, ptable, rfm, sfm);
+            generate_statement(w, stmt, cmap, ptable, rfm, sfm, gcm);
         }
         w.close_block("}");
 
         if !read.at_end.is_empty() {
             w.open_block("else {");
             for stmt in &read.at_end {
-                generate_statement(w, stmt, cmap, ptable, rfm, sfm);
+                generate_statement(w, stmt, cmap, ptable, rfm, sfm, gcm);
             }
             w.close_block("}");
         }
@@ -1211,14 +1284,14 @@ fn generate_read(w: &mut RustWriter, read: &ReadStatement, cmap: &ConditionMap, 
             w.close_block("}");
         }
         for stmt in &read.not_invalid_key {
-            generate_statement(w, stmt, cmap, ptable, rfm, sfm);
+            generate_statement(w, stmt, cmap, ptable, rfm, sfm, gcm);
         }
         w.close_block("}");
 
         if !read.invalid_key.is_empty() {
             w.open_block("else {");
             for stmt in &read.invalid_key {
-                generate_statement(w, stmt, cmap, ptable, rfm, sfm);
+                generate_statement(w, stmt, cmap, ptable, rfm, sfm, gcm);
             }
             w.close_block("}");
         }
@@ -1241,7 +1314,7 @@ fn generate_read(w: &mut RustWriter, read: &ReadStatement, cmap: &ConditionMap, 
     }
 }
 
-fn generate_write(w: &mut RustWriter, write: &WriteStatement, cmap: &ConditionMap, ptable: &[ParagraphIndex], rfm: &RecordFileMap, sfm: &SortFieldMap) {
+fn generate_write(w: &mut RustWriter, write: &WriteStatement, cmap: &ConditionMap, ptable: &[ParagraphIndex], rfm: &RecordFileMap, sfm: &SortFieldMap, gcm: &GroupChildMap) {
     let rec = cobol_to_rust_name(&write.record_name, "");
     // Look up the file handle for this record
     let file_field = rfm
@@ -1280,14 +1353,14 @@ fn generate_write(w: &mut RustWriter, write: &WriteStatement, cmap: &ConditionMa
         w.line(&format!("let _status = {write_call};"));
         w.open_block("if _status.is_success() {");
         for stmt in &write.not_invalid_key {
-            generate_statement(w, stmt, cmap, ptable, rfm, sfm);
+            generate_statement(w, stmt, cmap, ptable, rfm, sfm, gcm);
         }
         w.close_block("}");
 
         if !write.invalid_key.is_empty() {
             w.open_block("else {");
             for stmt in &write.invalid_key {
-                generate_statement(w, stmt, cmap, ptable, rfm, sfm);
+                generate_statement(w, stmt, cmap, ptable, rfm, sfm, gcm);
             }
             w.close_block("}");
         }
@@ -1297,7 +1370,7 @@ fn generate_write(w: &mut RustWriter, write: &WriteStatement, cmap: &ConditionMa
     }
 }
 
-fn generate_rewrite(w: &mut RustWriter, rw: &RewriteStatement, cmap: &ConditionMap, ptable: &[ParagraphIndex], rfm: &RecordFileMap, sfm: &SortFieldMap) {
+fn generate_rewrite(w: &mut RustWriter, rw: &RewriteStatement, cmap: &ConditionMap, ptable: &[ParagraphIndex], rfm: &RecordFileMap, sfm: &SortFieldMap, gcm: &GroupChildMap) {
     let rec = cobol_to_rust_name(&rw.record_name, "");
     let file_field = rfm
         .get(&rw.record_name.to_uppercase())
@@ -1318,14 +1391,14 @@ fn generate_rewrite(w: &mut RustWriter, rw: &RewriteStatement, cmap: &ConditionM
         w.line(&format!("let _status = {rewrite_call};"));
         w.open_block("if _status.is_success() {");
         for stmt in &rw.not_invalid_key {
-            generate_statement(w, stmt, cmap, ptable, rfm, sfm);
+            generate_statement(w, stmt, cmap, ptable, rfm, sfm, gcm);
         }
         w.close_block("}");
 
         if !rw.invalid_key.is_empty() {
             w.open_block("else {");
             for stmt in &rw.invalid_key {
-                generate_statement(w, stmt, cmap, ptable, rfm, sfm);
+                generate_statement(w, stmt, cmap, ptable, rfm, sfm, gcm);
             }
             w.close_block("}");
         }
@@ -1339,7 +1412,7 @@ fn generate_rewrite(w: &mut RustWriter, rw: &RewriteStatement, cmap: &ConditionM
 }
 
 #[allow(unused_variables)]
-fn generate_delete(w: &mut RustWriter, del: &DeleteStatement, cmap: &ConditionMap, ptable: &[ParagraphIndex], rfm: &RecordFileMap, sfm: &SortFieldMap) {
+fn generate_delete(w: &mut RustWriter, del: &DeleteStatement, cmap: &ConditionMap, ptable: &[ParagraphIndex], rfm: &RecordFileMap, sfm: &SortFieldMap, gcm: &GroupChildMap) {
     let fname = cobol_to_rust_name(&del.file_name, "");
     let delete_call = format!("ws.{fname}.delete_record()");
 
@@ -1348,14 +1421,14 @@ fn generate_delete(w: &mut RustWriter, del: &DeleteStatement, cmap: &ConditionMa
         w.line(&format!("let _status = {delete_call};"));
         w.open_block("if _status.is_success() {");
         for stmt in &del.not_invalid_key {
-            generate_statement(w, stmt, cmap, ptable, rfm, sfm);
+            generate_statement(w, stmt, cmap, ptable, rfm, sfm, gcm);
         }
         w.close_block("}");
 
         if !del.invalid_key.is_empty() {
             w.open_block("else {");
             for stmt in &del.invalid_key {
-                generate_statement(w, stmt, cmap, ptable, rfm, sfm);
+                generate_statement(w, stmt, cmap, ptable, rfm, sfm, gcm);
             }
             w.close_block("}");
         }
@@ -1372,7 +1445,7 @@ fn generate_delete(w: &mut RustWriter, del: &DeleteStatement, cmap: &ConditionMa
 ///
 /// START positions a file cursor for subsequent sequential READ operations.
 /// Supports KEY IS EQUAL/GREATER/NOT LESS conditions with INVALID KEY handlers.
-fn generate_start(w: &mut RustWriter, start: &StartStatement, cmap: &ConditionMap, ptable: &[ParagraphIndex], rfm: &RecordFileMap, sfm: &SortFieldMap) {
+fn generate_start(w: &mut RustWriter, start: &StartStatement, cmap: &ConditionMap, ptable: &[ParagraphIndex], rfm: &RecordFileMap, sfm: &SortFieldMap, gcm: &GroupChildMap) {
     let fname = cobol_to_rust_name(&start.file_name, "");
 
     let start_call = if let Some(ref cond) = start.key_condition {
@@ -1393,14 +1466,14 @@ fn generate_start(w: &mut RustWriter, start: &StartStatement, cmap: &ConditionMa
         w.line(&format!("let _status = {start_call};"));
         w.open_block("if _status.is_success() {");
         for stmt in &start.not_invalid_key {
-            generate_statement(w, stmt, cmap, ptable, rfm, sfm);
+            generate_statement(w, stmt, cmap, ptable, rfm, sfm, gcm);
         }
         w.close_block("}");
 
         if !start.invalid_key.is_empty() {
             w.open_block("else {");
             for stmt in &start.invalid_key {
-                generate_statement(w, stmt, cmap, ptable, rfm, sfm);
+                generate_statement(w, stmt, cmap, ptable, rfm, sfm, gcm);
             }
             w.close_block("}");
         }
@@ -1744,7 +1817,13 @@ fn literal_expr(lit: &Literal) -> String {
 /// Does NOT apply reference modification. Used for write targets in MOVE
 /// and for subscript sub-expressions.
 fn data_ref_base_expr(dr: &DataReference) -> String {
-    let field_name = cobol_to_rust_name(&dr.name, "");
+    // If qualified (e.g., WS-NAME OF WS-DST-REC), use qualifier as prefix
+    // to match the disambiguated field name from data_gen
+    let field_name = if !dr.qualifiers.is_empty() {
+        cobol_to_rust_name(&dr.name, &dr.qualifiers[0])
+    } else {
+        cobol_to_rust_name(&dr.name, "")
+    };
     let mut expr = format!("ws.{field_name}");
 
     // Add subscripts
@@ -2330,7 +2409,7 @@ fn generate_release(w: &mut RustWriter, rel: &ReleaseStatement) {
     }
 }
 
-fn generate_return(w: &mut RustWriter, ret: &ReturnStatement, cmap: &ConditionMap, ptable: &[ParagraphIndex], rfm: &RecordFileMap, sfm: &SortFieldMap) {
+fn generate_return(w: &mut RustWriter, ret: &ReturnStatement, cmap: &ConditionMap, ptable: &[ParagraphIndex], rfm: &RecordFileMap, sfm: &SortFieldMap, gcm: &GroupChildMap) {
     let fname = cobol_to_rust_name(&ret.file_name, "");
 
     if !ret.at_end.is_empty() || !ret.not_at_end.is_empty() {
@@ -2344,13 +2423,13 @@ fn generate_return(w: &mut RustWriter, ret: &ReturnStatement, cmap: &ConditionMa
             ));
         }
         for stmt in &ret.not_at_end {
-            generate_statement(w, stmt, cmap, ptable, rfm, sfm);
+            generate_statement(w, stmt, cmap, ptable, rfm, sfm, gcm);
         }
         w.close_block("}");
 
         w.open_block("None => {");
         for stmt in &ret.at_end {
-            generate_statement(w, stmt, cmap, ptable, rfm, sfm);
+            generate_statement(w, stmt, cmap, ptable, rfm, sfm, gcm);
         }
         w.close_block("}");
 
@@ -2480,7 +2559,7 @@ fn operand_to_bytes_expr(op: &Operand) -> String {
     }
 }
 
-fn generate_string(w: &mut RustWriter, s: &StringStatement, cmap: &ConditionMap, ptable: &[ParagraphIndex], rfm: &RecordFileMap, sfm: &SortFieldMap) {
+fn generate_string(w: &mut RustWriter, s: &StringStatement, cmap: &ConditionMap, ptable: &[ParagraphIndex], rfm: &RecordFileMap, sfm: &SortFieldMap, gcm: &GroupChildMap) {
     let into = data_ref_expr(&s.into);
 
     w.open_block("{");
@@ -2538,12 +2617,12 @@ fn generate_string(w: &mut RustWriter, s: &StringStatement, cmap: &ConditionMap,
     if !s.on_overflow.is_empty() || !s.not_on_overflow.is_empty() {
         w.open_block("if string_result == StringResult::Overflow {");
         for stmt in &s.on_overflow {
-            generate_statement(w, stmt, cmap, ptable, rfm, sfm);
+            generate_statement(w, stmt, cmap, ptable, rfm, sfm, gcm);
         }
         w.dedent();
         w.open_block("} else {");
         for stmt in &s.not_on_overflow {
-            generate_statement(w, stmt, cmap, ptable, rfm, sfm);
+            generate_statement(w, stmt, cmap, ptable, rfm, sfm, gcm);
         }
         w.close_block("}");
     }
@@ -2551,7 +2630,7 @@ fn generate_string(w: &mut RustWriter, s: &StringStatement, cmap: &ConditionMap,
     w.close_block("}");
 }
 
-fn generate_unstring(w: &mut RustWriter, u: &UnstringStatement, cmap: &ConditionMap, ptable: &[ParagraphIndex], rfm: &RecordFileMap, sfm: &SortFieldMap) {
+fn generate_unstring(w: &mut RustWriter, u: &UnstringStatement, cmap: &ConditionMap, ptable: &[ParagraphIndex], rfm: &RecordFileMap, sfm: &SortFieldMap, gcm: &GroupChildMap) {
     let source = data_ref_expr(&u.source);
 
     w.open_block("{");
@@ -2639,12 +2718,12 @@ fn generate_unstring(w: &mut RustWriter, u: &UnstringStatement, cmap: &Condition
     if !u.on_overflow.is_empty() || !u.not_on_overflow.is_empty() {
         w.open_block("if unstring_result == UnstringResult::Overflow {");
         for stmt in &u.on_overflow {
-            generate_statement(w, stmt, cmap, ptable, rfm, sfm);
+            generate_statement(w, stmt, cmap, ptable, rfm, sfm, gcm);
         }
         w.dedent();
         w.open_block("} else {");
         for stmt in &u.not_on_overflow {
-            generate_statement(w, stmt, cmap, ptable, rfm, sfm);
+            generate_statement(w, stmt, cmap, ptable, rfm, sfm, gcm);
         }
         w.close_block("}");
     }
@@ -2732,7 +2811,7 @@ mod tests {
                 ref_mod: None,
             }],
         };
-        generate_move(&mut w, &stmt);
+        generate_move(&mut w, &stmt, &HashMap::new());
         let output = w.finish();
         assert!(output.contains("cobol_move(&ws.ws_a, &mut ws.ws_b, &ctx.config);"));
     }
@@ -2808,7 +2887,7 @@ mod tests {
             invalid_key: Vec::new(),
             not_invalid_key: Vec::new(),
         };
-        generate_read(&mut w, &stmt, &empty_cmap(), &[], &HashMap::new(), &HashMap::new());
+        generate_read(&mut w, &stmt, &empty_cmap(), &[], &HashMap::new(), &HashMap::new(), &HashMap::new());
         let output = w.finish();
         assert!(output.contains("ws.input_file.read_next()"));
         assert!(output.contains("ws.ws_record"));
@@ -2832,7 +2911,7 @@ mod tests {
             invalid_key: Vec::new(),
             not_invalid_key: Vec::new(),
         };
-        generate_read(&mut w, &stmt, &empty_cmap(), &[], &HashMap::new(), &HashMap::new());
+        generate_read(&mut w, &stmt, &empty_cmap(), &[], &HashMap::new(), &HashMap::new(), &HashMap::new());
         let output = w.finish();
         assert!(output.contains("ws.input_file.read_next()"), "missing read_next: {output}");
         assert!(output.contains("_status.is_success()"), "missing is_success: {output}");
@@ -2851,7 +2930,7 @@ mod tests {
             at_eop: Vec::new(),
             not_at_eop: Vec::new(),
         };
-        generate_write(&mut w, &stmt, &empty_cmap(), &[], &HashMap::new(), &HashMap::new());
+        generate_write(&mut w, &stmt, &empty_cmap(), &[], &HashMap::new(), &HashMap::new(), &HashMap::new());
         let output = w.finish();
         // No RecordFileMap entry -> fallback to {rec}_file pattern
         assert!(output.contains("ws.out_record_file.write_record(ws.out_record.as_bytes())"));
@@ -2869,7 +2948,7 @@ mod tests {
             at_eop: Vec::new(),
             not_at_eop: Vec::new(),
         };
-        generate_write(&mut w, &stmt, &empty_cmap(), &[], &HashMap::new(), &HashMap::new());
+        generate_write(&mut w, &stmt, &empty_cmap(), &[], &HashMap::new(), &HashMap::new(), &HashMap::new());
         let output = w.finish();
         assert!(output.contains("write_record"));
         assert!(output.contains("\\x0C"));
@@ -2884,7 +2963,7 @@ mod tests {
             invalid_key: Vec::new(),
             not_invalid_key: Vec::new(),
         };
-        generate_rewrite(&mut w, &stmt, &empty_cmap(), &[], &HashMap::new(), &HashMap::new());
+        generate_rewrite(&mut w, &stmt, &empty_cmap(), &[], &HashMap::new(), &HashMap::new(), &HashMap::new());
         let output = w.finish();
         // No RecordFileMap entry -> fallback to {rec}_file pattern
         assert!(output.contains("ws.master_rec_file.rewrite_record(ws.master_rec.as_bytes())"));
@@ -2898,7 +2977,7 @@ mod tests {
             invalid_key: Vec::new(),
             not_invalid_key: Vec::new(),
         };
-        generate_delete(&mut w, &stmt, &empty_cmap(), &[], &HashMap::new(), &HashMap::new());
+        generate_delete(&mut w, &stmt, &empty_cmap(), &[], &HashMap::new(), &HashMap::new(), &HashMap::new());
         let output = w.finish();
         assert!(output.contains("ws.indexed_file.delete_record()"));
     }
@@ -2917,7 +2996,7 @@ mod tests {
             })],
             not_invalid_key: Vec::new(),
         };
-        generate_delete(&mut w, &stmt, &empty_cmap(), &[], &HashMap::new(), &HashMap::new());
+        generate_delete(&mut w, &stmt, &empty_cmap(), &[], &HashMap::new(), &HashMap::new(), &HashMap::new());
         let output = w.finish();
         assert!(output.contains("ws.indexed_file.delete_record()"), "missing delete_record: {output}");
         assert!(output.contains("_status.is_success()"), "missing is_success: {output}");
@@ -3046,7 +3125,7 @@ mod tests {
             })],
             not_at_end: Vec::new(),
         };
-        generate_return(&mut w, &stmt, &empty_cmap(), &[], &HashMap::new(), &HashMap::new());
+        generate_return(&mut w, &stmt, &empty_cmap(), &[], &HashMap::new(), &HashMap::new(), &HashMap::new());
         let output = w.finish();
         assert!(output.contains("match returner.return_record()"));
         assert!(output.contains("Some(record_data)"));
@@ -3135,7 +3214,7 @@ mod tests {
             on_overflow: Vec::new(),
             not_on_overflow: Vec::new(),
         };
-        generate_string(&mut w, &stmt, &empty_cmap(), &[], &HashMap::new(), &HashMap::new());
+        generate_string(&mut w, &stmt, &empty_cmap(), &[], &HashMap::new(), &HashMap::new(), &HashMap::new());
         let output = w.finish();
         assert!(output.contains("StringSourceSpec::by_size"));
         assert!(output.contains("StringSourceSpec::by_literal"));
@@ -3169,7 +3248,7 @@ mod tests {
             on_overflow: Vec::new(),
             not_on_overflow: Vec::new(),
         };
-        generate_unstring(&mut w, &stmt, &empty_cmap(), &[], &HashMap::new(), &HashMap::new());
+        generate_unstring(&mut w, &stmt, &empty_cmap(), &[], &HashMap::new(), &HashMap::new(), &HashMap::new());
         let output = w.finish();
         assert!(output.contains("UnstringDelimSpec::new"));
         assert!(output.contains("cobol_unstring_simple"));
@@ -3277,7 +3356,7 @@ mod tests {
                 }),
             }],
         };
-        generate_move(&mut w, &stmt);
+        generate_move(&mut w, &stmt, &HashMap::new());
         let output = w.finish();
         assert!(output.contains("ref_mod_write"));
         assert!(output.contains("b\"AB\""));
@@ -3311,7 +3390,7 @@ mod tests {
                 ref_mod: None,
             }],
         };
-        generate_move(&mut w, &stmt);
+        generate_move(&mut w, &stmt, &HashMap::new());
         let output = w.finish();
         assert!(output.contains("cobol_move"));
         assert!(output.contains("ref_mod_read"));
@@ -3336,7 +3415,7 @@ mod tests {
                 }),
             }],
         };
-        generate_move(&mut w, &stmt);
+        generate_move(&mut w, &stmt, &HashMap::new());
         let output = w.finish();
         assert!(output.contains("ref_mod_write_to_end"));
         assert!(output.contains("b\"XYZ\""));
@@ -3375,7 +3454,7 @@ mod tests {
                 }),
             }],
         };
-        generate_move(&mut w, &stmt);
+        generate_move(&mut w, &stmt, &HashMap::new());
         let output = w.finish();
         // Source ref_mod_read is the bytes for ref_mod_write
         assert!(output.contains("ref_mod_read(&ws.ws_src, 1usize, 3usize)"));
@@ -3802,7 +3881,7 @@ mod tests {
             on_exception: Vec::new(),
             not_on_exception: Vec::new(),
         };
-        generate_call(&mut w, &call, &empty_cmap(), &[], &HashMap::new(), &HashMap::new());
+        generate_call(&mut w, &call, &empty_cmap(), &[], &HashMap::new(), &HashMap::new(), &HashMap::new());
         let output = w.finish();
         assert!(
             output.contains("cobol_call(&mut ctx.dispatcher, \"SUBPROG\""),
@@ -3834,7 +3913,7 @@ mod tests {
             on_exception: Vec::new(),
             not_on_exception: Vec::new(),
         };
-        generate_call(&mut w, &call, &empty_cmap(), &[], &HashMap::new(), &HashMap::new());
+        generate_call(&mut w, &call, &empty_cmap(), &[], &HashMap::new(), &HashMap::new(), &HashMap::new());
         let output = w.finish();
         assert!(
             output.contains("call_param_by_ref"),
@@ -3872,7 +3951,7 @@ mod tests {
                 no_advancing: false,
             })],
         };
-        generate_call(&mut w, &call, &empty_cmap(), &[], &HashMap::new(), &HashMap::new());
+        generate_call(&mut w, &call, &empty_cmap(), &[], &HashMap::new(), &HashMap::new(), &HashMap::new());
         let output = w.finish();
         assert!(
             output.contains("match cobol_call("),
@@ -3905,7 +3984,7 @@ mod tests {
             on_exception: Vec::new(),
             not_on_exception: Vec::new(),
         };
-        generate_call(&mut w, &call, &empty_cmap(), &[], &HashMap::new(), &HashMap::new());
+        generate_call(&mut w, &call, &empty_cmap(), &[], &HashMap::new(), &HashMap::new(), &HashMap::new());
         let output = w.finish();
         assert!(
             output.contains("cobol_call("),
@@ -3939,7 +4018,7 @@ mod tests {
             on_exception: Vec::new(),
             not_on_exception: Vec::new(),
         };
-        generate_call(&mut w, &call, &empty_cmap(), &[], &HashMap::new(), &HashMap::new());
+        generate_call(&mut w, &call, &empty_cmap(), &[], &HashMap::new(), &HashMap::new(), &HashMap::new());
         let output = w.finish();
         assert!(
             output.contains(".clone()"),
@@ -3996,7 +4075,7 @@ mod tests {
             using_params: vec![],
             returning: None,
         };
-        generate_procedure_division(&mut w, &proc_div, &empty_cmap(), &HashMap::new(), &HashMap::new());
+        generate_procedure_division(&mut w, &proc_div, &empty_cmap(), &HashMap::new(), &HashMap::new(), &[], &[]);
         let output = w.finish();
         assert!(output.contains("let mut _pc: usize = 0;"), "missing _pc decl: {output}");
         assert!(output.contains("0 => main_para(ws, ctx),"), "missing index 0 dispatch: {output}");
@@ -4017,7 +4096,7 @@ mod tests {
             using_params: vec![],
             returning: None,
         };
-        generate_procedure_division(&mut w, &proc_div, &empty_cmap(), &HashMap::new(), &HashMap::new());
+        generate_procedure_division(&mut w, &proc_div, &empty_cmap(), &HashMap::new(), &HashMap::new(), &[], &[]);
         let output = w.finish();
         assert!(output.contains("ctx.goto_target.take()"), "missing goto_target.take(): {output}");
         assert!(output.contains("\"A-PARA\" => 0,"), "missing A-PARA goto lookup: {output}");
@@ -4043,7 +4122,7 @@ mod tests {
     #[test]
     fn stop_run_returns() {
         let mut w = RustWriter::new();
-        generate_statement(&mut w, &Statement::StopRun, &empty_cmap(), &[], &HashMap::new(), &HashMap::new());
+        generate_statement(&mut w, &Statement::StopRun, &empty_cmap(), &[], &HashMap::new(), &HashMap::new(), &HashMap::new());
         let output = w.finish();
         assert!(output.contains("ctx.stop_run();"), "missing ctx.stop_run(): {output}");
         assert!(output.contains("return;"), "missing return after stop_run: {output}");
@@ -4052,7 +4131,7 @@ mod tests {
     #[test]
     fn exit_program_sets_flag() {
         let mut w = RustWriter::new();
-        generate_statement(&mut w, &Statement::ExitProgram, &empty_cmap(), &[], &HashMap::new(), &HashMap::new());
+        generate_statement(&mut w, &Statement::ExitProgram, &empty_cmap(), &[], &HashMap::new(), &HashMap::new(), &HashMap::new());
         let output = w.finish();
         assert!(output.contains("ctx.exit_program = true;"), "missing exit_program flag: {output}");
         assert!(output.contains("return;"), "missing return after exit_program: {output}");
@@ -4068,7 +4147,7 @@ mod tests {
             loop_type: PerformLoopType::Once,
             body: vec![],
         };
-        generate_perform(&mut w, &perf, &empty_cmap(), &ptable, &HashMap::new(), &HashMap::new());
+        generate_perform(&mut w, &perf, &empty_cmap(), &ptable, &HashMap::new(), &HashMap::new(), &HashMap::new());
         let output = w.finish();
         assert!(output.contains("let mut _perf_pc: usize = 0;"), "missing _perf_pc: {output}");
         assert!(output.contains("while _perf_pc <= 2"), "missing while loop: {output}");
@@ -4132,7 +4211,7 @@ mod tests {
             invalid_key: vec![],
             not_invalid_key: vec![],
         };
-        generate_start(&mut w, &start, &empty_cmap(), &[], &HashMap::new(), &HashMap::new());
+        generate_start(&mut w, &start, &empty_cmap(), &[], &HashMap::new(), &HashMap::new(), &HashMap::new());
         let output = w.finish();
         assert!(
             output.contains("ws.input_file.start(&[], std::cmp::Ordering::Equal)"),
@@ -4152,7 +4231,7 @@ mod tests {
             invalid_key: vec![],
             not_invalid_key: vec![],
         };
-        generate_start(&mut w, &start, &empty_cmap(), &[], &HashMap::new(), &HashMap::new());
+        generate_start(&mut w, &start, &empty_cmap(), &[], &HashMap::new(), &HashMap::new(), &HashMap::new());
         let output = w.finish();
         assert!(
             output.contains("ws.master_file.start(ws.ws_key.as_bytes(), std::cmp::Ordering::Equal)"),
@@ -4172,7 +4251,7 @@ mod tests {
             invalid_key: vec![],
             not_invalid_key: vec![],
         };
-        generate_start(&mut w, &start, &empty_cmap(), &[], &HashMap::new(), &HashMap::new());
+        generate_start(&mut w, &start, &empty_cmap(), &[], &HashMap::new(), &HashMap::new(), &HashMap::new());
         let output = w.finish();
         assert!(
             output.contains("std::cmp::Ordering::Greater"),
@@ -4196,7 +4275,7 @@ mod tests {
             })],
             not_invalid_key: vec![],
         };
-        generate_start(&mut w, &start, &empty_cmap(), &[], &HashMap::new(), &HashMap::new());
+        generate_start(&mut w, &start, &empty_cmap(), &[], &HashMap::new(), &HashMap::new(), &HashMap::new());
         let output = w.finish();
         assert!(output.contains("ws.master_file.start("), "missing start call: {output}");
         assert!(output.contains("_status.is_success()"), "missing is_success: {output}");
