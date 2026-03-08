@@ -8,10 +8,11 @@ use std::path::PathBuf;
 use crate::codegen::data_gen::{generate_linkage_section, generate_working_storage};
 use crate::codegen::proc_gen::{build_condition_map, generate_procedure_division};
 use crate::codegen::rust_writer::RustWriter;
+use crate::diagnostics::{TranspileResult, TranspileStats};
 use crate::error::Result;
 use crate::parser::copy_expand::CopyExpander;
 use crate::parser::copybook::FileSystemResolver;
-use crate::parser::parse_cobol;
+use crate::parser::{parse_cobol, parse_cobol_with_diagnostics};
 
 /// Transpile COBOL source code to Rust source code.
 ///
@@ -24,6 +25,88 @@ use crate::parser::parse_cobol;
 pub fn transpile(source: &str) -> Result<String> {
     let program = parse_cobol(source)?;
     generate_rust(&program)
+}
+
+/// Transpile COBOL source code to Rust, returning diagnostics and coverage stats.
+///
+/// Like `transpile()`, but returns a `TranspileResult` with diagnostics
+/// for unhandled statements, parse issues, and coverage statistics.
+pub fn transpile_with_diagnostics(source: &str) -> Result<TranspileResult> {
+    let (program, diagnostics) = parse_cobol_with_diagnostics(source)?;
+    let code = generate_rust(&program)?;
+
+    // Count total statements vs mapped (those without diagnostics)
+    let total_statements = count_statements(&program);
+    let unhandled_count = diagnostics
+        .iter()
+        .filter(|d| d.category == crate::diagnostics::DiagCategory::UnhandledStatement)
+        .count();
+
+    let stats = TranspileStats {
+        total_statements,
+        mapped_statements: total_statements.saturating_sub(unhandled_count),
+        total_data_entries: program
+            .data_division
+            .as_ref()
+            .map_or(0, |dd| count_data_entries(&dd.working_storage)),
+        ..Default::default()
+    };
+
+    Ok(TranspileResult::success(code, diagnostics, stats))
+}
+
+/// Count total statement contexts in the procedure division.
+fn count_statements(program: &crate::ast::CobolProgram) -> usize {
+    let Some(ref pd) = program.procedure_division else {
+        return 0;
+    };
+    let mut count = 0;
+    for section in &pd.sections {
+        for para in &section.paragraphs {
+            for sentence in &para.sentences {
+                count += count_stmts_recursive(&sentence.statements);
+            }
+        }
+    }
+    for para in &pd.paragraphs {
+        for sentence in &para.sentences {
+            count += count_stmts_recursive(&sentence.statements);
+        }
+    }
+    count
+}
+
+/// Count statements recursively (including nested IF/EVALUATE/PERFORM bodies).
+fn count_stmts_recursive(stmts: &[crate::ast::Statement]) -> usize {
+    let mut count = 0;
+    for stmt in stmts {
+        count += 1;
+        match stmt {
+            crate::ast::Statement::If(if_stmt) => {
+                count += count_stmts_recursive(&if_stmt.then_body);
+                count += count_stmts_recursive(&if_stmt.else_body);
+            }
+            crate::ast::Statement::Evaluate(eval) => {
+                for branch in &eval.when_branches {
+                    count += count_stmts_recursive(&branch.body);
+                }
+                count += count_stmts_recursive(&eval.when_other);
+            }
+            crate::ast::Statement::Perform(perf) => {
+                count += count_stmts_recursive(&perf.body);
+            }
+            _ => {}
+        }
+    }
+    count
+}
+
+/// Count data entries recursively.
+fn count_data_entries(entries: &[crate::ast::DataEntry]) -> usize {
+    entries
+        .iter()
+        .map(|e| 1 + count_data_entries(&e.children))
+        .sum()
 }
 
 /// Configuration for COPY statement expansion and transpilation.
@@ -459,5 +542,49 @@ mod tests {
         );
         let rust_code = transpile(source).expect("transpile failed");
         assert!(rust_code.contains("std::process::exit(ctx.return_code)"), "main should call process::exit: {rust_code}");
+    }
+
+    #[test]
+    fn transpile_with_diagnostics_basic() {
+        let source = concat!(
+            "IDENTIFICATION DIVISION.\n",
+            "PROGRAM-ID. DIAGTEST.\n",
+            "DATA DIVISION.\n",
+            "WORKING-STORAGE SECTION.\n",
+            "01  WS-A PIC 9(5) VALUE 10.\n",
+            "PROCEDURE DIVISION.\n",
+            "MAIN-PARA.\n",
+            "    DISPLAY WS-A.\n",
+            "    STOP RUN.\n",
+        );
+        let result = transpile_with_diagnostics(source).expect("transpile failed");
+        assert!(result.rust_code.is_some());
+        assert!(!result.has_errors());
+        assert!(result.diagnostics.is_empty(), "expected no diagnostics: {:?}", result.diagnostics);
+        assert_eq!(result.stats.total_statements, 2);
+        assert_eq!(result.stats.mapped_statements, 2);
+        assert!((result.statement_coverage() - 100.0).abs() < 0.01);
+        assert!(result.stats.total_data_entries > 0);
+    }
+
+    #[test]
+    fn transpile_with_diagnostics_coverage() {
+        let source = concat!(
+            "IDENTIFICATION DIVISION.\n",
+            "PROGRAM-ID. COVTEST.\n",
+            "DATA DIVISION.\n",
+            "WORKING-STORAGE SECTION.\n",
+            "01  WS-A PIC 9(5).\n",
+            "PROCEDURE DIVISION.\n",
+            "MAIN-PARA.\n",
+            "    MOVE 1 TO WS-A.\n",
+            "    ADD 1 TO WS-A.\n",
+            "    DISPLAY WS-A.\n",
+            "    STOP RUN.\n",
+        );
+        let result = transpile_with_diagnostics(source).expect("transpile failed");
+        assert_eq!(result.stats.total_statements, 4);
+        assert_eq!(result.stats.mapped_statements, 4);
+        assert!((result.statement_coverage() - 100.0).abs() < 0.01);
     }
 }

@@ -9,8 +9,10 @@ use miette::{Context, IntoDiagnostic, Result};
 use serde::Serialize;
 
 use cobol_transpiler::ast::{CobolProgram, ProcedureDivision, Statement};
+use cobol_transpiler::diagnostics::Severity;
 use cobol_transpiler::parser::preprocess::{detect_source_format, SourceFormat};
 use cobol_transpiler::parser::{extract_copy_targets, parse_cobol};
+use cobol_transpiler::transpile::transpile_with_diagnostics;
 
 use crate::Cli;
 
@@ -27,6 +29,13 @@ pub struct CheckArgs {
     /// Treat warnings as errors.
     #[arg(long)]
     pub strict: bool,
+
+    /// Run transpilation coverage analysis.
+    ///
+    /// Reports which COBOL statements can be transpiled and which are
+    /// unhandled, with source line numbers and coverage percentage.
+    #[arg(long)]
+    pub coverage: bool,
 }
 
 /// Output format for check results.
@@ -46,6 +55,18 @@ struct FileResult {
     errors: Vec<Diagnostic>,
     warnings: Vec<Diagnostic>,
     info: ProgramInfo,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    coverage: Option<CoverageInfo>,
+}
+
+/// Coverage statistics from transpilation analysis.
+#[derive(Debug, Serialize)]
+struct CoverageInfo {
+    total_statements: usize,
+    mapped_statements: usize,
+    coverage_pct: f64,
+    total_data_entries: usize,
+    unhandled: Vec<Diagnostic>,
 }
 
 /// A diagnostic message.
@@ -91,7 +112,7 @@ pub fn run(cli: &Cli, args: &CheckArgs) -> Result<ExitCode> {
     let mut total_warnings = 0usize;
 
     for input in &args.inputs {
-        let result = check_file(cli, input)?;
+        let result = check_file(cli, input, args.coverage)?;
         total_errors += result.errors.len();
         total_warnings += result.warnings.len();
         results.push(result);
@@ -139,7 +160,7 @@ pub fn run(cli: &Cli, args: &CheckArgs) -> Result<ExitCode> {
 }
 
 /// Check a single COBOL file.
-fn check_file(cli: &Cli, path: &PathBuf) -> Result<FileResult> {
+fn check_file(cli: &Cli, path: &PathBuf, with_coverage: bool) -> Result<FileResult> {
     let source = fs::read_to_string(path)
         .into_diagnostic()
         .wrap_err_with(|| format!("failed to read {}", path.display()))?;
@@ -161,6 +182,7 @@ fn check_file(cli: &Cli, path: &PathBuf) -> Result<FileResult> {
         is_subprogram: false,
     };
     let program_id;
+    let mut coverage = None;
 
     match parse_cobol(&source) {
         Ok(program) => {
@@ -182,6 +204,11 @@ fn check_file(cli: &Cli, path: &PathBuf) -> Result<FileResult> {
         }
     }
 
+    // Run coverage analysis if requested.
+    if with_coverage && errors.is_empty() {
+        coverage = Some(run_coverage(&source));
+    }
+
     if cli.verbose > 0 {
         // Extract COPY targets for verbose output.
         let copies = extract_copy_targets(&source);
@@ -198,7 +225,54 @@ fn check_file(cli: &Cli, path: &PathBuf) -> Result<FileResult> {
         errors,
         warnings,
         info,
+        coverage,
     })
+}
+
+/// Run transpilation and collect coverage diagnostics.
+fn run_coverage(source: &str) -> CoverageInfo {
+    match transpile_with_diagnostics(source) {
+        Ok(result) => {
+            let unhandled: Vec<Diagnostic> = result
+                .diagnostics
+                .iter()
+                .map(|d| Diagnostic {
+                    line: if d.line > 0 { Some(d.line) } else { None },
+                    message: format!("{}: {}", d.category, d.message),
+                    code: format!(
+                        "{}",
+                        match d.severity {
+                            Severity::Error => "C-ERR",
+                            Severity::Warning => "C-WARN",
+                            Severity::Info => "C-INFO",
+                        }
+                    ),
+                })
+                .collect();
+
+            CoverageInfo {
+                total_statements: result.stats.total_statements,
+                mapped_statements: result.stats.mapped_statements,
+                coverage_pct: result.statement_coverage(),
+                total_data_entries: result.stats.total_data_entries,
+                unhandled,
+            }
+        }
+        Err(e) => {
+            // Transpilation itself failed -- report 0% coverage
+            CoverageInfo {
+                total_statements: 0,
+                mapped_statements: 0,
+                coverage_pct: 0.0,
+                total_data_entries: 0,
+                unhandled: vec![Diagnostic {
+                    line: None,
+                    message: format!("Transpilation failed: {e}"),
+                    code: String::from("C-FATAL"),
+                }],
+            }
+        }
+    }
 }
 
 /// Collect statistics from a parsed program.
@@ -386,4 +460,24 @@ fn print_text_result(r: &FileResult) {
         "  [INFO] {} paragraph(s), {} CALL statement(s), {} file operation(s)",
         r.info.paragraphs, r.info.calls, r.info.file_ops,
     );
+
+    // Coverage report
+    if let Some(ref cov) = r.coverage {
+        eprintln!();
+        eprintln!(
+            "  Coverage: {:.1}% ({}/{} statements mapped)",
+            cov.coverage_pct, cov.mapped_statements, cov.total_statements,
+        );
+        eprintln!("  Data entries: {}", cov.total_data_entries);
+        if !cov.unhandled.is_empty() {
+            eprintln!("  Unhandled constructs:");
+            for d in &cov.unhandled {
+                if let Some(line) = d.line {
+                    eprintln!("    Line {line}: {}", d.message);
+                } else {
+                    eprintln!("    {}", d.message);
+                }
+            }
+        }
+    }
 }

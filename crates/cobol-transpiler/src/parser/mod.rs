@@ -18,6 +18,7 @@ pub mod preprocess;
 pub(crate) mod proc_listener;
 
 use crate::ast::{CobolProgram, DataDivision, DataEntry, FileDescription, ProcedureDivision};
+use crate::diagnostics::TranspileDiagnostic;
 use crate::error::{Result, TranspileError};
 use crate::generated::cobol85lexer::Cobol85Lexer;
 use crate::generated::cobol85listener::Cobol85Listener;
@@ -111,6 +112,70 @@ pub fn parse_cobol_from_source(source: &str) -> Result<CobolProgram> {
     })
 }
 
+/// Parse COBOL source into a typed AST, also returning diagnostics.
+///
+/// Like `parse_cobol()`, but additionally returns diagnostics for
+/// unhandled statements, parse errors, and coverage gaps.
+pub fn parse_cobol_with_diagnostics(source: &str) -> Result<(CobolProgram, Vec<TranspileDiagnostic>)> {
+    let preprocessed = preprocess(source)?;
+    let input = wrap_if_copybook(&preprocessed);
+
+    let working_storage = parse_data_division(&input)?;
+    let file_section = parse_file_section(&input)?;
+
+    let (procedure_division, diagnostics) = parse_procedure_division_with_diagnostics(&input)?;
+
+    let program_id = extract_program_id(&input);
+
+    let program = CobolProgram {
+        program_id,
+        data_division: Some(DataDivision {
+            working_storage,
+            local_storage: Vec::new(),
+            linkage: Vec::new(),
+            file_section,
+        }),
+        procedure_division,
+        source_path: None,
+    };
+
+    Ok((program, diagnostics))
+}
+
+/// Parse PROCEDURE DIVISION, returning both the AST and diagnostics.
+fn parse_procedure_division_with_diagnostics(
+    source: &str,
+) -> Result<(Option<ProcedureDivision>, Vec<TranspileDiagnostic>)> {
+    let upper = source.to_uppercase();
+    if !upper.contains("PROCEDURE DIVISION") {
+        return Ok((None, Vec::new()));
+    }
+
+    let listener = run_proc_listener(source)?;
+    let diagnostics = listener.diagnostics;
+
+    if listener.sections.is_empty() && listener.paragraphs.is_empty() {
+        eprintln!(
+            "WARNING: PROCEDURE DIVISION text found in source but parser extracted \
+             0 paragraphs and 0 sections. This may indicate a parse error in the \
+             DATA DIVISION or IDENTIFICATION DIVISION that caused ANTLR to \
+             misinterpret the program structure. Check for unsupported syntax \
+             (AUTHOR, DATE-WRITTEN, etc.) or non-ASCII characters."
+        );
+        return Ok((None, diagnostics));
+    }
+
+    Ok((
+        Some(ProcedureDivision {
+            using_params: Vec::new(),
+            returning: None,
+            sections: listener.sections,
+            paragraphs: listener.paragraphs,
+        }),
+        diagnostics,
+    ))
+}
+
 /// Parse COBOL source and extract DATA DIVISION into a hierarchical tree.
 ///
 /// Runs the ANTLR4 parser with `DataDivisionListener`, then builds
@@ -177,9 +242,12 @@ fn run_proc_listener(source: &str) -> Result<ProcedureDivisionListener> {
     })?;
 
     let listener = Box::new(ProcedureDivisionListener::new());
-    let listener = Cobol85TreeWalker::walk(listener, &*tree);
+    let mut listener = *Cobol85TreeWalker::walk(listener, &*tree);
 
-    Ok(*listener)
+    // Drain diagnostics collected via thread-local during statement extraction
+    listener.diagnostics = proc_listener::drain_diagnostics();
+
+    Ok(listener)
 }
 
 /// Run ANTLR4 parse and walk with `DataDivisionListener`.

@@ -5,6 +5,7 @@
 
 pub mod ast;
 pub mod codegen;
+pub mod diagnostics;
 pub mod error;
 mod generated;
 pub mod parser;

@@ -7,12 +7,31 @@
 
 #![allow(clippy::wildcard_imports)] // Generated ANTLR4 code has enormous trait lists
 
+use std::cell::RefCell;
+
+use antlr_rust::parser_rule_context::ParserRuleContext;
+use antlr_rust::token::Token;
 use antlr_rust::tree::{ParseTree, ParseTreeListener};
 
 use crate::ast::*;
+use crate::diagnostics::{DiagCategory, Severity, TranspileDiagnostic};
 use crate::generated::cobol85listener::Cobol85Listener;
 #[allow(clippy::wildcard_imports)]
 use crate::generated::cobol85parser::*;
+
+// Thread-local diagnostic collector used during statement extraction.
+// The listener seeds it before walking and drains it after.
+thread_local! {
+    static DIAG_COLLECTOR: RefCell<Vec<TranspileDiagnostic>> = RefCell::new(Vec::new());
+}
+
+fn push_diagnostic(diag: TranspileDiagnostic) {
+    DIAG_COLLECTOR.with(|c| c.borrow_mut().push(diag));
+}
+
+pub(crate) fn drain_diagnostics() -> Vec<TranspileDiagnostic> {
+    DIAG_COLLECTOR.with(|c| std::mem::take(&mut *c.borrow_mut()))
+}
 
 /// Listener that fires on PROCEDURE DIVISION entries and collects structure.
 ///
@@ -24,6 +43,8 @@ pub(crate) struct ProcedureDivisionListener {
     pub sections: Vec<Section>,
     /// Paragraphs not inside any section.
     pub paragraphs: Vec<Paragraph>,
+    /// Diagnostics collected during statement extraction.
+    pub diagnostics: Vec<TranspileDiagnostic>,
     /// Whether we're inside the procedure division.
     in_proc_div: bool,
     /// Current section name (if inside a section).
@@ -127,6 +148,8 @@ impl<'input> Cobol85Listener<'input> for ProcedureDivisionListener {
 // ---------------------------------------------------------------------------
 
 /// Extract a Statement from a `StatementContext` by checking which child rule matched.
+///
+/// Unrecognized statements are recorded as diagnostics via the thread-local collector.
 fn extract_statement(ctx: &StatementContext<'_>) -> Option<Statement> {
     if let Some(c) = ctx.moveStatement() {
         return Some(extract_move(&c));
@@ -239,7 +262,29 @@ fn extract_statement(ctx: &StatementContext<'_>) -> Option<Statement> {
     if let Some(c) = ctx.unstringStatement() {
         return Some(extract_unstring(&c));
     }
-    // Unsupported statement -- skip
+    // Unsupported statement -- record diagnostic with source line info
+    let text = ctx.get_text();
+    let line = {
+        let tok = ctx.start();
+        (*tok).get_line() as usize
+    };
+    let verb = text
+        .split_whitespace()
+        .next()
+        .unwrap_or("UNKNOWN")
+        .to_uppercase();
+    let truncated = if text.len() > 80 {
+        format!("{}...", &text[..77])
+    } else {
+        text.clone()
+    };
+    push_diagnostic(TranspileDiagnostic {
+        line,
+        severity: Severity::Warning,
+        category: DiagCategory::UnhandledStatement,
+        message: format!("Unhandled COBOL statement: {verb}"),
+        cobol_text: truncated,
+    });
     None
 }
 
