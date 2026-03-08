@@ -380,6 +380,7 @@ mod tests {
             byte_length,
             renames_target: None,
             renames_thru: None,
+            index_names: Vec::new(),
         }
     }
 

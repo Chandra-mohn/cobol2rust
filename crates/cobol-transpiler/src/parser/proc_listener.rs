@@ -869,9 +869,38 @@ fn extract_initialize(ctx: &InitializeStatementContext<'_>) -> Statement {
         .map(|id| extract_data_ref_from_identifier(id))
         .collect();
 
+    let mut replacing = Vec::new();
+    if let Some(repl_phrase) = ctx.initializeReplacingPhrase() {
+        for repl_by in repl_phrase.initializeReplacingBy_all() {
+            let category = if repl_by.NUMERIC().is_some() {
+                InitializeCategory::Numeric
+            } else if repl_by.ALPHANUMERIC().is_some() {
+                InitializeCategory::Alphanumeric
+            } else if repl_by.ALPHABETIC().is_some() {
+                InitializeCategory::Alphabetic
+            } else if repl_by.ALPHANUMERIC_EDITED().is_some() {
+                InitializeCategory::AlphanumericEdited
+            } else if repl_by.NUMERIC_EDITED().is_some() {
+                InitializeCategory::NumericEdited
+            } else if repl_by.NATIONAL().is_some() {
+                InitializeCategory::National
+            } else {
+                continue;
+            };
+            let value = if let Some(id) = repl_by.identifier() {
+                Operand::DataRef(extract_data_ref_from_identifier(&id))
+            } else if let Some(lit) = repl_by.literal() {
+                extract_literal_operand(&lit)
+            } else {
+                continue;
+            };
+            replacing.push(InitializeReplacing { category, value });
+        }
+    }
+
     Statement::Initialize(InitializeStatement {
         targets,
-        replacing: Vec::new(),
+        replacing,
     })
 }
 

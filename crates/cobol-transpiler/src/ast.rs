@@ -78,6 +78,8 @@ pub struct DataEntry {
     pub renames_target: Option<String>,
     /// For level 66 RENAMES THRU: the range end field name.
     pub renames_thru: Option<String>,
+    /// INDEXED BY names (implicit index variables for table items).
+    pub index_names: Vec<String>,
 }
 
 /// Parsed PIC clause.

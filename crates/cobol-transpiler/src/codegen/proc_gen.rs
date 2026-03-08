@@ -5,7 +5,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::ast::{ConditionValue, DataEntry, PicClause, PicCategory, ProcedureDivision, Paragraph, Statement, MoveStatement, Operand, Literal, FigurativeConstant, DisplayStatement, AddStatement, SubtractStatement, MultiplyStatement, DivideStatement, DivideDirection, ComputeStatement, IfStatement, EvaluateStatement, EvaluateSubject, WhenValue, PerformStatement, PerformLoopType, GoToStatement, InitializeStatement, CallStatement, PassingMode, CancelStatement, AcceptStatement, AcceptSource, OpenStatement, OpenMode, CloseStatement, ReadStatement, WriteStatement, Advancing, RewriteStatement, DeleteStatement, StartStatement, ComparisonOp, SetStatement, SetAction, DataReference, Subscript, ArithExpr, ArithOp, Condition, ClassCondition, SignCondition, SortStatement, SortInput, SortOutput, MergeStatement, ReleaseStatement, ReturnStatement, InspectStatement, InspectWhat, StringStatement, StringDelimiter, UnstringStatement, FunctionCall};
+use crate::ast::{ConditionValue, DataEntry, PicClause, PicCategory, ProcedureDivision, Paragraph, Statement, MoveStatement, Operand, Literal, FigurativeConstant, DisplayStatement, AddStatement, SubtractStatement, MultiplyStatement, DivideStatement, DivideDirection, ComputeStatement, IfStatement, EvaluateStatement, EvaluateSubject, WhenValue, PerformStatement, PerformLoopType, GoToStatement, InitializeStatement, InitializeCategory, InitializeReplacing, CallStatement, PassingMode, CancelStatement, AcceptStatement, AcceptSource, OpenStatement, OpenMode, CloseStatement, ReadStatement, WriteStatement, Advancing, RewriteStatement, DeleteStatement, StartStatement, ComparisonOp, SetStatement, SetAction, DataReference, Subscript, ArithExpr, ArithOp, Condition, ClassCondition, SignCondition, SortStatement, SortInput, SortOutput, MergeStatement, ReleaseStatement, ReturnStatement, InspectStatement, InspectWhat, StringStatement, StringDelimiter, UnstringStatement, FunctionCall};
 use crate::codegen::data_gen::cobol_to_rust_name;
 use crate::codegen::rust_writer::RustWriter;
 
@@ -400,7 +400,7 @@ fn generate_statement(w: &mut RustWriter, stmt: &Statement, cmap: &ConditionMap,
             w.line("return;");
         }
         Statement::ExitParagraph | Statement::ExitSection => w.line("return;"),
-        Statement::Initialize(init) => generate_initialize(w, init),
+        Statement::Initialize(init) => generate_initialize(w, init, gcm),
         Statement::Call(call) => generate_call(w, call, cmap, ptable, rfm, sfm, gcm),
         Statement::Cancel(cancel) => generate_cancel(w, cancel),
         Statement::Accept(acc) => generate_accept(w, acc),
@@ -807,11 +807,31 @@ fn generate_evaluate(w: &mut RustWriter, e: &EvaluateStatement, cmap: &Condition
                     generate_comparison_expr(subj_op, ComparisonOp::Equal, op)
                 } else {
                     // EVALUATE TRUE/FALSE: WHEN values are conditions
-                    let val = operand_expr(op);
-                    if subject_is_true {
-                        format!("({val})")
+                    // Check if the operand is an 88-level condition name
+                    if let Operand::DataRef(dr) = op {
+                        let key = dr.name.to_uppercase();
+                        if cmap.contains_key(&key) {
+                            let cond_expr = condition_name_expr(dr, cmap);
+                            if subject_is_true {
+                                format!("({cond_expr})")
+                            } else {
+                                format!("!({cond_expr})")
+                            }
+                        } else {
+                            let val = operand_expr(op);
+                            if subject_is_true {
+                                format!("({val})")
+                            } else {
+                                format!("!({val})")
+                            }
+                        }
                     } else {
-                        format!("!({val})")
+                        let val = operand_expr(op);
+                        if subject_is_true {
+                            format!("({val})")
+                        } else {
+                            format!("!({val})")
+                        }
                     }
                 }
             }
@@ -1052,12 +1072,64 @@ fn generate_goto(w: &mut RustWriter, g: &GoToStatement) {
     }
 }
 
-fn generate_initialize(w: &mut RustWriter, init: &InitializeStatement) {
+fn generate_initialize(w: &mut RustWriter, init: &InitializeStatement, gcm: &GroupChildMap) {
     for target in &init.targets {
-        let dest = data_ref_expr(target);
-        w.line(&format!(
-            "cobol_initialize(&mut {dest});"
-        ));
+        let target_name = target.name.to_uppercase();
+        // If target is a group in the GCM, expand into individual child initializations
+        if let Some(children) = gcm.get(&target_name) {
+            if init.replacing.is_empty() {
+                // Default INITIALIZE: spaces for alpha, zeros for numeric
+                emit_initialize_children(w, children, gcm, &InitializeMode::Default);
+            } else {
+                for repl in &init.replacing {
+                    emit_initialize_children(w, children, gcm, &InitializeMode::Replacing(repl));
+                }
+            }
+        } else {
+            // Leaf field -- just call cobol_initialize
+            let dest = data_ref_expr(target);
+            w.line(&format!("cobol_initialize(&mut {dest});"));
+        }
+    }
+}
+
+enum InitializeMode<'a> {
+    Default,
+    Replacing(&'a InitializeReplacing),
+}
+
+/// Recursively emit initialization for group children.
+fn emit_initialize_children(w: &mut RustWriter, children: &[(String, bool)], gcm: &GroupChildMap, mode: &InitializeMode<'_>) {
+    for (child_name, is_numeric) in children {
+        let child_upper = child_name.to_uppercase();
+        // If child is itself a group, recurse
+        if let Some(sub_children) = gcm.get(&child_upper) {
+            emit_initialize_children(w, sub_children, gcm, mode);
+            continue;
+        }
+        let field = cobol_to_rust_name(child_name, "");
+        match mode {
+            InitializeMode::Default => {
+                w.line(&format!("cobol_initialize(&mut ws.{field});"));
+            }
+            InitializeMode::Replacing(repl) => {
+                let matches = match repl.category {
+                    InitializeCategory::Numeric | InitializeCategory::NumericEdited => *is_numeric,
+                    InitializeCategory::Alphanumeric | InitializeCategory::Alphabetic | InitializeCategory::AlphanumericEdited => !*is_numeric,
+                    InitializeCategory::National => false,
+                };
+                if matches {
+                    let val_expr = operand_expr(&repl.value);
+                    if *is_numeric {
+                        // Numeric replacing: MOVE the value as Decimal
+                        w.line(&format!("move_numeric_literal({val_expr}, &mut ws.{field}, &ctx.config);"));
+                    } else {
+                        // Alphanumeric replacing: MOVE the value as bytes
+                        w.line(&format!("move_alphanumeric_literal({val_expr}.as_bytes(), &mut ws.{field}, &ctx.config);"));
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -3528,6 +3600,7 @@ mod tests {
             byte_length: None,
             renames_target: None,
             renames_thru: None,
+            index_names: Vec::new(),
         }
     }
 
@@ -3550,6 +3623,7 @@ mod tests {
             byte_length: None,
             renames_target: None,
             renames_thru: None,
+            index_names: Vec::new(),
         }
     }
 

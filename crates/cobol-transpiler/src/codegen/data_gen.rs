@@ -284,6 +284,13 @@ fn has_data_children(entry: &DataEntry) -> bool {
     entry.children.iter().any(|c| c.level != 88 && c.level != 66)
 }
 
+/// Check if a DataEntry is a true group (has children but NO PIC clause).
+/// A field with its own PIC clause is always a leaf, even if it has subordinate items
+/// (which is technically invalid COBOL but can appear from the parser).
+fn is_true_group(entry: &DataEntry) -> bool {
+    entry.pic.is_none() && has_data_children(entry)
+}
+
 /// Collect all leaf field names to detect duplicates.
 /// Public so transpile.rs/proc_gen can reuse the same logic.
 pub fn collect_leaf_names(entry: &DataEntry, counts: &mut std::collections::HashMap<String, usize>) {
@@ -469,6 +476,13 @@ fn generate_field(
         w.line(&format!(
             "pub {field_name}: {wrapped}, /* OCCURS {count} */"
         ));
+        // Generate implicit index fields from INDEXED BY
+        for idx_name in &entry.index_names {
+            let idx_field = cobol_to_rust_name(idx_name, "");
+            w.line(&format!(
+                "pub {idx_field}: PackedDecimal, /* INDEXED BY {idx_name} */"
+            ));
+        }
         return;
     }
 
@@ -503,8 +517,8 @@ fn generate_group_fields(
             generate_field(w, child, parent_group, duplicates, filler_counter, ancestor_occurs);
             continue;
         }
-        if has_data_children(child) {
-            // Sub-group: also emit a PicX overlay for the sub-group itself
+        if is_true_group(child) {
+            // Sub-group (no PIC): emit a PicX overlay for the sub-group itself
             let sub_size = compute_group_byte_length(child);
             if sub_size > 0 {
                 let sub_name = resolve_field_name(child, parent_group, duplicates, filler_counter);
@@ -519,6 +533,11 @@ fn generate_group_fields(
                 child_ancestors.push(count as usize);
             }
             generate_group_fields(w, child, &child.name, duplicates, filler_counter, &child_ancestors);
+        } else if has_data_children(child) && child.pic.is_some() {
+            // Field with PIC AND children (invalid COBOL but tolerated):
+            // emit as leaf, then also recurse into children
+            generate_field(w, child, parent_group, duplicates, filler_counter, ancestor_occurs);
+            generate_group_fields(w, child, &child.name, duplicates, filler_counter, ancestor_occurs);
         } else {
             generate_field(w, child, parent_group, duplicates, filler_counter, ancestor_occurs);
         }
@@ -555,6 +574,11 @@ fn generate_field_init(
             let inner = format!("CobolVarArray::new(vec![{element_init}; {count}], {count})");
             let wrapped = wrap_ancestor_occurs_init(&inner, ancestor_occurs);
             w.line(&format!("{field_name}: {wrapped},"));
+            // Initialize implicit index fields from INDEXED BY
+            for idx_name in &entry.index_names {
+                let idx_field = cobol_to_rust_name(idx_name, "");
+                w.line(&format!("{idx_field}: PackedDecimal::new(4, 0, false),"));
+            }
             return;
         }
 
@@ -562,6 +586,11 @@ fn generate_field_init(
         let inner = format!("CobolArray::new(vec![{element_init}; {count}])");
         let wrapped = wrap_ancestor_occurs_init(&inner, ancestor_occurs);
         w.line(&format!("{field_name}: {wrapped},"));
+        // Initialize implicit index fields from INDEXED BY
+        for idx_name in &entry.index_names {
+            let idx_field = cobol_to_rust_name(idx_name, "");
+            w.line(&format!("{idx_field}: PackedDecimal::new(4, 0, false),"));
+        }
         return;
     }
 
@@ -594,8 +623,8 @@ fn generate_group_field_inits(
             generate_field_init(w, child, parent_group, duplicates, filler_counter, ancestor_occurs);
             continue;
         }
-        if has_data_children(child) {
-            // Sub-group: init the PicX overlay
+        if is_true_group(child) {
+            // Sub-group (no PIC): init the PicX overlay
             let sub_size = compute_group_byte_length(child);
             if sub_size > 0 {
                 let sub_name = resolve_field_name(child, parent_group, duplicates, filler_counter);
@@ -610,6 +639,11 @@ fn generate_group_field_inits(
                 child_ancestors.push(count as usize);
             }
             generate_group_field_inits(w, child, &child.name, duplicates, filler_counter, &child_ancestors);
+        } else if has_data_children(child) && child.pic.is_some() {
+            // Field with PIC AND children (invalid COBOL but tolerated):
+            // emit as leaf, then also recurse into children
+            generate_field_init(w, child, parent_group, duplicates, filler_counter, ancestor_occurs);
+            generate_group_field_inits(w, child, &child.name, duplicates, filler_counter, ancestor_occurs);
         } else {
             generate_field_init(w, child, parent_group, duplicates, filler_counter, ancestor_occurs);
         }
@@ -1007,6 +1041,7 @@ mod tests {
             byte_length: Some(5),
             renames_target: None,
             renames_thru: None,
+            index_names: Vec::new(),
         }
     }
 

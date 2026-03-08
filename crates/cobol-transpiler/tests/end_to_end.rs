@@ -463,10 +463,10 @@ fn e2e_initialize() {
 
     let rust_code = transpile(cobol).expect("transpile failed");
 
-    // INITIALIZE generates cobol_initialize
+    // INITIALIZE on a group expands to per-child cobol_initialize calls
     assert!(
         rust_code.contains("cobol_initialize"),
-        "missing INITIALIZE -> cobol_initialize"
+        "missing INITIALIZE expansion for group children"
     );
 
     // Group fields flattened into struct

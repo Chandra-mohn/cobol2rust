@@ -95,7 +95,7 @@ impl<'input> Cobol85Listener<'input> for DataDivisionListener {
             .map(|dn| dn.get_text().trim().to_uppercase());
 
         // OCCURS clause
-        let (occurs, occurs_depending) = if let Some(occ) = ctx.dataOccursClause(0) {
+        let (occurs, occurs_depending, index_names) = if let Some(occ) = ctx.dataOccursClause(0) {
             let min_count = if let Some(int_lit) = occ.integerLiteral() {
                 int_lit.get_text().trim().parse::<u32>().ok()
             } else {
@@ -113,9 +113,14 @@ impl<'input> Cobol85Listener<'input> for DataDivisionListener {
             } else {
                 None
             };
-            (count, depending)
+            // Extract INDEXED BY names
+            let idx_names: Vec<String> = occ.indexName_all()
+                .iter()
+                .map(|idx| idx.get_text().trim().to_uppercase())
+                .collect();
+            (count, depending, idx_names)
         } else {
-            (None, None)
+            (None, None, Vec::new())
         };
 
         // SIGN clause
@@ -159,6 +164,7 @@ impl<'input> Cobol85Listener<'input> for DataDivisionListener {
             byte_length,
             renames_target: None,
             renames_thru: None,
+            index_names,
         });
     }
 
@@ -226,6 +232,7 @@ impl<'input> Cobol85Listener<'input> for DataDivisionListener {
             byte_length: None,
             renames_target: None,
             renames_thru: None,
+            index_names: Vec::new(),
         });
     }
 
@@ -275,6 +282,7 @@ impl<'input> Cobol85Listener<'input> for DataDivisionListener {
             byte_length: None,
             renames_target,
             renames_thru,
+            index_names: Vec::new(),
         });
     }
 }
