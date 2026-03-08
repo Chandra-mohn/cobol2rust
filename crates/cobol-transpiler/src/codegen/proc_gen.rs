@@ -3,7 +3,7 @@
 //! Generates Rust functions from COBOL PROCEDURE DIVISION statements.
 //! Each paragraph becomes a function. Statements map to runtime API calls.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::ast::{ConditionValue, DataEntry, PicClause, PicCategory, ProcedureDivision, Paragraph, Statement, MoveStatement, Operand, Literal, FigurativeConstant, DisplayStatement, AddStatement, SubtractStatement, MultiplyStatement, DivideStatement, DivideDirection, ComputeStatement, IfStatement, EvaluateStatement, EvaluateSubject, WhenValue, PerformStatement, PerformLoopType, GoToStatement, InitializeStatement, CallStatement, PassingMode, CancelStatement, AcceptStatement, AcceptSource, OpenStatement, OpenMode, CloseStatement, ReadStatement, WriteStatement, Advancing, RewriteStatement, DeleteStatement, StartStatement, ComparisonOp, SetStatement, SetAction, DataReference, Subscript, ArithExpr, ArithOp, Condition, ClassCondition, SignCondition, SortStatement, SortInput, SortOutput, MergeStatement, ReleaseStatement, ReturnStatement, InspectStatement, InspectWhat, StringStatement, StringDelimiter, UnstringStatement, FunctionCall};
 use crate::codegen::data_gen::cobol_to_rust_name;
@@ -16,6 +16,66 @@ pub type RecordFileMap = HashMap<String, String>;
 /// Maps SD record field names (uppercase) to (byte_offset, byte_length).
 /// Used by SORT/MERGE codegen to emit correct `SortKeySpec::new(...)`.
 pub type SortFieldMap = HashMap<String, (usize, usize)>;
+
+/// Names of sections/paragraphs used as INPUT or OUTPUT PROCEDURE in SORT/MERGE.
+#[derive(Debug, Default)]
+struct SortProcedureNames {
+    /// Section/para names used as INPUT PROCEDURE (need `releaser: &mut Releaser`).
+    input: HashSet<String>,
+    /// Section/para names used as OUTPUT PROCEDURE (need `returner: &mut Returner`).
+    output: HashSet<String>,
+}
+
+/// Collect all section/paragraph names used as INPUT/OUTPUT PROCEDURE from SORT/MERGE.
+fn collect_sort_procedure_names(proc_div: &ProcedureDivision) -> SortProcedureNames {
+    let mut names = SortProcedureNames::default();
+    fn walk_stmts(stmts: &[Statement], names: &mut SortProcedureNames) {
+        for stmt in stmts {
+            match stmt {
+                Statement::Sort(s) => {
+                    if let SortInput::InputProcedure { name, .. } = &s.input {
+                        names.input.insert(name.to_uppercase());
+                    }
+                    if let SortOutput::OutputProcedure { name, .. } = &s.output {
+                        names.output.insert(name.to_uppercase());
+                    }
+                }
+                Statement::Merge(m) => {
+                    if let SortOutput::OutputProcedure { name, .. } = &m.output {
+                        names.output.insert(name.to_uppercase());
+                    }
+                }
+                Statement::If(i) => {
+                    walk_stmts(&i.then_body, names);
+                    walk_stmts(&i.else_body, names);
+                }
+                Statement::Evaluate(e) => {
+                    for branch in &e.when_branches {
+                        walk_stmts(&branch.body, names);
+                    }
+                    walk_stmts(&e.when_other, names);
+                }
+                Statement::Perform(p) => {
+                    walk_stmts(&p.body, names);
+                }
+                _ => {}
+            }
+        }
+    }
+    for para in &proc_div.paragraphs {
+        for sentence in &para.sentences {
+            walk_stmts(&sentence.statements, &mut names);
+        }
+    }
+    for section in &proc_div.sections {
+        for para in &section.paragraphs {
+            for sentence in &para.sentences {
+                walk_stmts(&sentence.statements, &mut names);
+            }
+        }
+    }
+    names
+}
 
 /// Information about an 88-level condition for codegen.
 #[derive(Debug, Clone)]
@@ -94,7 +154,21 @@ pub fn generate_procedure_division(
     record_file_map: &RecordFileMap,
     sort_field_map: &SortFieldMap,
 ) {
-    // Build flat paragraph index table (standalone paragraphs first, then section paragraphs)
+    // Collect section/paragraph names used as INPUT/OUTPUT PROCEDURE (needed early for dispatch)
+    let spn = collect_sort_procedure_names(proc_div);
+
+    // Build set of paragraph names belonging to INPUT/OUTPUT PROCEDURE sections
+    let mut proc_para_names: HashSet<String> = HashSet::new();
+    for section in &proc_div.sections {
+        let section_upper = section.name.to_uppercase();
+        if spn.input.contains(&section_upper) || spn.output.contains(&section_upper) {
+            for para in &section.paragraphs {
+                proc_para_names.insert(para.name.to_uppercase());
+            }
+        }
+    }
+
+    // Build flat paragraph index table (skip INPUT/OUTPUT PROCEDURE paragraphs)
     let mut para_table: Vec<ParagraphIndex> = Vec::new();
     for para in &proc_div.paragraphs {
         let idx = para_table.len();
@@ -105,6 +179,11 @@ pub fn generate_procedure_division(
         });
     }
     for section in &proc_div.sections {
+        let section_upper = section.name.to_uppercase();
+        // Skip sections that are INPUT/OUTPUT PROCEDURE -- they're called from SORT closures
+        if spn.input.contains(&section_upper) || spn.output.contains(&section_upper) {
+            continue;
+        }
         for para in &section.paragraphs {
             let idx = para_table.len();
             para_table.push(ParagraphIndex {
@@ -155,7 +234,7 @@ pub fn generate_procedure_division(
 
     // Generate paragraph functions (outside sections)
     for para in &proc_div.paragraphs {
-        generate_paragraph_fn(w, para, cmap, &para_table, record_file_map, sort_field_map);
+        generate_paragraph_fn(w, para, cmap, &para_table, record_file_map, sort_field_map, &spn, None);
     }
 
     // Generate section paragraphs and section wrapper functions
@@ -166,21 +245,50 @@ pub fn generate_procedure_division(
         ));
         w.blank_line();
 
+        let section_upper = section.name.to_uppercase();
+        let section_is_input = spn.input.contains(&section_upper);
+        let section_is_output = spn.output.contains(&section_upper);
+
+        // Determine extra param for paragraphs in this section
+        let extra_param = if section_is_input {
+            Some("releaser")
+        } else if section_is_output {
+            Some("returner")
+        } else {
+            None
+        };
+
         // Generate individual paragraph functions
         for para in &section.paragraphs {
-            generate_paragraph_fn(w, para, cmap, &para_table, record_file_map, sort_field_map);
+            generate_paragraph_fn(w, para, cmap, &para_table, record_file_map, sort_field_map, &spn, extra_param);
         }
 
         // Generate section-level wrapper function that calls all paragraphs
         if !section.paragraphs.is_empty() {
             let section_fn = cobol_to_rust_name(&section.name, "");
             w.line("#[allow(non_snake_case, unused_variables)]");
-            w.open_block(&format!(
-                "fn {section_fn}(ws: &mut WorkingStorage, ctx: &mut ProgramContext) {{"
-            ));
+            if section_is_input {
+                w.open_block(&format!(
+                    "fn {section_fn}(ws: &mut WorkingStorage, ctx: &mut ProgramContext, releaser: &mut Releaser) {{"
+                ));
+            } else if section_is_output {
+                w.open_block(&format!(
+                    "fn {section_fn}(ws: &mut WorkingStorage, ctx: &mut ProgramContext, returner: &mut Returner) {{"
+                ));
+            } else {
+                w.open_block(&format!(
+                    "fn {section_fn}(ws: &mut WorkingStorage, ctx: &mut ProgramContext) {{"
+                ));
+            }
             for para in &section.paragraphs {
                 let para_fn = cobol_to_rust_name(&para.name, "");
-                w.line(&format!("{para_fn}(ws, ctx);"));
+                if section_is_input {
+                    w.line(&format!("{para_fn}(ws, ctx, releaser);"));
+                } else if section_is_output {
+                    w.line(&format!("{para_fn}(ws, ctx, returner);"));
+                } else {
+                    w.line(&format!("{para_fn}(ws, ctx);"));
+                }
                 w.line("if ctx.stopped || ctx.exit_program || ctx.goto_target.is_some() { return; }");
             }
             w.close_block("}");
@@ -190,12 +298,23 @@ pub fn generate_procedure_division(
 }
 
 /// Generate a Rust function for a single paragraph.
-fn generate_paragraph_fn(w: &mut RustWriter, para: &Paragraph, cmap: &ConditionMap, ptable: &[ParagraphIndex], rfm: &RecordFileMap, sfm: &SortFieldMap) {
+///
+/// `extra_param`: If `Some("releaser")`, adds `releaser: &mut Releaser` param.
+///                If `Some("returner")`, adds `returner: &mut Returner` param.
+fn generate_paragraph_fn(w: &mut RustWriter, para: &Paragraph, cmap: &ConditionMap, ptable: &[ParagraphIndex], rfm: &RecordFileMap, sfm: &SortFieldMap, _spn: &SortProcedureNames, extra_param: Option<&str>) {
     let fn_name = cobol_to_rust_name(&para.name, "");
     w.line("#[allow(non_snake_case, unused_variables)]");
-    w.open_block(&format!(
-        "fn {fn_name}(ws: &mut WorkingStorage, ctx: &mut ProgramContext) {{"
-    ));
+    match extra_param {
+        Some("releaser") => w.open_block(&format!(
+            "fn {fn_name}(ws: &mut WorkingStorage, ctx: &mut ProgramContext, releaser: &mut Releaser) {{"
+        )),
+        Some("returner") => w.open_block(&format!(
+            "fn {fn_name}(ws: &mut WorkingStorage, ctx: &mut ProgramContext, returner: &mut Returner) {{"
+        )),
+        _ => w.open_block(&format!(
+            "fn {fn_name}(ws: &mut WorkingStorage, ctx: &mut ProgramContext) {{"
+        )),
+    }
 
     for sentence in &para.sentences {
         for stmt in &sentence.statements {
@@ -1995,7 +2114,6 @@ fn literal_to_bytes_expr(lit: &Literal) -> String {
 // ---------------------------------------------------------------------------
 
 fn generate_sort(w: &mut RustWriter, sort: &SortStatement, _cmap: &ConditionMap, sfm: &SortFieldMap) {
-    let fname = cobol_to_rust_name(&sort.file_name, "");
     w.open_block("{");
 
     // Build key specs from sort field map
@@ -2025,52 +2143,110 @@ fn generate_sort(w: &mut RustWriter, sort: &SortStatement, _cmap: &ConditionMap,
         "let sort_config = SortConfig::new({reclen}).with_stable({stable});"
     ));
 
-    // Input
-    match &sort.input {
-        SortInput::Using(files) => {
-            let input_refs: Vec<String> = files
-                .iter()
-                .map(|f| {
-                    let n = cobol_to_rust_name(f, "");
-                    format!("&mut ws.{n} as &mut dyn CobolFile")
-                })
-                .collect();
+    // Determine which combination of INPUT/OUTPUT we have
+    let has_input_proc = matches!(&sort.input, SortInput::InputProcedure { .. });
+    let has_output_proc = matches!(&sort.output, SortOutput::OutputProcedure { .. });
+
+    match (has_input_proc, has_output_proc) {
+        // USING + GIVING: file-to-file sort
+        (false, false) => {
+            generate_sort_using_giving(w, sort);
+        }
+        // INPUT PROCEDURE + GIVING: procedural input, file output
+        (true, false) => {
+            let proc_name = if let SortInput::InputProcedure { name, .. } = &sort.input {
+                cobol_to_rust_name(name, "")
+            } else { unreachable!() };
+
             w.line(&format!(
-                "let mut sort_inputs: Vec<&mut dyn CobolFile> = vec![{}];",
-                input_refs.join(", ")
+                "let sorted_records = sort_with_input_procedure(&sort_keys, &sort_config, None, |releaser| {{ {proc_name}(ws, ctx, releaser); }}).unwrap_or_default();"
+            ));
+
+            // Write sorted records to GIVING file(s)
+            if let SortOutput::Giving(files) = &sort.output {
+                for f in files {
+                    let n = cobol_to_rust_name(f, "");
+                    w.line(&format!("assert!(ws.{n}.open(FileOpenMode::Output).is_success(), \"SORT GIVING OPEN\");"));
+                    w.open_block("for rec in &sorted_records {");
+                    w.line(&format!("ws.{n}.write_record(rec);"));
+                    w.close_block("}");
+                    w.line(&format!("assert!(ws.{n}.close().is_success(), \"SORT GIVING CLOSE\");"));
+                }
+            }
+        }
+        // USING + OUTPUT PROCEDURE: file input, procedural output
+        (false, true) => {
+            let proc_name = if let SortOutput::OutputProcedure { name, .. } = &sort.output {
+                cobol_to_rust_name(name, "")
+            } else { unreachable!() };
+
+            // Read records from USING files
+            w.line("let mut input_records: Vec<Vec<u8>> = Vec::new();");
+            if let SortInput::Using(files) = &sort.input {
+                for f in files {
+                    let n = cobol_to_rust_name(f, "");
+                    w.line(&format!("assert!(ws.{n}.open(FileOpenMode::Input).is_success(), \"SORT USING OPEN\");"));
+                    w.open_block("loop {");
+                    w.line(&format!("let (_st, _data) = ws.{n}.read_next();"));
+                    w.line("if !_st.is_success() { break; }");
+                    w.line("if let Some(d) = _data { input_records.push(d); }");
+                    w.close_block("}");
+                    w.line(&format!("assert!(ws.{n}.close().is_success(), \"SORT USING CLOSE\");"));
+                }
+            }
+
+            w.line(&format!(
+                "let _ = sort_with_output_procedure(&sort_keys, &sort_config, None, input_records, |returner| {{ {proc_name}(ws, ctx, returner); }});"
             ));
         }
-        SortInput::InputProcedure { name, .. } => {
-            let proc_name = cobol_to_rust_name(name, "para");
+        // INPUT PROCEDURE + OUTPUT PROCEDURE: both procedural
+        (true, true) => {
+            let in_proc = if let SortInput::InputProcedure { name, .. } = &sort.input {
+                cobol_to_rust_name(name, "")
+            } else { unreachable!() };
+            let out_proc = if let SortOutput::OutputProcedure { name, .. } = &sort.output {
+                cobol_to_rust_name(name, "")
+            } else { unreachable!() };
+
             w.line(&format!(
-                "// INPUT PROCEDURE: {proc_name} would use RELEASE verb"
+                "let _ = sort_with_procedures(&sort_keys, &sort_config, None, |releaser| {{ {in_proc}(ws, ctx, releaser); }}, |returner| {{ {out_proc}(ws, ctx, returner); }});"
             ));
-            w.line("let mut sort_inputs: Vec<&mut dyn CobolFile> = vec![];");
         }
     }
 
-    // Output
-    match &sort.output {
-        SortOutput::Giving(files) => {
-            let output_refs: Vec<String> = files
-                .iter()
-                .map(|f| {
-                    let n = cobol_to_rust_name(f, "");
-                    format!("&mut ws.{n} as &mut dyn CobolFile")
-                })
-                .collect();
-            w.line(&format!(
-                "let mut sort_outputs: Vec<&mut dyn CobolFile> = vec![{}];",
-                output_refs.join(", ")
-            ));
-        }
-        SortOutput::OutputProcedure { name, .. } => {
-            let proc_name = cobol_to_rust_name(name, "para");
-            w.line(&format!(
-                "// OUTPUT PROCEDURE: {proc_name} would use RETURN verb"
-            ));
-            w.line("let mut sort_outputs: Vec<&mut dyn CobolFile> = vec![];");
-        }
+    w.close_block("}");
+}
+
+/// Generate SORT USING/GIVING (file-to-file sort with no procedures).
+fn generate_sort_using_giving(w: &mut RustWriter, sort: &SortStatement) {
+    // Input files
+    if let SortInput::Using(files) = &sort.input {
+        let input_refs: Vec<String> = files
+            .iter()
+            .map(|f| {
+                let n = cobol_to_rust_name(f, "");
+                format!("&mut ws.{n} as &mut dyn CobolFile")
+            })
+            .collect();
+        w.line(&format!(
+            "let mut sort_inputs: Vec<&mut dyn CobolFile> = vec![{}];",
+            input_refs.join(", ")
+        ));
+    }
+
+    // Output files
+    if let SortOutput::Giving(files) = &sort.output {
+        let output_refs: Vec<String> = files
+            .iter()
+            .map(|f| {
+                let n = cobol_to_rust_name(f, "");
+                format!("&mut ws.{n} as &mut dyn CobolFile")
+            })
+            .collect();
+        w.line(&format!(
+            "let mut sort_outputs: Vec<&mut dyn CobolFile> = vec![{}];",
+            output_refs.join(", ")
+        ));
     }
 
     // Execute sort
@@ -2079,8 +2255,6 @@ fn generate_sort(w: &mut RustWriter, sort: &SortStatement, _cmap: &ConditionMap,
     w.line("    &mut sort_inputs.iter_mut().map(|f| &mut **f).collect::<Vec<_>>(),");
     w.line("    &mut sort_outputs.iter_mut().map(|f| &mut **f).collect::<Vec<_>>(),");
     w.line(");");
-
-    w.close_block("}");
 }
 
 fn generate_merge(w: &mut RustWriter, merge: &MergeStatement, _cmap: &ConditionMap, sfm: &SortFieldMap) {
@@ -2806,7 +2980,8 @@ mod tests {
         };
         generate_sort(&mut w, &stmt, &empty_cmap(), &HashMap::new());
         let output = w.finish();
-        assert!(output.contains("INPUT PROCEDURE"));
+        assert!(output.contains("sort_with_input_procedure"), "should use sort_with_input_procedure API: {output}");
+        assert!(output.contains("input_para(ws, ctx, releaser)"), "should call input procedure with releaser: {output}");
         assert!(output.contains("with_stable(true)"));
     }
 

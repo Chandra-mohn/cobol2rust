@@ -24,7 +24,7 @@
        01  WS-COMP3             PIC S9(9) COMP VALUE 0.
        01  WS-REMAINDER         PIC 9(5) VALUE 0.
        01  WS-ERR-FLAG          PIC 9 VALUE 0.
-       01  WS-ROUNDED           PIC 9(5)V9 VALUE 0.
+       01  WS-RNDVAL           PIC 9(5)V9 VALUE 0.
        PROCEDURE DIVISION.
        MAIN-PARA.
       *--- ADD variants ---
@@ -41,8 +41,8 @@
            ADD WS-A WS-B WS-C GIVING WS-RESULT.
            DISPLAY WS-RESULT.
       * ADD ROUNDED
-           ADD 10.55 TO WS-ROUNDED ROUNDED.
-           DISPLAY WS-ROUNDED.
+           ADD 10.55 TO WS-RNDVAL ROUNDED.
+           DISPLAY WS-RNDVAL.
       * ADD ON SIZE ERROR
            MOVE 999 TO WS-SMALL.
            ADD 1 TO WS-SMALL
@@ -86,8 +86,8 @@
            MULTIPLY WS-A BY WS-B GIVING WS-RESULT.
            DISPLAY WS-RESULT.
       * MULTIPLY ROUNDED
-           MULTIPLY 3.33 BY WS-ROUNDED ROUNDED.
-           DISPLAY WS-ROUNDED.
+           MULTIPLY 3.33 BY WS-RNDVAL ROUNDED.
+           DISPLAY WS-RNDVAL.
       * MULTIPLY ON SIZE ERROR
            MOVE 999 TO WS-SMALL.
            MULTIPLY 2 BY WS-SMALL
@@ -113,8 +113,8 @@
            DISPLAY WS-D.
            DISPLAY WS-REMAINDER.
       * DIVIDE ROUNDED
-           DIVIDE 10 BY 3 GIVING WS-ROUNDED ROUNDED.
-           DISPLAY WS-ROUNDED.
+           DIVIDE 10 BY 3 GIVING WS-RNDVAL ROUNDED.
+           DISPLAY WS-RNDVAL.
       * DIVIDE ON SIZE ERROR (divide by zero)
            DIVIDE 0 INTO WS-A
                ON SIZE ERROR

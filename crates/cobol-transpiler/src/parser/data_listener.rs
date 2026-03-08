@@ -96,11 +96,17 @@ impl<'input> Cobol85Listener<'input> for DataDivisionListener {
 
         // OCCURS clause
         let (occurs, occurs_depending) = if let Some(occ) = ctx.dataOccursClause(0) {
-            let count = if let Some(int_lit) = occ.integerLiteral() {
+            let min_count = if let Some(int_lit) = occ.integerLiteral() {
                 int_lit.get_text().trim().parse::<u32>().ok()
             } else {
                 None
             };
+            // For OCCURS n TO m DEPENDING ON, extract the max (m) from dataOccursTo
+            let max_count = occ.dataOccursTo()
+                .and_then(|to| to.integerLiteral())
+                .and_then(|lit| lit.get_text().trim().parse::<u32>().ok());
+            // Use max if present (DEPENDING ON), otherwise use the single count
+            let count = max_count.or(min_count);
             let depending = if occ.DEPENDING().is_some() {
                 occ.qualifiedDataName()
                     .map(|qdn| qdn.get_text().trim().to_uppercase())

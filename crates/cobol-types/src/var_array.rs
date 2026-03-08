@@ -11,6 +11,8 @@
 //!     DEPENDING ON WS-COUNT.
 //! ```
 
+use std::ops::{Index, IndexMut};
+
 use cobol_core::category::DataCategory;
 use cobol_core::traits::CobolField;
 
@@ -25,6 +27,19 @@ pub struct CobolVarArray<T: CobolField> {
     elements: Vec<T>,
     max_occurs: usize,
     active_len: usize,
+}
+
+impl<T: CobolField> Index<usize> for CobolVarArray<T> {
+    type Output = T;
+    fn index(&self, index: usize) -> &T {
+        &self.elements[index]
+    }
+}
+
+impl<T: CobolField> IndexMut<usize> for CobolVarArray<T> {
+    fn index_mut(&mut self, index: usize) -> &mut T {
+        &mut self.elements[index]
+    }
 }
 
 impl<T: CobolField> std::fmt::Debug for CobolVarArray<T> {
