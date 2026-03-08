@@ -1475,4 +1475,194 @@ mod tests {
             "should generate Comp1Float::from_f32 init: {output}"
         );
     }
+
+    // -----------------------------------------------------------------------
+    // PIC + children: field with PIC should be emitted as leaf
+    // even if it has subordinate items (invalid COBOL, but tolerated)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn pic_with_children_emits_leaf_and_children() {
+        // Level 11 WS-FLAG PIC X with child level 12 WS-FLAG-V PIC X
+        let flag_v = make_picx_entry("WS-FLAG-V", 12, 1);
+        let mut flag = make_picx_entry("WS-FLAG", 11, 1);
+        flag.children = vec![flag_v];
+
+        let parent = DataEntry {
+            children: vec![
+                make_picx_entry("WS-ALPHA", 5, 10),
+                flag,
+            ],
+            ..make_entry("WS-RECORD", 1)
+        };
+
+        let mut w = RustWriter::new();
+        generate_working_storage(&mut w, &[parent], &[]);
+        let output = w.finish();
+
+        // Both WS-FLAG and WS-FLAG-V should be in the struct
+        assert!(output.contains("ws_flag:"), "PIC field with children should still appear: {output}");
+        assert!(output.contains("ws_flag_v:"), "child of PIC field should also appear: {output}");
+    }
+
+    #[test]
+    fn pic_with_children_both_initialized() {
+        let flag_v = make_picx_entry("WS-FLAG-V", 12, 1);
+        let mut flag = make_picx_entry("WS-FLAG", 11, 1);
+        flag.children = vec![flag_v];
+
+        let parent = DataEntry {
+            children: vec![flag],
+            ..make_entry("WS-RECORD", 1)
+        };
+
+        let mut w = RustWriter::new();
+        generate_working_storage(&mut w, &[parent], &[]);
+        let output = w.finish();
+
+        // Both should be initialized in new()
+        let new_section = output.split("fn new()").nth(1).unwrap_or("");
+        assert!(new_section.contains("ws_flag:"), "PIC field should be initialized: {output}");
+        assert!(new_section.contains("ws_flag_v:"), "child should be initialized: {output}");
+    }
+
+    #[test]
+    fn is_true_group_with_pic() {
+        let mut entry = make_picx_entry("WS-FIELD", 5, 1);
+        entry.children = vec![make_picx_entry("WS-CHILD", 10, 1)];
+        // Has PIC + children -> NOT a true group
+        assert!(!is_true_group(&entry), "PIC field with children is not a true group");
+    }
+
+    #[test]
+    fn is_true_group_without_pic() {
+        let mut entry = make_entry("WS-GROUP", 5);
+        entry.children = vec![make_picx_entry("WS-CHILD", 10, 5)];
+        // No PIC + has children -> IS a true group
+        assert!(is_true_group(&entry), "no-PIC field with children is a true group");
+    }
+
+    // -----------------------------------------------------------------------
+    // INDEXED BY: generates PackedDecimal fields for implicit index names
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn indexed_by_generates_field() {
+        let mut entry = make_picx_entry("WS-ITEM", 5, 10);
+        entry.occurs = Some(10);
+        entry.index_names = vec!["WS-IX".to_string()];
+
+        let parent = DataEntry {
+            children: vec![entry],
+            ..make_entry("WS-TABLE", 1)
+        };
+
+        let mut w = RustWriter::new();
+        generate_working_storage(&mut w, &[parent], &[]);
+        let output = w.finish();
+
+        assert!(output.contains("pub ws_ix: PackedDecimal"), "should generate INDEXED BY field: {output}");
+        assert!(output.contains("INDEXED BY WS-IX"), "should have INDEXED BY comment: {output}");
+    }
+
+    #[test]
+    fn indexed_by_initializes_field() {
+        let mut entry = make_picx_entry("WS-ITEM", 5, 10);
+        entry.occurs = Some(10);
+        entry.index_names = vec!["WS-IX".to_string()];
+
+        let parent = DataEntry {
+            children: vec![entry],
+            ..make_entry("WS-TABLE", 1)
+        };
+
+        let mut w = RustWriter::new();
+        generate_working_storage(&mut w, &[parent], &[]);
+        let output = w.finish();
+
+        let new_section = output.split("fn new()").nth(1).unwrap_or("");
+        assert!(new_section.contains("ws_ix: PackedDecimal::new(4, 0, false)"), "should init INDEXED BY as PackedDecimal: {output}");
+    }
+
+    #[test]
+    fn indexed_by_multiple_indices() {
+        let mut entry = make_picx_entry("WS-ITEM", 5, 10);
+        entry.occurs = Some(10);
+        entry.index_names = vec!["WS-IX1".to_string(), "WS-IX2".to_string()];
+
+        let parent = DataEntry {
+            children: vec![entry],
+            ..make_entry("WS-TABLE", 1)
+        };
+
+        let mut w = RustWriter::new();
+        generate_working_storage(&mut w, &[parent], &[]);
+        let output = w.finish();
+
+        assert!(output.contains("pub ws_ix1: PackedDecimal"), "should generate first index: {output}");
+        assert!(output.contains("pub ws_ix2: PackedDecimal"), "should generate second index: {output}");
+    }
+
+    // -----------------------------------------------------------------------
+    // Deep nesting: multi-level group hierarchy
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn deep_nested_groups_flatten_correctly() {
+        // 01 WS-REC
+        //   05 WS-OUTER (group)
+        //     10 WS-INNER (group)
+        //       15 WS-LEAF PIC X(5)
+        let leaf = make_picx_entry("WS-LEAF", 15, 5);
+        let inner = DataEntry {
+            children: vec![leaf],
+            ..make_entry("WS-INNER", 10)
+        };
+        let outer = DataEntry {
+            children: vec![inner],
+            ..make_entry("WS-OUTER", 5)
+        };
+        let record = DataEntry {
+            children: vec![outer],
+            ..make_entry("WS-REC", 1)
+        };
+
+        let mut w = RustWriter::new();
+        generate_working_storage(&mut w, &[record], &[]);
+        let output = w.finish();
+
+        assert!(output.contains("ws_rec:"), "should have group overlay: {output}");
+        assert!(output.contains("ws_outer:"), "should have sub-group overlay: {output}");
+        assert!(output.contains("ws_inner:"), "should have sub-sub-group overlay: {output}");
+        assert!(output.contains("ws_leaf:"), "should have leaf field: {output}");
+    }
+
+    // -----------------------------------------------------------------------
+    // Duplicate field names: disambiguation with parent prefix
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn duplicate_names_disambiguated() {
+        // Two groups with same child name "WS-VALUE"
+        let group_a = DataEntry {
+            children: vec![make_picx_entry("WS-VALUE", 10, 5)],
+            ..make_entry("WS-GROUP-A", 5)
+        };
+        let group_b = DataEntry {
+            children: vec![make_numeric_entry("WS-VALUE", 10, 5, 0)],
+            ..make_entry("WS-GROUP-B", 5)
+        };
+        let record = DataEntry {
+            children: vec![group_a, group_b],
+            ..make_entry("WS-REC", 1)
+        };
+
+        let mut w = RustWriter::new();
+        generate_working_storage(&mut w, &[record], &[]);
+        let output = w.finish();
+
+        // Both should be in the struct with parent-prefixed names
+        assert!(output.contains("ws_group_a_ws_value"), "should disambiguate with parent A: {output}");
+        assert!(output.contains("ws_group_b_ws_value"), "should disambiguate with parent B: {output}");
+    }
 }

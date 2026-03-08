@@ -2809,7 +2809,7 @@ mod tests {
     use crate::ast::{
         CallParam, DisplayTarget, InspectConverting, InspectReplacing, InspectTallying,
         OpenFile, PerformTarget, RefMod, SortKey, StartKeyCondition, StringSource,
-        UnstringDelimiter, UnstringInto, Usage,
+        UnstringDelimiter, UnstringInto, Usage, WhenBranch,
     };
 
     fn empty_cmap() -> ConditionMap {
@@ -4354,5 +4354,286 @@ mod tests {
         assert!(output.contains("ws.master_file.start("), "missing start call: {output}");
         assert!(output.contains("_status.is_success()"), "missing is_success: {output}");
         assert!(output.contains("KEY NOT FOUND"), "missing KEY NOT FOUND: {output}");
+    }
+
+    // -----------------------------------------------------------------------
+    // data_ref_base_expr: qualified name disambiguation
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn data_ref_no_qualifier() {
+        let dr = DataReference {
+            name: "WS-NAME".to_string(),
+            qualifiers: Vec::new(),
+            subscripts: Vec::new(),
+            ref_mod: None,
+        };
+        assert_eq!(data_ref_base_expr(&dr), "ws.ws_name");
+    }
+
+    #[test]
+    fn data_ref_with_qualifier() {
+        let dr = DataReference {
+            name: "WS-NAME".to_string(),
+            qualifiers: vec!["WS-SRC-REC".to_string()],
+            subscripts: Vec::new(),
+            ref_mod: None,
+        };
+        assert_eq!(data_ref_base_expr(&dr), "ws.ws_src_rec_ws_name");
+    }
+
+    #[test]
+    fn data_ref_with_subscript() {
+        let dr = DataReference {
+            name: "WS-ITEM".to_string(),
+            qualifiers: Vec::new(),
+            subscripts: vec![Subscript::DataRef(DataReference {
+                name: "WS-IX".to_string(),
+                qualifiers: Vec::new(),
+                subscripts: Vec::new(),
+                ref_mod: None,
+            })],
+            ref_mod: None,
+        };
+        let expr = data_ref_base_expr(&dr);
+        assert!(expr.contains("[decimal_to_usize("), "should convert subscript: {expr}");
+        assert!(expr.contains("saturating_sub(1)"), "should convert 1-based to 0-based: {expr}");
+    }
+
+    // -----------------------------------------------------------------------
+    // generate_initialize: default expansion into per-child calls
+    // -----------------------------------------------------------------------
+
+    fn make_simple_gcm() -> GroupChildMap {
+        let mut gcm = GroupChildMap::new();
+        gcm.insert("WS-RECORD".to_string(), vec![
+            ("WS-ALPHA".to_string(), false),
+            ("WS-NUM".to_string(), true),
+        ]);
+        gcm
+    }
+
+    #[test]
+    fn initialize_default_expands_children() {
+        let mut w = RustWriter::new();
+        let init = InitializeStatement {
+            targets: vec![make_ref("WS-RECORD")],
+            replacing: Vec::new(),
+        };
+        let gcm = make_simple_gcm();
+        generate_initialize(&mut w, &init, &gcm);
+        let output = w.finish();
+        assert!(output.contains("cobol_initialize(&mut ws.ws_alpha)"), "should init alpha child: {output}");
+        assert!(output.contains("cobol_initialize(&mut ws.ws_num)"), "should init numeric child: {output}");
+        // Should NOT call cobol_initialize on the group itself
+        assert!(!output.contains("cobol_initialize(&mut ws.ws_record)"), "should not init group directly: {output}");
+    }
+
+    #[test]
+    fn initialize_leaf_field() {
+        let mut w = RustWriter::new();
+        let init = InitializeStatement {
+            targets: vec![make_ref("WS-STANDALONE")],
+            replacing: Vec::new(),
+        };
+        let gcm = GroupChildMap::new(); // no groups
+        generate_initialize(&mut w, &init, &gcm);
+        let output = w.finish();
+        assert!(output.contains("cobol_initialize(&mut ws.ws_standalone)"), "leaf should use cobol_initialize: {output}");
+    }
+
+    #[test]
+    fn initialize_nested_group_recursion() {
+        let mut gcm = GroupChildMap::new();
+        gcm.insert("WS-OUTER".to_string(), vec![
+            ("WS-HDR".to_string(), false),
+            ("WS-INNER".to_string(), false), // sub-group
+        ]);
+        gcm.insert("WS-INNER".to_string(), vec![
+            ("WS-DETAIL".to_string(), false),
+            ("WS-AMOUNT".to_string(), true),
+        ]);
+
+        let mut w = RustWriter::new();
+        let init = InitializeStatement {
+            targets: vec![make_ref("WS-OUTER")],
+            replacing: Vec::new(),
+        };
+        generate_initialize(&mut w, &init, &gcm);
+        let output = w.finish();
+        assert!(output.contains("cobol_initialize(&mut ws.ws_hdr)"), "should init WS-HDR: {output}");
+        assert!(output.contains("cobol_initialize(&mut ws.ws_detail)"), "should recurse into WS-INNER: {output}");
+        assert!(output.contains("cobol_initialize(&mut ws.ws_amount)"), "should recurse into WS-INNER: {output}");
+        // WS-INNER itself should NOT appear as a standalone init
+        assert!(!output.contains("cobol_initialize(&mut ws.ws_inner)"), "sub-group should not be initialized directly: {output}");
+    }
+
+    // -----------------------------------------------------------------------
+    // generate_initialize: REPLACING clause
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn initialize_replacing_numeric() {
+        let mut w = RustWriter::new();
+        let init = InitializeStatement {
+            targets: vec![make_ref("WS-RECORD")],
+            replacing: vec![InitializeReplacing {
+                category: InitializeCategory::Numeric,
+                value: Operand::Literal(Literal::Numeric("42".to_string())),
+            }],
+        };
+        let gcm = make_simple_gcm();
+        generate_initialize(&mut w, &init, &gcm);
+        let output = w.finish();
+        // Numeric child should get the replacement value
+        assert!(output.contains("ws.ws_num"), "should target numeric child: {output}");
+        assert!(output.contains("move_numeric_literal"), "should use move_numeric_literal: {output}");
+        assert!(output.contains("42"), "should contain value 42: {output}");
+        // Alpha child should NOT be touched
+        assert!(!output.contains("ws_alpha"), "should NOT touch alpha child: {output}");
+    }
+
+    #[test]
+    fn initialize_replacing_alphanumeric() {
+        let mut w = RustWriter::new();
+        let init = InitializeStatement {
+            targets: vec![make_ref("WS-RECORD")],
+            replacing: vec![InitializeReplacing {
+                category: InitializeCategory::Alphanumeric,
+                value: Operand::Literal(Literal::Alphanumeric("INIT".to_string())),
+            }],
+        };
+        let gcm = make_simple_gcm();
+        generate_initialize(&mut w, &init, &gcm);
+        let output = w.finish();
+        // Alpha child should get the replacement value
+        assert!(output.contains("ws.ws_alpha"), "should target alpha child: {output}");
+        assert!(output.contains("move_alphanumeric_literal"), "should use move_alphanumeric_literal: {output}");
+        assert!(output.contains("INIT"), "should contain value INIT: {output}");
+        // Numeric child should NOT be touched
+        assert!(!output.contains("ws_num"), "should NOT touch numeric child: {output}");
+    }
+
+    // -----------------------------------------------------------------------
+    // generate_move: CORRESPONDING expansion
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn move_corresponding_expands_matching_children() {
+        let mut gcm = GroupChildMap::new();
+        gcm.insert("WS-SRC".to_string(), vec![
+            ("WS-NAME".to_string(), false),
+            ("WS-AMT".to_string(), true),
+            ("WS-CODE".to_string(), false),
+        ]);
+        gcm.insert("WS-DST".to_string(), vec![
+            ("WS-NAME".to_string(), false),
+            ("WS-AMT".to_string(), true),
+            ("WS-EXTRA".to_string(), false),
+        ]);
+
+        let mut w = RustWriter::new();
+        let stmt = MoveStatement {
+            corresponding: true,
+            source: Operand::DataRef(make_ref("WS-SRC")),
+            destinations: vec![make_ref("WS-DST")],
+        };
+        generate_move(&mut w, &stmt, &gcm);
+        let output = w.finish();
+        // WS-NAME and WS-AMT match between src and dst
+        assert!(output.contains("ws_name"), "should move matching WS-NAME: {output}");
+        assert!(output.contains("ws_amt"), "should move matching WS-AMT: {output}");
+        // WS-CODE (src-only) and WS-EXTRA (dst-only) should NOT appear in moves
+        assert!(!output.contains("ws_code"), "should NOT move non-matching WS-CODE: {output}");
+        assert!(!output.contains("ws_extra"), "should NOT move non-matching WS-EXTRA: {output}");
+    }
+
+    #[test]
+    fn move_corresponding_no_matches() {
+        let mut gcm = GroupChildMap::new();
+        gcm.insert("WS-SRC".to_string(), vec![
+            ("WS-A".to_string(), false),
+        ]);
+        gcm.insert("WS-DST".to_string(), vec![
+            ("WS-B".to_string(), false),
+        ]);
+
+        let mut w = RustWriter::new();
+        let stmt = MoveStatement {
+            corresponding: true,
+            source: Operand::DataRef(make_ref("WS-SRC")),
+            destinations: vec![make_ref("WS-DST")],
+        };
+        generate_move(&mut w, &stmt, &gcm);
+        let output = w.finish();
+        // No matching children -> no moves generated
+        assert!(output.trim().is_empty() || output.contains("// MOVE CORR"), "should generate no moves for non-matching: {output}");
+    }
+
+    // -----------------------------------------------------------------------
+    // condition_expr: 88-level condition name expansion
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn condition_name_88_expansion() {
+        let mut cmap = ConditionMap::new();
+        cmap.insert("STATUS-ACTIVE".to_string(), ConditionInfo {
+            parent_field: "ws.ws_status".to_string(),
+            parent_is_numeric: false,
+            values: vec![ConditionValue::Single(Literal::Alphanumeric("AC".to_string()))],
+        });
+
+        let cond = Condition::ConditionName(make_ref("STATUS-ACTIVE"));
+        let expr = condition_expr(&cond, &cmap);
+        assert!(expr.contains("ws_status"), "should reference parent field: {expr}");
+        assert!(expr.contains("AC"), "should contain condition value: {expr}");
+    }
+
+    #[test]
+    fn condition_name_88_numeric() {
+        let mut cmap = ConditionMap::new();
+        cmap.insert("FLAG-ON".to_string(), ConditionInfo {
+            parent_field: "ws.ws_flag".to_string(),
+            parent_is_numeric: true,
+            values: vec![ConditionValue::Single(Literal::Numeric("1".to_string()))],
+        });
+
+        let cond = Condition::ConditionName(make_ref("FLAG-ON"));
+        let expr = condition_expr(&cond, &cmap);
+        assert!(expr.contains("ws_flag"), "should reference parent field: {expr}");
+        assert!(expr.contains("to_decimal()"), "should use to_decimal for numeric: {expr}");
+    }
+
+    // -----------------------------------------------------------------------
+    // EVALUATE TRUE with condition name in WHEN
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn evaluate_true_when_condition_name() {
+        let mut cmap = ConditionMap::new();
+        cmap.insert("STATUS-ACTIVE".to_string(), ConditionInfo {
+            parent_field: "ws.ws_status".to_string(),
+            parent_is_numeric: false,
+            values: vec![ConditionValue::Single(Literal::Alphanumeric("AC".to_string()))],
+        });
+
+        let mut w = RustWriter::new();
+        let eval = EvaluateStatement {
+            subjects: vec![EvaluateSubject::Bool(true)],
+            when_branches: vec![WhenBranch {
+                values: vec![WhenValue::Value(Operand::DataRef(make_ref("STATUS-ACTIVE")))],
+                body: vec![Statement::Display(DisplayStatement {
+                    items: vec![Operand::Literal(Literal::Alphanumeric("ACTIVE".to_string()))],
+                    upon: DisplayTarget::Sysout,
+                    no_advancing: false,
+                })],
+            }],
+            when_other: Vec::new(),
+        };
+        generate_evaluate(&mut w, &eval, &cmap, &[], &HashMap::new(), &HashMap::new(), &HashMap::new());
+        let output = w.finish();
+        // Should expand the condition name, not reference it as a data field
+        assert!(output.contains("ws_status") && output.contains("AC"),
+            "should expand 88-level condition in EVALUATE TRUE: {output}");
     }
 }
