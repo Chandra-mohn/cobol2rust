@@ -37,12 +37,13 @@ pub use cobol_types::{
 pub use cobol_move::{
     MoveDiagnostic, MoveWarning, MoveWarningKind, cobol_initialize, cobol_initialize_group,
     cobol_initialize_numeric, cobol_move, cobol_move_numeric, is_legal_move,
-    move_corresponding, move_corresponding_by_name,
+    move_alphanumeric_literal, move_corresponding, move_corresponding_by_name,
+    move_numeric_literal,
 };
 
 // Arithmetic verbs
 pub use cobol_arithmetic::{
-    ArithResult, cobol_add, cobol_add_giving, cobol_compute, cobol_divide,
+    ArithResult, cobol_add, cobol_add_giving, cobol_checked_div, cobol_compute, cobol_divide,
     cobol_divide_by_giving, cobol_divide_giving, cobol_multiply, cobol_multiply_giving,
     cobol_subtract, cobol_subtract_giving, store_arithmetic_result,
 };
@@ -64,8 +65,9 @@ pub use cobol_sort::{
     sort_with_procedures,
 };
 
-// Decimal type and macro
+// Decimal type, macro, and conversion traits
 pub use rust_decimal::Decimal;
+pub use rust_decimal::prelude::ToPrimitive;
 pub use rust_decimal_macros::dec;
 
 // INSPECT verb
@@ -89,7 +91,7 @@ pub use crate::intrinsics::{
     cobol_function_cos, cobol_function_factorial, cobol_function_integer,
     cobol_function_integer_part, cobol_function_length, cobol_function_log,
     cobol_function_log10, cobol_function_max, cobol_function_min, cobol_function_mod,
-    cobol_function_numval, cobol_function_numval_c, cobol_function_ord,
+    cobol_function_char, cobol_function_numval, cobol_function_numval_c, cobol_function_ord,
     cobol_function_ord_max, cobol_function_ord_min, cobol_function_random,
     cobol_function_rem, cobol_function_sin, cobol_function_sqrt, cobol_function_tan,
     // String
@@ -107,8 +109,20 @@ pub use crate::call::{
     call_param_by_ref, call_param_by_value, call_param_omitted, cobol_call, cobol_cancel,
 };
 
+// Decimal-to-usize helper for array subscript conversion
+#[inline]
+pub fn decimal_to_usize(d: Decimal) -> usize {
+    // Truncate to integer, then convert; default to 0 on failure
+    let truncated = d.trunc();
+    let s = truncated.to_string();
+    s.parse::<usize>().unwrap_or(0)
+}
+
 // Runtime program lifecycle
-pub use crate::display::{accept_from_sysin, display_upon_syserr, display_upon_sysout};
+pub use crate::display::{
+    accept_date, accept_date_yyyymmdd, accept_day, accept_day_of_week, accept_day_yyyyddd,
+    accept_from_sysin, accept_time, display_upon_syserr, display_upon_sysout,
+};
 pub use crate::perform_stack::PerformStack;
 pub use crate::program::CobolProgram;
 pub use crate::special_regs;

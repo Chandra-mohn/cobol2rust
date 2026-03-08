@@ -1,3 +1,5 @@
+use std::ops::{Index, IndexMut};
+
 use cobol_core::category::DataCategory;
 use cobol_core::traits::CobolField;
 
@@ -59,6 +61,19 @@ impl<T: CobolField> CobolArray<T> {
         self.elements.iter_mut()
     }
 
+}
+
+impl<T: CobolField> Index<usize> for CobolArray<T> {
+    type Output = T;
+    fn index(&self, index: usize) -> &T {
+        &self.elements[index]
+    }
+}
+
+impl<T: CobolField> IndexMut<usize> for CobolArray<T> {
+    fn index_mut(&mut self, index: usize) -> &mut T {
+        &mut self.elements[index]
+    }
 }
 
 impl<T: CobolField + Clone> CobolArray<T> {

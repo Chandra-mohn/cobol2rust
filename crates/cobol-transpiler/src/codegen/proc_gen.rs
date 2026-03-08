@@ -5,9 +5,17 @@
 
 use std::collections::HashMap;
 
-use crate::ast::{ConditionValue, DataEntry, PicClause, PicCategory, ProcedureDivision, Paragraph, Statement, MoveStatement, Operand, Literal, FigurativeConstant, DisplayStatement, AddStatement, SubtractStatement, MultiplyStatement, DivideStatement, DivideDirection, ComputeStatement, IfStatement, EvaluateStatement, EvaluateSubject, WhenValue, PerformStatement, PerformLoopType, GoToStatement, InitializeStatement, CallStatement, PassingMode, CancelStatement, AcceptStatement, AcceptSource, OpenStatement, OpenMode, CloseStatement, ReadStatement, WriteStatement, Advancing, RewriteStatement, DeleteStatement, StartStatement, ComparisonOp, SetStatement, SetAction, DataReference, Subscript, ArithExpr, ArithOp, Condition, ClassCondition, SignCondition, SortStatement, SortInput, SortOutput, MergeStatement, ReleaseStatement, ReturnStatement, InspectStatement, InspectWhat, StringStatement, StringDelimiter, UnstringStatement};
+use crate::ast::{ConditionValue, DataEntry, PicClause, PicCategory, ProcedureDivision, Paragraph, Statement, MoveStatement, Operand, Literal, FigurativeConstant, DisplayStatement, AddStatement, SubtractStatement, MultiplyStatement, DivideStatement, DivideDirection, ComputeStatement, IfStatement, EvaluateStatement, EvaluateSubject, WhenValue, PerformStatement, PerformLoopType, GoToStatement, InitializeStatement, CallStatement, PassingMode, CancelStatement, AcceptStatement, AcceptSource, OpenStatement, OpenMode, CloseStatement, ReadStatement, WriteStatement, Advancing, RewriteStatement, DeleteStatement, StartStatement, ComparisonOp, SetStatement, SetAction, DataReference, Subscript, ArithExpr, ArithOp, Condition, ClassCondition, SignCondition, SortStatement, SortInput, SortOutput, MergeStatement, ReleaseStatement, ReturnStatement, InspectStatement, InspectWhat, StringStatement, StringDelimiter, UnstringStatement, FunctionCall};
 use crate::codegen::data_gen::cobol_to_rust_name;
 use crate::codegen::rust_writer::RustWriter;
+
+/// Maps record names (uppercase) to their parent file names (uppercase).
+/// Built from `FileDescription` entries so WRITE can find the correct file handle.
+pub type RecordFileMap = HashMap<String, String>;
+
+/// Maps SD record field names (uppercase) to (byte_offset, byte_length).
+/// Used by SORT/MERGE codegen to emit correct `SortKeySpec::new(...)`.
+pub type SortFieldMap = HashMap<String, (usize, usize)>;
 
 /// Information about an 88-level condition for codegen.
 #[derive(Debug, Clone)]
@@ -83,6 +91,8 @@ pub fn generate_procedure_division(
     w: &mut RustWriter,
     proc_div: &ProcedureDivision,
     cmap: &ConditionMap,
+    record_file_map: &RecordFileMap,
+    sort_field_map: &SortFieldMap,
 ) {
     // Build flat paragraph index table (standalone paragraphs first, then section paragraphs)
     let mut para_table: Vec<ParagraphIndex> = Vec::new();
@@ -145,24 +155,42 @@ pub fn generate_procedure_division(
 
     // Generate paragraph functions (outside sections)
     for para in &proc_div.paragraphs {
-        generate_paragraph_fn(w, para, cmap, &para_table);
+        generate_paragraph_fn(w, para, cmap, &para_table, record_file_map, sort_field_map);
     }
 
-    // Generate section paragraphs
+    // Generate section paragraphs and section wrapper functions
     for section in &proc_div.sections {
         w.line(&format!(
             "// --- Section: {} ---",
             section.name
         ));
         w.blank_line();
+
+        // Generate individual paragraph functions
         for para in &section.paragraphs {
-            generate_paragraph_fn(w, para, cmap, &para_table);
+            generate_paragraph_fn(w, para, cmap, &para_table, record_file_map, sort_field_map);
+        }
+
+        // Generate section-level wrapper function that calls all paragraphs
+        if !section.paragraphs.is_empty() {
+            let section_fn = cobol_to_rust_name(&section.name, "");
+            w.line("#[allow(non_snake_case, unused_variables)]");
+            w.open_block(&format!(
+                "fn {section_fn}(ws: &mut WorkingStorage, ctx: &mut ProgramContext) {{"
+            ));
+            for para in &section.paragraphs {
+                let para_fn = cobol_to_rust_name(&para.name, "");
+                w.line(&format!("{para_fn}(ws, ctx);"));
+                w.line("if ctx.stopped || ctx.exit_program || ctx.goto_target.is_some() { return; }");
+            }
+            w.close_block("}");
+            w.blank_line();
         }
     }
 }
 
 /// Generate a Rust function for a single paragraph.
-fn generate_paragraph_fn(w: &mut RustWriter, para: &Paragraph, cmap: &ConditionMap, ptable: &[ParagraphIndex]) {
+fn generate_paragraph_fn(w: &mut RustWriter, para: &Paragraph, cmap: &ConditionMap, ptable: &[ParagraphIndex], rfm: &RecordFileMap, sfm: &SortFieldMap) {
     let fn_name = cobol_to_rust_name(&para.name, "");
     w.line("#[allow(non_snake_case, unused_variables)]");
     w.open_block(&format!(
@@ -171,7 +199,7 @@ fn generate_paragraph_fn(w: &mut RustWriter, para: &Paragraph, cmap: &ConditionM
 
     for sentence in &para.sentences {
         for stmt in &sentence.statements {
-            generate_statement(w, stmt, cmap, ptable);
+            generate_statement(w, stmt, cmap, ptable, rfm, sfm);
         }
     }
 
@@ -180,7 +208,7 @@ fn generate_paragraph_fn(w: &mut RustWriter, para: &Paragraph, cmap: &ConditionM
 }
 
 /// Generate Rust code for a single statement.
-fn generate_statement(w: &mut RustWriter, stmt: &Statement, cmap: &ConditionMap, ptable: &[ParagraphIndex]) {
+fn generate_statement(w: &mut RustWriter, stmt: &Statement, cmap: &ConditionMap, ptable: &[ParagraphIndex], rfm: &RecordFileMap, sfm: &SortFieldMap) {
     match stmt {
         Statement::Move(m) => generate_move(w, m),
         Statement::Display(d) => generate_display(w, d),
@@ -189,9 +217,9 @@ fn generate_statement(w: &mut RustWriter, stmt: &Statement, cmap: &ConditionMap,
         Statement::Multiply(m) => generate_multiply(w, m),
         Statement::Divide(d) => generate_divide(w, d),
         Statement::Compute(c) => generate_compute(w, c),
-        Statement::If(i) => generate_if(w, i, cmap, ptable),
-        Statement::Evaluate(e) => generate_evaluate(w, e, cmap, ptable),
-        Statement::Perform(p) => generate_perform(w, p, cmap, ptable),
+        Statement::If(i) => generate_if(w, i, cmap, ptable, rfm, sfm),
+        Statement::Evaluate(e) => generate_evaluate(w, e, cmap, ptable, rfm, sfm),
+        Statement::Perform(p) => generate_perform(w, p, cmap, ptable, rfm, sfm),
         Statement::GoTo(g) => generate_goto(w, g),
         Statement::StopRun => {
             w.line("ctx.stop_run();");
@@ -209,24 +237,24 @@ fn generate_statement(w: &mut RustWriter, stmt: &Statement, cmap: &ConditionMap,
         }
         Statement::ExitParagraph | Statement::ExitSection => w.line("return;"),
         Statement::Initialize(init) => generate_initialize(w, init),
-        Statement::Call(call) => generate_call(w, call, cmap, ptable),
+        Statement::Call(call) => generate_call(w, call, cmap, ptable, rfm, sfm),
         Statement::Cancel(cancel) => generate_cancel(w, cancel),
         Statement::Accept(acc) => generate_accept(w, acc),
         Statement::Open(open) => generate_open(w, open),
         Statement::Close(close) => generate_close(w, close),
-        Statement::Read(read) => generate_read(w, read, cmap, ptable),
-        Statement::Write(write) => generate_write(w, write, cmap, ptable),
-        Statement::Rewrite(rw) => generate_rewrite(w, rw, cmap, ptable),
-        Statement::Delete(del) => generate_delete(w, del, cmap, ptable),
-        Statement::Sort(sort) => generate_sort(w, sort, cmap),
-        Statement::Merge(merge) => generate_merge(w, merge, cmap),
+        Statement::Read(read) => generate_read(w, read, cmap, ptable, rfm, sfm),
+        Statement::Write(write) => generate_write(w, write, cmap, ptable, rfm, sfm),
+        Statement::Rewrite(rw) => generate_rewrite(w, rw, cmap, ptable, rfm, sfm),
+        Statement::Delete(del) => generate_delete(w, del, cmap, ptable, rfm, sfm),
+        Statement::Sort(sort) => generate_sort(w, sort, cmap, sfm),
+        Statement::Merge(merge) => generate_merge(w, merge, cmap, sfm),
         Statement::Release(rel) => generate_release(w, rel),
-        Statement::Return(ret) => generate_return(w, ret, cmap, ptable),
+        Statement::Return(ret) => generate_return(w, ret, cmap, ptable, rfm, sfm),
         Statement::Inspect(insp) => generate_inspect(w, insp, cmap),
-        Statement::String(s) => generate_string(w, s, cmap, ptable),
-        Statement::Unstring(u) => generate_unstring(w, u, cmap, ptable),
+        Statement::String(s) => generate_string(w, s, cmap, ptable, rfm, sfm),
+        Statement::Unstring(u) => generate_unstring(w, u, cmap, ptable, rfm, sfm),
         Statement::Set(set) => generate_set(w, set, cmap),
-        Statement::Start(start) => generate_start(w, start, cmap, ptable),
+        Statement::Start(start) => generate_start(w, start, cmap, ptable, rfm, sfm),
         Statement::Alter(_) => {
             w.line(&format!("// TODO: unsupported statement: {stmt:?}"));
         }
@@ -252,7 +280,7 @@ fn generate_move(w: &mut RustWriter, m: &MoveStatement) {
         for dest in &m.destinations {
             let dest_expr = data_ref_base_expr(dest);
             w.line(&format!(
-                "cobol_move_corresponding(&{src}, &mut {dest_expr}, &ctx.config);"
+                "move_corresponding(&{src}, &mut {dest_expr}, &ctx.config);"
             ));
         }
     } else {
@@ -266,20 +294,75 @@ fn generate_move(w: &mut RustWriter, m: &MoveStatement) {
                 if let Some(ref len) = rm.length {
                     let length = ref_mod_index_expr(len);
                     w.line(&format!(
-                        "ref_mod_write(&{src_bytes}, &mut {dest_base}, {offset}, {length});"
+                        "ref_mod_write({src_bytes}, &mut {dest_base}, {offset}, {length});"
                     ));
                 } else {
                     w.line(&format!(
-                        "ref_mod_write_to_end(&{src_bytes}, &mut {dest_base}, {offset});"
+                        "ref_mod_write_to_end({src_bytes}, &mut {dest_base}, {offset});"
                     ));
                 }
             } else {
-                // Normal MOVE
-                let src = operand_expr(&m.source);
+                // Normal MOVE -- dispatch based on source type
                 let dest_expr = data_ref_base_expr(dest);
-                w.line(&format!(
-                    "cobol_move(&{src}, &mut {dest_expr}, &ctx.config);"
-                ));
+                match &m.source {
+                    Operand::Literal(Literal::Numeric(n)) => {
+                        w.line(&format!(
+                            "move_numeric_literal(\"{n}\".parse::<Decimal>().unwrap(), &mut {dest_expr}, &ctx.config);"
+                        ));
+                    }
+                    Operand::Literal(Literal::Alphanumeric(s)) => {
+                        let escaped = s.replace('\\', "\\\\").replace('"', "\\\"");
+                        w.line(&format!(
+                            "move_alphanumeric_literal(b\"{escaped}\", &mut {dest_expr}, &ctx.config);"
+                        ));
+                    }
+                    Operand::Literal(Literal::Figurative(fig)) => {
+                        match fig {
+                            FigurativeConstant::All(pattern) => {
+                                // ALL "x" -- fill field by repeating the pattern
+                                let escaped = pattern.replace('\\', "\\\\").replace('"', "\\\"");
+                                w.line(&format!(
+                                    "{{ let pat = b\"{escaped}\"; let mut buf = Vec::new(); while buf.len() < {dest_expr}.as_bytes().len() {{ buf.extend_from_slice(pat); }} buf.truncate({dest_expr}.as_bytes().len()); {dest_expr}.set_raw_bytes(&buf); }}"
+                                ));
+                            }
+                            _ => {
+                                let fig_expr = match fig {
+                                    FigurativeConstant::Spaces => "FigurativeConstant::Spaces",
+                                    FigurativeConstant::Zeros => "FigurativeConstant::Zeros",
+                                    FigurativeConstant::HighValues => "FigurativeConstant::HighValues",
+                                    FigurativeConstant::LowValues => "FigurativeConstant::LowValues",
+                                    FigurativeConstant::Quotes => "FigurativeConstant::Quotes",
+                                    FigurativeConstant::Nulls => "FigurativeConstant::Nulls",
+                                    FigurativeConstant::All(_) => unreachable!(),
+                                };
+                                w.line(&format!(
+                                    "{fig_expr}.fill_field(&mut {dest_expr});"
+                                ));
+                            }
+                        }
+                    }
+                    Operand::Function(f) => {
+                        // Intrinsic function results -- handle by return type
+                        let (_param_kind, return_kind) = classify_intrinsic(&f.name);
+                        let call = generate_intrinsic_call(f);
+                        if return_kind == "bytes" {
+                            w.line(&format!(
+                                "{{ let _fv = {call}; {dest_expr}.set_raw_bytes(&_fv); }}"
+                            ));
+                        } else {
+                            w.line(&format!(
+                                "move_numeric_literal({call}, &mut {dest_expr}, &ctx.config);"
+                            ));
+                        }
+                    }
+                    _ => {
+                        // DataRef: use cobol_move with trait object
+                        let src = operand_expr(&m.source);
+                        w.line(&format!(
+                            "cobol_move(&{src}, &mut {dest_expr}, &ctx.config);"
+                        ));
+                    }
+                }
             }
         }
     }
@@ -291,6 +374,10 @@ fn operand_to_source_bytes(op: &Operand) -> String {
         Operand::Literal(Literal::Alphanumeric(s)) => format!("b\"{s}\""),
         Operand::Literal(Literal::Numeric(n)) => format!("b\"{n}\""),
         Operand::Literal(Literal::Figurative(FigurativeConstant::Zeros)) => "b\"0\"".to_string(),
+        Operand::Literal(Literal::Figurative(FigurativeConstant::All(s))) => {
+            let escaped = s.replace('\\', "\\\\").replace('"', "\\\"");
+            format!("b\"{escaped}\"")
+        }
         Operand::Literal(Literal::Figurative(_)) => "b\" \"".to_string(),
         Operand::DataRef(dr) => {
             if let Some(rm) = &dr.ref_mod {
@@ -308,14 +395,7 @@ fn operand_to_source_bytes(op: &Operand) -> String {
                 format!("{expr}.as_bytes()")
             }
         }
-        Operand::Function(f) => {
-            let args: Vec<String> = f.arguments.iter().map(operand_expr).collect();
-            format!(
-                "cobol_function_{}({}).as_bytes()",
-                f.name.to_lowercase().replace('-', "_"),
-                args.join(", ")
-            )
-        }
+        Operand::Function(f) => generate_intrinsic_call_bytes(f),
     }
 }
 
@@ -460,9 +540,9 @@ fn generate_divide(w: &mut RustWriter, d: &DivideStatement) {
             ));
         }
     } else {
-        let into_field = d.into.first().map_or_else(|| "0".to_string(), |t| data_ref_expr(&t.field));
         match d.direction {
             DivideDirection::Into => {
+                let into_field = d.into.first().map_or_else(|| "0".to_string(), |t| data_ref_expr(&t.field));
                 // DIVIDE x INTO y GIVING z -> cobol_divide_giving(x, y, z, remainder, rounded, config)
                 for target in &d.giving {
                     let dest = data_ref_expr(&target.field);
@@ -474,11 +554,15 @@ fn generate_divide(w: &mut RustWriter, d: &DivideStatement) {
             }
             DivideDirection::By => {
                 // DIVIDE x BY y GIVING z -> cobol_divide_by_giving(x, y, z, rounded, config)
+                let by_field = d.by_operand.as_ref().map_or_else(
+                    || "0".to_string(),
+                    |op| operand_numeric_expr(op),
+                );
                 for target in &d.giving {
                     let dest = data_ref_expr(&target.field);
                     let r = rounded_str(target.rounded);
                     w.line(&format!(
-                        "cobol_divide_by_giving(&{operand}, &{into_field}, &mut {dest}, {r}, &ctx.config);"
+                        "cobol_divide_by_giving(&{operand}, &{by_field}, &mut {dest}, {r}, &ctx.config);"
                     ));
                 }
             }
@@ -497,11 +581,11 @@ fn generate_compute(w: &mut RustWriter, c: &ComputeStatement) {
     }
 }
 
-fn generate_if(w: &mut RustWriter, i: &IfStatement, cmap: &ConditionMap, ptable: &[ParagraphIndex]) {
+fn generate_if(w: &mut RustWriter, i: &IfStatement, cmap: &ConditionMap, ptable: &[ParagraphIndex], rfm: &RecordFileMap, sfm: &SortFieldMap) {
     let cond = condition_expr(&i.condition, cmap);
     w.open_block(&format!("if {cond} {{"));
     for stmt in &i.then_body {
-        generate_statement(w, stmt, cmap, ptable);
+        generate_statement(w, stmt, cmap, ptable, rfm, sfm);
     }
     if i.else_body.is_empty() {
         w.close_block("}");
@@ -509,32 +593,44 @@ fn generate_if(w: &mut RustWriter, i: &IfStatement, cmap: &ConditionMap, ptable:
         w.dedent();
         w.open_block("} else {");
         for stmt in &i.else_body {
-            generate_statement(w, stmt, cmap, ptable);
+            generate_statement(w, stmt, cmap, ptable, rfm, sfm);
         }
         w.close_block("}");
     }
 }
 
-fn generate_evaluate(w: &mut RustWriter, e: &EvaluateStatement, cmap: &ConditionMap, ptable: &[ParagraphIndex]) {
-    let subject = if let Some(subj) = e.subjects.first() {
-        match subj {
-            EvaluateSubject::Expr(op) => operand_expr(op),
-            EvaluateSubject::Bool(b) => b.to_string(),
-        }
-    } else {
-        "true".to_string()
-    };
+fn generate_evaluate(w: &mut RustWriter, e: &EvaluateStatement, cmap: &ConditionMap, ptable: &[ParagraphIndex], rfm: &RecordFileMap, sfm: &SortFieldMap) {
+    let subject_op = e.subjects.first().and_then(|subj| match subj {
+        EvaluateSubject::Expr(op) => Some(op.clone()),
+        EvaluateSubject::Bool(_) => None,
+    });
+    let subject_is_true = e.subjects.first().is_none_or(|s| matches!(s, EvaluateSubject::Bool(true)));
 
     for (i, branch) in e.when_branches.iter().enumerate() {
         let keyword = if i == 0 { "if" } else { "} else if" };
         let values: Vec<String> = branch.values.iter().map(|v| match v {
-            WhenValue::Value(op) => format!("{subject} == {}", operand_expr(op)),
+            WhenValue::Value(op) => {
+                if let Some(ref subj_op) = subject_op {
+                    // Use smart comparison dispatch
+                    generate_comparison_expr(subj_op, ComparisonOp::Equal, op)
+                } else {
+                    // EVALUATE TRUE/FALSE: WHEN values are conditions
+                    let val = operand_expr(op);
+                    if subject_is_true {
+                        format!("({val})")
+                    } else {
+                        format!("!({val})")
+                    }
+                }
+            }
             WhenValue::Range { low, high } => {
-                format!(
-                    "{subject} >= {} && {subject} <= {}",
-                    operand_expr(low),
-                    operand_expr(high)
-                )
+                if let Some(ref subj_op) = subject_op {
+                    let lo = generate_comparison_expr(subj_op, ComparisonOp::GreaterOrEqual, low);
+                    let hi = generate_comparison_expr(subj_op, ComparisonOp::LessOrEqual, high);
+                    format!("{lo} && {hi}")
+                } else {
+                    "true".to_string()
+                }
             }
             WhenValue::Condition(c) => condition_expr(c, cmap),
             WhenValue::Any => "true".to_string(),
@@ -550,7 +646,7 @@ fn generate_evaluate(w: &mut RustWriter, e: &EvaluateStatement, cmap: &Condition
         }
         w.open_block(&format!("{keyword} {cond} {{"));
         for stmt in &branch.body {
-            generate_statement(w, stmt, cmap, ptable);
+            generate_statement(w, stmt, cmap, ptable, rfm, sfm);
         }
     }
 
@@ -558,7 +654,7 @@ fn generate_evaluate(w: &mut RustWriter, e: &EvaluateStatement, cmap: &Condition
         w.dedent();
         w.open_block("} else {");
         for stmt in &e.when_other {
-            generate_statement(w, stmt, cmap, ptable);
+            generate_statement(w, stmt, cmap, ptable, rfm, sfm);
         }
     }
 
@@ -567,7 +663,7 @@ fn generate_evaluate(w: &mut RustWriter, e: &EvaluateStatement, cmap: &Condition
     }
 }
 
-fn generate_perform(w: &mut RustWriter, p: &PerformStatement, cmap: &ConditionMap, ptable: &[ParagraphIndex]) {
+fn generate_perform(w: &mut RustWriter, p: &PerformStatement, cmap: &ConditionMap, ptable: &[ParagraphIndex], rfm: &RecordFileMap, sfm: &SortFieldMap) {
     match &p.loop_type {
         PerformLoopType::Once => {
             if let Some(ref target) = p.target {
@@ -580,15 +676,15 @@ fn generate_perform(w: &mut RustWriter, p: &PerformStatement, cmap: &ConditionMa
             } else {
                 // Inline perform (once)
                 for stmt in &p.body {
-                    generate_statement(w, stmt, cmap, ptable);
+                    generate_statement(w, stmt, cmap, ptable, rfm, sfm);
                 }
             }
         }
         PerformLoopType::Times(count) => {
-            let count_expr = operand_expr(count);
+            let count_usize = operand_to_usize_expr(count);
             if let Some(ref target) = p.target {
                 w.open_block(&format!(
-                    "for _cobol_i in 0..{count_expr} as usize {{"
+                    "for _cobol_i in 0..{count_usize} {{"
                 ));
                 if let Some(ref thru_name) = p.thru {
                     generate_perform_thru_inline(w, &target.name, thru_name, ptable);
@@ -599,10 +695,10 @@ fn generate_perform(w: &mut RustWriter, p: &PerformStatement, cmap: &ConditionMa
                 w.close_block("}");
             } else {
                 w.open_block(&format!(
-                    "for _cobol_i in 0..{count_expr} as usize {{"
+                    "for _cobol_i in 0..{count_usize} {{"
                 ));
                 for stmt in &p.body {
-                    generate_statement(w, stmt, cmap, ptable);
+                    generate_statement(w, stmt, cmap, ptable, rfm, sfm);
                 }
                 w.close_block("}");
             }
@@ -613,9 +709,9 @@ fn generate_perform(w: &mut RustWriter, p: &PerformStatement, cmap: &ConditionMa
         } => {
             let cond = condition_expr(condition, cmap);
             if *test_before {
-                generate_perform_until_before(w, &cond, p, cmap, ptable);
+                generate_perform_until_before(w, &cond, p, cmap, ptable, rfm, sfm);
             } else {
-                generate_perform_until_after(w, &cond, p, cmap, ptable);
+                generate_perform_until_after(w, &cond, p, cmap, ptable, rfm, sfm);
             }
         }
         PerformLoopType::Varying {
@@ -650,7 +746,7 @@ fn generate_perform(w: &mut RustWriter, p: &PerformStatement, cmap: &ConditionMa
                 }
             } else {
                 for stmt in &p.body {
-                    generate_statement(w, stmt, cmap, ptable);
+                    generate_statement(w, stmt, cmap, ptable, rfm, sfm);
                 }
             }
 
@@ -697,7 +793,7 @@ fn generate_perform_thru_inline(w: &mut RustWriter, target_name: &str, thru_name
     }
 }
 
-fn generate_perform_until_before(w: &mut RustWriter, cond: &str, p: &PerformStatement, cmap: &ConditionMap, ptable: &[ParagraphIndex]) {
+fn generate_perform_until_before(w: &mut RustWriter, cond: &str, p: &PerformStatement, cmap: &ConditionMap, ptable: &[ParagraphIndex], rfm: &RecordFileMap, sfm: &SortFieldMap) {
     w.open_block(&format!("while !({cond}) {{"));
     if let Some(ref target) = p.target {
         if let Some(ref thru_name) = p.thru {
@@ -708,13 +804,13 @@ fn generate_perform_until_before(w: &mut RustWriter, cond: &str, p: &PerformStat
         }
     } else {
         for stmt in &p.body {
-            generate_statement(w, stmt, cmap, ptable);
+            generate_statement(w, stmt, cmap, ptable, rfm, sfm);
         }
     }
     w.close_block("}");
 }
 
-fn generate_perform_until_after(w: &mut RustWriter, cond: &str, p: &PerformStatement, cmap: &ConditionMap, ptable: &[ParagraphIndex]) {
+fn generate_perform_until_after(w: &mut RustWriter, cond: &str, p: &PerformStatement, cmap: &ConditionMap, ptable: &[ParagraphIndex], rfm: &RecordFileMap, sfm: &SortFieldMap) {
     w.open_block("loop {");
     if let Some(ref target) = p.target {
         if let Some(ref thru_name) = p.thru {
@@ -725,7 +821,7 @@ fn generate_perform_until_after(w: &mut RustWriter, cond: &str, p: &PerformState
         }
     } else {
         for stmt in &p.body {
-            generate_statement(w, stmt, cmap, ptable);
+            generate_statement(w, stmt, cmap, ptable, rfm, sfm);
         }
     }
     w.open_block(&format!("if {cond} {{"));
@@ -768,12 +864,12 @@ fn generate_initialize(w: &mut RustWriter, init: &InitializeStatement) {
     for target in &init.targets {
         let dest = data_ref_expr(target);
         w.line(&format!(
-            "cobol_initialize(&mut {dest}, &ctx.config);"
+            "cobol_initialize(&mut {dest});"
         ));
     }
 }
 
-fn generate_call(w: &mut RustWriter, call: &CallStatement, cmap: &ConditionMap, ptable: &[ParagraphIndex]) {
+fn generate_call(w: &mut RustWriter, call: &CallStatement, cmap: &ConditionMap, ptable: &[ParagraphIndex], rfm: &RecordFileMap, sfm: &SortFieldMap) {
     let program = match &call.program {
         Operand::Literal(Literal::Alphanumeric(s)) => format!("\"{s}\""),
         other => operand_expr(other),
@@ -798,10 +894,10 @@ fn generate_call(w: &mut RustWriter, call: &CallStatement, cmap: &ConditionMap, 
                         let expr = data_ref_base_expr_from_operand(op);
                         // BY CONTENT: create a temporary copy
                         w.line(&format!(
-                            "let mut _cp{i}_tmp = {expr}.clone_boxed();"
+                            "let mut _cp{i}_tmp = {expr}.clone();"
                         ));
                         w.line(&format!(
-                            "let mut _cp{i} = call_param_by_content(_cp{i}_tmp.as_mut());"
+                            "let mut _cp{i} = call_param_by_content(&mut _cp{i}_tmp);"
                         ));
                     }
                 }
@@ -846,14 +942,14 @@ fn generate_call(w: &mut RustWriter, call: &CallStatement, cmap: &ConditionMap, 
         w.open_block("Ok(rc) => {");
         w.line("ctx.return_code = rc;");
         for stmt in &call.not_on_exception {
-            generate_statement(w, stmt, cmap, ptable);
+            generate_statement(w, stmt, cmap, ptable, rfm, sfm);
         }
         w.close_block("}");
 
         // Err path -- ON EXCEPTION
         w.open_block("Err(_e) => {");
         for stmt in &call.on_exception {
-            generate_statement(w, stmt, cmap, ptable);
+            generate_statement(w, stmt, cmap, ptable, rfm, sfm);
         }
         w.close_block("}");
 
@@ -870,7 +966,7 @@ fn generate_call(w: &mut RustWriter, call: &CallStatement, cmap: &ConditionMap, 
     if let Some(ref ret_ref) = call.returning {
         let ret_expr = data_ref_base_expr(ret_ref);
         w.line(&format!(
-            "cobol_move(&PackedDecimal::from_i64(ctx.return_code as i64, 9, 0), &mut {ret_expr}, &ctx.config);"
+            "cobol_move(&{{ let mut _rc = PackedDecimal::new(9, 0, true); _rc.pack(Decimal::from(ctx.return_code)); _rc }}, &mut {ret_expr}, &ctx.config);"
         ));
     }
 
@@ -884,7 +980,7 @@ fn data_ref_base_expr_from_operand(op: &Operand) -> String {
     match op {
         Operand::DataRef(dr) => data_ref_base_expr(dr),
         Operand::Literal(Literal::Alphanumeric(s)) => format!("PicX::new({}, b\"{s}\")", s.len()),
-        Operand::Literal(Literal::Numeric(n)) => format!("dec!({n})"),
+        Operand::Literal(Literal::Numeric(n)) => format!("\"{n}\".parse::<Decimal>().unwrap()"),
         _ => "/* unsupported operand */".to_string(),
     }
 }
@@ -912,7 +1008,7 @@ fn generate_accept(w: &mut RustWriter, acc: &AcceptStatement) {
         AcceptSource::DateYyyyMmDd => "accept_date_yyyymmdd",
         AcceptSource::DayYyyyDdd => "accept_day_yyyyddd",
     };
-    w.line(&format!("ctx.{source}(&mut {target});"));
+    w.line(&format!("{source}(&mut {target});"));
 }
 
 // ---------------------------------------------------------------------------
@@ -929,7 +1025,7 @@ fn generate_open(w: &mut RustWriter, open: &OpenStatement) {
             OpenMode::Extend => "FileOpenMode::Extend",
         };
         w.line(&format!(
-            "ws.{fname}.open({mode}).expect(\"OPEN {}\");",
+            "assert!(ws.{fname}.open({mode}).is_success(), \"OPEN {}\");",
             file.file_name
         ));
     }
@@ -939,15 +1035,16 @@ fn generate_close(w: &mut RustWriter, close: &CloseStatement) {
     for file_name in &close.files {
         let fname = cobol_to_rust_name(file_name, "");
         w.line(&format!(
-            "ws.{fname}.close().expect(\"CLOSE {file_name}\");"
+            "assert!(ws.{fname}.close().is_success(), \"CLOSE {file_name}\");"
         ));
     }
 }
 
-fn generate_read(w: &mut RustWriter, read: &ReadStatement, cmap: &ConditionMap, ptable: &[ParagraphIndex]) {
+#[allow(unused_variables)]
+fn generate_read(w: &mut RustWriter, read: &ReadStatement, cmap: &ConditionMap, ptable: &[ParagraphIndex], rfm: &RecordFileMap, sfm: &SortFieldMap) {
     let fname = cobol_to_rust_name(&read.file_name, "");
 
-    // Determine read call based on whether a KEY is specified
+    // read_next() and read_by_key() both return (FileStatusCode, Option<Vec<u8>>)
     let read_call = if let Some(ref key_ref) = read.key {
         let key_expr = data_ref_expr(key_ref);
         format!("ws.{fname}.read_by_key({key_expr}.as_bytes())")
@@ -955,62 +1052,69 @@ fn generate_read(w: &mut RustWriter, read: &ReadStatement, cmap: &ConditionMap, 
         format!("ws.{fname}.read_next()")
     };
 
-    // If there are AT END / NOT AT END handlers, wrap in match
+    // Generate: let (_status, _data) = <read_call>;
+    // Then branch on _status.is_success()
     if !read.at_end.is_empty() || !read.not_at_end.is_empty() {
-        w.open_block(&format!("match {read_call} {{"));
-
-        // Ok(data) -> NOT AT END path
-        w.open_block("Ok(data) => {");
+        w.open_block("{");
+        w.line(&format!("let (_status, _data) = {read_call};"));
+        w.open_block("if _status.is_success() {");
         if let Some(ref into_ref) = read.into {
             let into_expr = data_ref_expr(into_ref);
+            w.open_block("if let Some(ref data) = _data {");
             w.line(&format!(
-                "{into_expr}.fill_bytes(&data[..{into_expr}.byte_length().min(data.len())]);"
+                "{into_expr}.set_raw_bytes(&data[..{into_expr}.byte_length().min(data.len())]);"
             ));
+            w.close_block("}");
         }
         for stmt in &read.not_at_end {
-            generate_statement(w, stmt, cmap, ptable);
+            generate_statement(w, stmt, cmap, ptable, rfm, sfm);
         }
         w.close_block("}");
 
-        // Err(AT_END) -> AT END path
-        w.open_block("Err(_) => {");
-        for stmt in &read.at_end {
-            generate_statement(w, stmt, cmap, ptable);
+        if !read.at_end.is_empty() {
+            w.open_block("else {");
+            for stmt in &read.at_end {
+                generate_statement(w, stmt, cmap, ptable, rfm, sfm);
+            }
+            w.close_block("}");
         }
-        w.close_block("}");
-
         w.close_block("}");
     } else if !read.invalid_key.is_empty() || !read.not_invalid_key.is_empty() {
-        // INVALID KEY / NOT INVALID KEY (indexed/relative files)
-        w.open_block(&format!("match {read_call} {{"));
-
-        w.open_block("Ok(data) => {");
+        w.open_block("{");
+        w.line(&format!("let (_status, _data) = {read_call};"));
+        w.open_block("if _status.is_success() {");
         if let Some(ref into_ref) = read.into {
             let into_expr = data_ref_expr(into_ref);
+            w.open_block("if let Some(ref data) = _data {");
             w.line(&format!(
-                "{into_expr}.fill_bytes(&data[..{into_expr}.byte_length().min(data.len())]);"
+                "{into_expr}.set_raw_bytes(&data[..{into_expr}.byte_length().min(data.len())]);"
             ));
+            w.close_block("}");
         }
         for stmt in &read.not_invalid_key {
-            generate_statement(w, stmt, cmap, ptable);
+            generate_statement(w, stmt, cmap, ptable, rfm, sfm);
         }
         w.close_block("}");
 
-        w.open_block("Err(_) => {");
-        for stmt in &read.invalid_key {
-            generate_statement(w, stmt, cmap, ptable);
+        if !read.invalid_key.is_empty() {
+            w.open_block("else {");
+            for stmt in &read.invalid_key {
+                generate_statement(w, stmt, cmap, ptable, rfm, sfm);
+            }
+            w.close_block("}");
         }
-        w.close_block("}");
-
         w.close_block("}");
     } else {
         // Simple read with no handler
         if let Some(ref into_ref) = read.into {
             let into_expr = data_ref_expr(into_ref);
-            w.open_block(&format!("if let Ok(data) = {read_call} {{"));
+            w.open_block("{");
+            w.line(&format!("let (_status, _data) = {read_call};"));
+            w.open_block("if let Some(ref data) = _data {");
             w.line(&format!(
-                "{into_expr}.fill_bytes(&data[..{into_expr}.byte_length().min(data.len())]);"
+                "{into_expr}.set_raw_bytes(&data[..{into_expr}.byte_length().min(data.len())]);"
             ));
+            w.close_block("}");
             w.close_block("}");
         } else {
             w.line(&format!("let _ = {read_call};"));
@@ -1018,29 +1122,33 @@ fn generate_read(w: &mut RustWriter, read: &ReadStatement, cmap: &ConditionMap, 
     }
 }
 
-fn generate_write(w: &mut RustWriter, write: &WriteStatement, cmap: &ConditionMap, ptable: &[ParagraphIndex]) {
+fn generate_write(w: &mut RustWriter, write: &WriteStatement, cmap: &ConditionMap, ptable: &[ParagraphIndex], rfm: &RecordFileMap, sfm: &SortFieldMap) {
     let rec = cobol_to_rust_name(&write.record_name, "");
+    // Look up the file handle for this record
+    let file_field = rfm
+        .get(&write.record_name.to_uppercase())
+        .map_or_else(|| format!("{rec}_file"), |f| cobol_to_rust_name(f, ""));
 
     // FROM clause: copy source into record before writing
     if let Some(ref from_ref) = write.from {
         let from_expr = data_ref_expr(from_ref);
         w.line(&format!(
-            "ws.{rec}.fill_bytes(&{from_expr}.as_bytes()[..ws.{rec}.byte_length().min({from_expr}.byte_length())]);"
+            "ws.{rec}.set_raw_bytes(&{from_expr}.as_bytes()[..ws.{rec}.byte_length().min({from_expr}.byte_length())]);"
         ));
     }
 
-    // WRITE the record
-    let write_call = format!("ws.{rec}_file.write_record(ws.{rec}.as_bytes())");
+    // WRITE the record through its file handle
+    let write_call = format!("ws.{file_field}.write_record(ws.{rec}.as_bytes())");
 
     // ADVANCING clause generates print control after write
     if let Some(ref adv) = write.advancing {
         match adv {
             Advancing::Page => {
-                w.line(&format!("{write_call}.expect(\"WRITE {}\");", write.record_name));
+                w.line(&format!("assert!({write_call}.is_success(), \"WRITE {}\");", write.record_name));
                 w.line("print!(\"\\x0C\"); // page eject");
             }
             Advancing::Lines(op) => {
-                w.line(&format!("{write_call}.expect(\"WRITE {}\");", write.record_name));
+                w.line(&format!("assert!({write_call}.is_success(), \"WRITE {}\");", write.record_name));
                 let lines = operand_expr(op);
                 w.open_block(&format!("for _ in 0..{lines} {{"));
                 w.line("println!();");
@@ -1049,86 +1157,93 @@ fn generate_write(w: &mut RustWriter, write: &WriteStatement, cmap: &ConditionMa
         }
     } else if !write.invalid_key.is_empty() || !write.not_invalid_key.is_empty() {
         // INVALID KEY / NOT INVALID KEY
-        w.open_block(&format!("match {write_call} {{"));
-
-        w.open_block("Ok(()) => {");
+        w.open_block("{");
+        w.line(&format!("let _status = {write_call};"));
+        w.open_block("if _status.is_success() {");
         for stmt in &write.not_invalid_key {
-            generate_statement(w, stmt, cmap, ptable);
+            generate_statement(w, stmt, cmap, ptable, rfm, sfm);
         }
         w.close_block("}");
 
-        w.open_block("Err(_) => {");
-        for stmt in &write.invalid_key {
-            generate_statement(w, stmt, cmap, ptable);
+        if !write.invalid_key.is_empty() {
+            w.open_block("else {");
+            for stmt in &write.invalid_key {
+                generate_statement(w, stmt, cmap, ptable, rfm, sfm);
+            }
+            w.close_block("}");
         }
-        w.close_block("}");
-
         w.close_block("}");
     } else {
-        w.line(&format!("{write_call}.expect(\"WRITE {}\");", write.record_name));
+        w.line(&format!("assert!({write_call}.is_success(), \"WRITE {}\");", write.record_name));
     }
 }
 
-fn generate_rewrite(w: &mut RustWriter, rw: &RewriteStatement, cmap: &ConditionMap, ptable: &[ParagraphIndex]) {
+fn generate_rewrite(w: &mut RustWriter, rw: &RewriteStatement, cmap: &ConditionMap, ptable: &[ParagraphIndex], rfm: &RecordFileMap, sfm: &SortFieldMap) {
     let rec = cobol_to_rust_name(&rw.record_name, "");
+    let file_field = rfm
+        .get(&rw.record_name.to_uppercase())
+        .map_or_else(|| format!("{rec}_file"), |f| cobol_to_rust_name(f, ""));
 
     // FROM clause
     if let Some(ref from_ref) = rw.from {
         let from_expr = data_ref_expr(from_ref);
         w.line(&format!(
-            "ws.{rec}.fill_bytes(&{from_expr}.as_bytes()[..ws.{rec}.byte_length().min({from_expr}.byte_length())]);"
+            "ws.{rec}.set_raw_bytes(&{from_expr}.as_bytes()[..ws.{rec}.byte_length().min({from_expr}.byte_length())]);"
         ));
     }
 
-    let rewrite_call = format!("ws.{rec}_file.rewrite_record(ws.{rec}.as_bytes())");
+    let rewrite_call = format!("ws.{file_field}.rewrite_record(ws.{rec}.as_bytes())");
 
     if !rw.invalid_key.is_empty() || !rw.not_invalid_key.is_empty() {
-        w.open_block(&format!("match {rewrite_call} {{"));
-
-        w.open_block("Ok(()) => {");
+        w.open_block("{");
+        w.line(&format!("let _status = {rewrite_call};"));
+        w.open_block("if _status.is_success() {");
         for stmt in &rw.not_invalid_key {
-            generate_statement(w, stmt, cmap, ptable);
+            generate_statement(w, stmt, cmap, ptable, rfm, sfm);
         }
         w.close_block("}");
 
-        w.open_block("Err(_) => {");
-        for stmt in &rw.invalid_key {
-            generate_statement(w, stmt, cmap, ptable);
+        if !rw.invalid_key.is_empty() {
+            w.open_block("else {");
+            for stmt in &rw.invalid_key {
+                generate_statement(w, stmt, cmap, ptable, rfm, sfm);
+            }
+            w.close_block("}");
         }
-        w.close_block("}");
-
         w.close_block("}");
     } else {
         w.line(&format!(
-            "{rewrite_call}.expect(\"REWRITE {}\");",
+            "assert!({rewrite_call}.is_success(), \"REWRITE {}\");",
             rw.record_name
         ));
     }
 }
 
-fn generate_delete(w: &mut RustWriter, del: &DeleteStatement, cmap: &ConditionMap, ptable: &[ParagraphIndex]) {
+#[allow(unused_variables)]
+fn generate_delete(w: &mut RustWriter, del: &DeleteStatement, cmap: &ConditionMap, ptable: &[ParagraphIndex], rfm: &RecordFileMap, sfm: &SortFieldMap) {
     let fname = cobol_to_rust_name(&del.file_name, "");
     let delete_call = format!("ws.{fname}.delete_record()");
 
     if !del.invalid_key.is_empty() || !del.not_invalid_key.is_empty() {
-        w.open_block(&format!("match {delete_call} {{"));
-
-        w.open_block("Ok(()) => {");
+        w.open_block("{");
+        w.line(&format!("let _status = {delete_call};"));
+        w.open_block("if _status.is_success() {");
         for stmt in &del.not_invalid_key {
-            generate_statement(w, stmt, cmap, ptable);
+            generate_statement(w, stmt, cmap, ptable, rfm, sfm);
         }
         w.close_block("}");
 
-        w.open_block("Err(_) => {");
-        for stmt in &del.invalid_key {
-            generate_statement(w, stmt, cmap, ptable);
+        if !del.invalid_key.is_empty() {
+            w.open_block("else {");
+            for stmt in &del.invalid_key {
+                generate_statement(w, stmt, cmap, ptable, rfm, sfm);
+            }
+            w.close_block("}");
         }
-        w.close_block("}");
-
         w.close_block("}");
     } else {
         w.line(&format!(
-            "{delete_call}.expect(\"DELETE {}\");",
+            "assert!({delete_call}.is_success(), \"DELETE {}\");",
             del.file_name
         ));
     }
@@ -1138,7 +1253,7 @@ fn generate_delete(w: &mut RustWriter, del: &DeleteStatement, cmap: &ConditionMa
 ///
 /// START positions a file cursor for subsequent sequential READ operations.
 /// Supports KEY IS EQUAL/GREATER/NOT LESS conditions with INVALID KEY handlers.
-fn generate_start(w: &mut RustWriter, start: &StartStatement, cmap: &ConditionMap, ptable: &[ParagraphIndex]) {
+fn generate_start(w: &mut RustWriter, start: &StartStatement, cmap: &ConditionMap, ptable: &[ParagraphIndex], rfm: &RecordFileMap, sfm: &SortFieldMap) {
     let fname = cobol_to_rust_name(&start.file_name, "");
 
     let start_call = if let Some(ref cond) = start.key_condition {
@@ -1151,28 +1266,29 @@ fn generate_start(w: &mut RustWriter, start: &StartStatement, cmap: &ConditionMa
             "ws.{fname}.start({key_expr}.as_bytes(), {op_str})"
         )
     } else {
-        format!("ws.{fname}.start_first()")
+        format!("ws.{fname}.start(&[], std::cmp::Ordering::Equal)")
     };
 
     if !start.invalid_key.is_empty() || !start.not_invalid_key.is_empty() {
-        w.open_block(&format!("match {start_call} {{"));
-
-        w.open_block("Ok(()) => {");
+        w.open_block("{");
+        w.line(&format!("let _status = {start_call};"));
+        w.open_block("if _status.is_success() {");
         for stmt in &start.not_invalid_key {
-            generate_statement(w, stmt, cmap, ptable);
+            generate_statement(w, stmt, cmap, ptable, rfm, sfm);
         }
         w.close_block("}");
 
-        w.open_block("Err(_) => {");
-        for stmt in &start.invalid_key {
-            generate_statement(w, stmt, cmap, ptable);
+        if !start.invalid_key.is_empty() {
+            w.open_block("else {");
+            for stmt in &start.invalid_key {
+                generate_statement(w, stmt, cmap, ptable, rfm, sfm);
+            }
+            w.close_block("}");
         }
-        w.close_block("}");
-
         w.close_block("}");
     } else {
         w.line(&format!(
-            "{start_call}.expect(\"START {}\");",
+            "assert!({start_call}.is_success(), \"START {}\");",
             start.file_name
         ));
     }
@@ -1274,6 +1390,20 @@ fn generate_set(w: &mut RustWriter, set: &SetStatement, cmap: &ConditionMap) {
 
 /// Format an operand for use in comparisons.
 /// Data references use `.to_decimal()` to enable comparison with Decimal values.
+/// Check if an operand is a figurative constant.
+fn is_figurative(op: &Operand) -> Option<FigurativeConstant> {
+    if let Operand::Literal(Literal::Figurative(fig)) = op {
+        Some(fig.clone())
+    } else {
+        None
+    }
+}
+
+/// Check if an operand is an alphanumeric literal.
+fn is_alpha_literal(op: &Operand) -> bool {
+    matches!(op, Operand::Literal(Literal::Alphanumeric(_)))
+}
+
 fn operand_cmp_expr(op: &Operand) -> String {
     match op {
         Operand::DataRef(dr) => {
@@ -1289,20 +1419,160 @@ fn operand_expr(op: &Operand) -> String {
     match op {
         Operand::Literal(lit) => literal_expr(lit),
         Operand::DataRef(dr) => data_ref_expr(dr),
-        Operand::Function(f) => {
-            let args: Vec<String> = f.arguments.iter().map(operand_expr).collect();
-            format!(
-                "cobol_function_{}({})",
-                f.name.to_lowercase().replace('-', "_"),
-                args.join(", ")
-            )
+        Operand::Function(f) => generate_intrinsic_call(f),
+    }
+}
+
+/// Classify an intrinsic function by its argument and return types.
+///
+/// Returns: (param_kind, return_kind)
+///   param_kind: "decimal" | "bytes" | "variadic_decimal" | "variadic_bytes" | "none" | "special"
+///   return_kind: "decimal" | "bytes"
+fn classify_intrinsic(name: &str) -> (&'static str, &'static str) {
+    match name {
+        // Category A: Decimal-in, Decimal-out
+        "ABS" | "SQRT" | "LOG" | "LOG10" | "SIN" | "COS" | "TAN" | "ASIN" | "ACOS"
+        | "ATAN" | "FACTORIAL" | "INTEGER" | "INTEGER-PART" | "RANDOM" => ("decimal", "decimal"),
+        // Category A2: Two Decimal args
+        "MOD" | "REM" => ("decimal", "decimal"),
+        // Category B: Bytes-in, Decimal-out
+        "LENGTH" | "ORD" | "NUMVAL" => ("bytes", "decimal"),
+        "NUMVAL-C" => ("special", "decimal"), // 2 byte args
+        // Category C: Bytes-in, Bytes-out
+        "UPPER-CASE" | "LOWER-CASE" | "REVERSE" => ("bytes", "bytes"),
+        "TRIM" => ("special", "bytes"), // bytes + trim_type
+        "CONCATENATE" => ("variadic_bytes", "bytes"),
+        // Category A3: Decimal-in, Bytes-out
+        "CHAR" => ("decimal", "bytes"),
+        // Category D: No args, Bytes-out
+        "CURRENT-DATE" | "WHEN-COMPILED" => ("none", "bytes"),
+        // Category E: Variadic Decimal args
+        "MAX" | "MIN" | "ORD-MAX" | "ORD-MIN" => ("variadic_decimal", "decimal"),
+        // Default: assume decimal-in, decimal-out
+        _ => ("decimal", "decimal"),
+    }
+}
+
+/// Generate a Rust expression for an intrinsic function call with correct arg types.
+fn generate_intrinsic_call(f: &FunctionCall) -> String {
+    let func_name = format!("cobol_function_{}", f.name.to_lowercase().replace('-', "_"));
+    let (param_kind, _return_kind) = classify_intrinsic(&f.name);
+
+    match param_kind {
+        "decimal" => {
+            let args: Vec<String> = f.arguments.iter().map(|a| operand_to_decimal_expr(a)).collect();
+            format!("{func_name}({})", args.join(", "))
+        }
+        "bytes" => {
+            let args: Vec<String> = f.arguments.iter().map(|a| {
+                match a {
+                    Operand::Literal(Literal::Alphanumeric(s)) => format!("b\"{s}\""),
+                    Operand::DataRef(dr) => format!("{}.as_bytes()", data_ref_expr(dr)),
+                    _ => format!("{}.as_bytes()", operand_expr(a)),
+                }
+            }).collect();
+            format!("{func_name}({})", args.join(", "))
+        }
+        "variadic_decimal" => {
+            let args: Vec<String> = f.arguments.iter().map(|a| operand_to_decimal_expr(a)).collect();
+            format!("{func_name}(&[{}])", args.join(", "))
+        }
+        "variadic_bytes" => {
+            let args: Vec<String> = f.arguments.iter().map(|a| {
+                match a {
+                    Operand::Literal(Literal::Alphanumeric(s)) => format!("b\"{s}\".as_slice()"),
+                    Operand::DataRef(dr) => format!("{}.as_bytes()", data_ref_expr(dr)),
+                    _ => format!("{}.as_bytes()", operand_expr(a)),
+                }
+            }).collect();
+            format!("{func_name}(&[{}])", args.join(", "))
+        }
+        "none" => format!("{func_name}()"),
+        "special" => {
+            // Handle special cases
+            if f.name == "TRIM" {
+                let data_arg = if let Some(a) = f.arguments.first() {
+                    match a {
+                        Operand::Literal(Literal::Alphanumeric(s)) => format!("b\"{s}\""),
+                        Operand::DataRef(dr) => format!("{}.as_bytes()", data_ref_expr(dr)),
+                        _ => format!("{}.as_bytes()", operand_expr(a)),
+                    }
+                } else {
+                    "b\"\"".to_string()
+                };
+                // TRIM type: 0=both, 1=leading, 2=trailing (default: both)
+                format!("{func_name}({data_arg}, 0)")
+            } else if f.name == "NUMVAL-C" {
+                let args: Vec<String> = f.arguments.iter().map(|a| {
+                    match a {
+                        Operand::Literal(Literal::Alphanumeric(s)) => format!("b\"{s}\""),
+                        Operand::DataRef(dr) => format!("{}.as_bytes()", data_ref_expr(dr)),
+                        _ => format!("{}.as_bytes()", operand_expr(a)),
+                    }
+                }).collect();
+                format!("{func_name}({})", args.join(", "))
+            } else {
+                let args: Vec<String> = f.arguments.iter().map(|a| operand_expr(a)).collect();
+                format!("{func_name}({})", args.join(", "))
+            }
+        }
+        _ => {
+            let args: Vec<String> = f.arguments.iter().map(|a| operand_expr(a)).collect();
+            format!("{func_name}({})", args.join(", "))
+        }
+    }
+}
+
+/// Generate a Rust expression for an intrinsic function returning Decimal.
+/// For functions that return Vec<u8>, this is invalid in a COMPUTE context,
+/// so we handle it gracefully.
+fn generate_intrinsic_call_decimal(f: &FunctionCall) -> String {
+    let (_param_kind, return_kind) = classify_intrinsic(&f.name);
+    let call = generate_intrinsic_call(f);
+    if return_kind == "bytes" {
+        // String function in numeric context -- try to parse as decimal
+        format!("{{ let _v = {call}; cobol_function_numval(&_v) }}")
+    } else {
+        call
+    }
+}
+
+/// Generate a Rust expression for an intrinsic function returning bytes.
+/// For functions that return Decimal, convert to string bytes.
+fn generate_intrinsic_call_bytes(f: &FunctionCall) -> String {
+    let (_param_kind, return_kind) = classify_intrinsic(&f.name);
+    let call = generate_intrinsic_call(f);
+    if return_kind == "decimal" {
+        format!("{call}.to_string().into_bytes()")
+    } else {
+        call
+    }
+}
+
+/// Format an operand as a Rust usize expression.
+/// Numeric literals become plain integers, data refs use `decimal_to_usize()`.
+fn operand_to_usize_expr(op: &Operand) -> String {
+    match op {
+        Operand::Literal(Literal::Numeric(n)) => {
+            // Just use the integer part directly
+            let int_part = n.split('.').next().unwrap_or(n);
+            let int_part = int_part.trim_start_matches('+').trim_start_matches('-');
+            format!("{int_part}usize")
+        }
+        Operand::DataRef(dr) => {
+            let base = data_ref_expr(dr);
+            format!("decimal_to_usize({base}.to_decimal())")
+        }
+        _ => {
+            let expr = operand_expr(op);
+            format!("decimal_to_usize({expr})")
         }
     }
 }
 
 /// Format an operand as a Rust expression suitable for arithmetic functions
 /// (i.e. implements `CobolNumeric`). Numeric literals are wrapped in a
-/// temporary `PackedDecimal` since bare `dec!()` produces `Decimal` which
+/// temporary `PackedDecimal` since bare `Decimal` which
 /// does not implement `CobolNumeric`.
 fn operand_numeric_expr(op: &Operand) -> String {
     match op {
@@ -1311,7 +1581,7 @@ fn operand_numeric_expr(op: &Operand) -> String {
             let (prec, scale) = numeric_literal_precision(n);
             let signed = n.starts_with('-') || n.starts_with('+');
             format!(
-                "{{ let mut _tmp = PackedDecimal::new({prec}, {scale}, {signed}); _tmp.pack(dec!({n})); _tmp }}"
+                "{{ let mut _tmp = PackedDecimal::new({prec}, {scale}, {signed}); _tmp.pack(\"{n}\".parse::<Decimal>().unwrap()); _tmp }}"
             )
         }
         _ => operand_expr(op),
@@ -1336,15 +1606,16 @@ fn numeric_literal_precision(n: &str) -> (u8, u8) {
 /// Format a literal as a Rust expression.
 fn literal_expr(lit: &Literal) -> String {
     match lit {
-        Literal::Numeric(n) => format!("dec!({n})"),
+        Literal::Numeric(n) => format!("\"{n}\".parse::<Decimal>().unwrap()"),
         Literal::Alphanumeric(s) => format!("\"{s}\""),
         Literal::Figurative(fig) => match fig {
-            FigurativeConstant::Spaces => "SPACES".to_string(),
-            FigurativeConstant::Zeros => "ZEROS".to_string(),
-            FigurativeConstant::HighValues => "HIGH_VALUES".to_string(),
-            FigurativeConstant::LowValues => "LOW_VALUES".to_string(),
-            FigurativeConstant::Quotes => "QUOTES".to_string(),
-            FigurativeConstant::Nulls => "NULLS".to_string(),
+            FigurativeConstant::Spaces => "FigurativeConstant::Spaces".to_string(),
+            FigurativeConstant::Zeros => "FigurativeConstant::Zeros".to_string(),
+            FigurativeConstant::HighValues => "FigurativeConstant::HighValues".to_string(),
+            FigurativeConstant::LowValues => "FigurativeConstant::LowValues".to_string(),
+            FigurativeConstant::Quotes => "FigurativeConstant::Quotes".to_string(),
+            FigurativeConstant::Nulls => "FigurativeConstant::Nulls".to_string(),
+            FigurativeConstant::All(s) => format!("b\"{s}\""),
         },
     }
 }
@@ -1367,7 +1638,8 @@ fn data_ref_base_expr(dr: &DataReference) -> String {
             }
             Subscript::DataRef(sub_dr) => {
                 let sub_expr = data_ref_base_expr(sub_dr);
-                expr = format!("{expr}[({sub_expr} - 1) as usize]");
+                // Convert COBOL 1-based subscript to Rust 0-based index
+                expr = format!("{expr}[decimal_to_usize({sub_expr}.to_decimal()).saturating_sub(1)]");
             }
             Subscript::Expr(_) => {
                 expr = format!("{expr}[0 /* complex subscript */]");
@@ -1386,11 +1658,11 @@ fn ref_mod_index_expr(expr: &ArithExpr) -> String {
         }
         ArithExpr::Operand(Operand::DataRef(dr)) => {
             let base = data_ref_base_expr(dr);
-            format!("{base}.to_decimal().to_u32().unwrap() as usize")
+            format!("decimal_to_usize({base}.to_decimal())")
         }
         _ => {
             let e = arith_expr_str(expr);
-            format!("({e}).to_u32().unwrap() as usize")
+            format!("decimal_to_usize({e})")
         }
     }
 }
@@ -1435,7 +1707,7 @@ fn arith_expr_str(expr: &ArithExpr) -> String {
                 ArithOp::Add => format!("({l} + {r})"),
                 ArithOp::Subtract => format!("({l} - {r})"),
                 ArithOp::Multiply => format!("({l} * {r})"),
-                ArithOp::Divide => format!("({l} / {r})"),
+                ArithOp::Divide => format!("cobol_checked_div({l}, {r})"),
                 ArithOp::Power => {
                     // Power via f64 since Decimal has no built-in pow
                     format!(
@@ -1450,11 +1722,11 @@ fn arith_expr_str(expr: &ArithExpr) -> String {
 
 /// Convert an operand to a `Decimal` expression for use in COMPUTE.
 ///
-/// Field references get `.to_decimal()`, numeric literals get `dec!()`,
+/// Field references get `.to_decimal()`, numeric literals get `.parse::<Decimal>()`,
 /// and intrinsic function calls are passed through (they already return `Decimal`).
 fn operand_to_decimal_expr(op: &Operand) -> String {
     match op {
-        Operand::Literal(Literal::Numeric(n)) => format!("dec!({n})"),
+        Operand::Literal(Literal::Numeric(n)) => format!("\"{n}\".parse::<Decimal>().unwrap()"),
         Operand::Literal(_) => {
             // Non-numeric literals in arithmetic context -- fall back to operand_expr
             operand_expr(op)
@@ -1463,14 +1735,123 @@ fn operand_to_decimal_expr(op: &Operand) -> String {
             let base = data_ref_expr(dr);
             format!("{base}.to_decimal()")
         }
-        Operand::Function(f) => {
-            // Intrinsic functions already return Decimal
-            let args: Vec<String> = f.arguments.iter().map(operand_expr).collect();
-            format!(
-                "cobol_function_{}({})",
-                f.name.to_lowercase().replace('-', "_"),
-                args.join(", ")
-            )
+        Operand::Function(f) => generate_intrinsic_call_decimal(f),
+    }
+}
+
+/// Generate a comparison expression handling figurative constants and
+/// alphanumeric vs numeric comparison dispatch.
+fn generate_comparison_expr(left: &Operand, op: ComparisonOp, right: &Operand) -> String {
+    let op_str = match op {
+        ComparisonOp::Equal => "==",
+        ComparisonOp::NotEqual => "!=",
+        ComparisonOp::LessThan => "<",
+        ComparisonOp::GreaterThan => ">",
+        ComparisonOp::LessOrEqual => "<=",
+        ComparisonOp::GreaterOrEqual => ">=",
+    };
+
+    // Case 1: field vs figurative constant
+    if let (Operand::DataRef(dr), Some(fig)) = (left, is_figurative(right)) {
+        return field_vs_figurative_cmp(dr, op, fig);
+    }
+    if let (Some(fig), Operand::DataRef(dr)) = (is_figurative(left), right) {
+        // Reverse the operator for swapped operands
+        let rev_op = match op {
+            ComparisonOp::Equal => ComparisonOp::Equal,
+            ComparisonOp::NotEqual => ComparisonOp::NotEqual,
+            ComparisonOp::LessThan => ComparisonOp::GreaterThan,
+            ComparisonOp::GreaterThan => ComparisonOp::LessThan,
+            ComparisonOp::LessOrEqual => ComparisonOp::GreaterOrEqual,
+            ComparisonOp::GreaterOrEqual => ComparisonOp::LessOrEqual,
+        };
+        return field_vs_figurative_cmp(dr, rev_op, fig);
+    }
+
+    // Case 2: field vs alphanumeric literal
+    if let (Operand::DataRef(dr), true) = (left, is_alpha_literal(right)) {
+        let field = data_ref_expr(dr);
+        let rhs = operand_expr(right);
+        return format!("{field}.as_bytes() {op_str} {rhs}.as_bytes()");
+    }
+    if let (true, Operand::DataRef(dr)) = (is_alpha_literal(left), right) {
+        let field = data_ref_expr(dr);
+        let lhs = operand_expr(left);
+        return format!("{lhs}.as_bytes() {op_str} {field}.as_bytes()");
+    }
+
+    // Case 3a: DataRef vs DataRef -- use as_bytes() (works for both alpha and numeric display)
+    if let (Operand::DataRef(dr_l), Operand::DataRef(dr_r)) = (left, right) {
+        let l = data_ref_expr(dr_l);
+        let r = data_ref_expr(dr_r);
+        return format!("{l}.as_bytes() {op_str} {r}.as_bytes()");
+    }
+
+    // Case 3b: DataRef vs numeric literal -- use .to_decimal()
+    let l = operand_cmp_expr(left);
+    let r = operand_cmp_expr(right);
+    format!("{l} {op_str} {r}")
+}
+
+/// Generate comparison of a field against a figurative constant.
+fn field_vs_figurative_cmp(dr: &DataReference, op: ComparisonOp, fig: FigurativeConstant) -> String {
+    let field = data_ref_expr(dr);
+    match fig {
+        FigurativeConstant::Spaces => {
+            let test = format!("{field}.as_bytes().iter().all(|&b| b == b' ')");
+            match op {
+                ComparisonOp::Equal => test,
+                ComparisonOp::NotEqual => format!("!({test})"),
+                _ => {
+                    // For ordering comparisons, compare against space-filled field
+                    let op_str = match op {
+                        ComparisonOp::LessThan => "<",
+                        ComparisonOp::GreaterThan => ">",
+                        ComparisonOp::LessOrEqual => "<=",
+                        ComparisonOp::GreaterOrEqual => ">=",
+                        _ => unreachable!(),
+                    };
+                    format!("{field}.as_bytes() {op_str} &vec![b' '; {field}.byte_length()][..]")
+                }
+            }
+        }
+        FigurativeConstant::Zeros => {
+            // ZEROS: for numeric fields compare decimal, for alpha compare bytes
+            let test_numeric = format!("{field}.to_decimal() == Decimal::ZERO");
+            match op {
+                ComparisonOp::Equal => test_numeric,
+                ComparisonOp::NotEqual => format!("!({test_numeric})"),
+                _ => {
+                    let op_str = match op {
+                        ComparisonOp::LessThan => "<",
+                        ComparisonOp::GreaterThan => ">",
+                        ComparisonOp::LessOrEqual => "<=",
+                        ComparisonOp::GreaterOrEqual => ">=",
+                        _ => unreachable!(),
+                    };
+                    format!("{field}.to_decimal() {op_str} Decimal::ZERO")
+                }
+            }
+        }
+        FigurativeConstant::HighValues => {
+            let test = format!("{field}.as_bytes().iter().all(|&b| b == 0xFF)");
+            match op {
+                ComparisonOp::Equal => test,
+                ComparisonOp::NotEqual => format!("!({test})"),
+                _ => "/* HIGH-VALUES ordering not supported */ true".to_string(),
+            }
+        }
+        FigurativeConstant::LowValues => {
+            let test = format!("{field}.as_bytes().iter().all(|&b| b == 0x00)");
+            match op {
+                ComparisonOp::Equal => test,
+                ComparisonOp::NotEqual => format!("!({test})"),
+                _ => "/* LOW-VALUES ordering not supported */ true".to_string(),
+            }
+        }
+        _ => {
+            // Quotes, Nulls -- fallback to byte comparison
+            "/* figurative constant comparison */ true".to_string()
         }
     }
 }
@@ -1481,17 +1862,7 @@ fn operand_to_decimal_expr(op: &Operand) -> String {
 fn condition_expr(cond: &Condition, cmap: &ConditionMap) -> String {
     match cond {
         Condition::Comparison { left, op, right } => {
-            let l = operand_cmp_expr(left);
-            let r = operand_cmp_expr(right);
-            let op_str = match op {
-                ComparisonOp::Equal => "==",
-                ComparisonOp::NotEqual => "!=",
-                ComparisonOp::LessThan => "<",
-                ComparisonOp::GreaterThan => ">",
-                ComparisonOp::LessOrEqual => "<=",
-                ComparisonOp::GreaterOrEqual => ">=",
-            };
-            format!("{l} {op_str} {r}")
+            generate_comparison_expr(left, *op, right)
         }
         Condition::ClassTest { field, class } => {
             let f = data_ref_expr(field);
@@ -1591,9 +1962,9 @@ fn condition_name_expr(dr: &DataReference, cmap: &ConditionMap) -> String {
 /// Convert a Literal to a Decimal expression string for codegen.
 fn literal_to_decimal_expr(lit: &Literal) -> String {
     match lit {
-        Literal::Numeric(n) => format!("dec!({n})"),
-        Literal::Alphanumeric(s) => format!("dec!({s})"),
-        Literal::Figurative(_) => "dec!(0)".to_string(),
+        Literal::Numeric(n) => format!("\"{n}\".parse::<Decimal>().unwrap()"),
+        Literal::Alphanumeric(s) => format!("\"{s}\".parse::<Decimal>().unwrap()"),
+        Literal::Figurative(_) => "Decimal::ZERO".to_string(),
     }
 }
 
@@ -1611,6 +1982,10 @@ fn literal_to_bytes_expr(lit: &Literal) -> String {
             FigurativeConstant::HighValues => "b\"\\xFF\"".to_string(),
             FigurativeConstant::LowValues | FigurativeConstant::Nulls => "b\"\\x00\"".to_string(),
             FigurativeConstant::Quotes => "b\"\\\"\"".to_string(),
+            FigurativeConstant::All(s) => {
+                let escaped = s.replace('\\', "\\\\").replace('"', "\\\"");
+                format!("b\"{escaped}\"")
+            }
         },
     }
 }
@@ -1619,26 +1994,35 @@ fn literal_to_bytes_expr(lit: &Literal) -> String {
 // Phase 3 statement generators: SORT, MERGE, RELEASE, RETURN, INSPECT, STRING, UNSTRING
 // ---------------------------------------------------------------------------
 
-fn generate_sort(w: &mut RustWriter, sort: &SortStatement, _cmap: &ConditionMap) {
+fn generate_sort(w: &mut RustWriter, sort: &SortStatement, _cmap: &ConditionMap, sfm: &SortFieldMap) {
     let fname = cobol_to_rust_name(&sort.file_name, "");
     w.open_block("{");
 
-    // Build key specs
+    // Build key specs from sort field map
     w.line("let sort_keys = vec![");
     for key in &sort.keys {
-        let field_name = cobol_to_rust_name(&key.field.name, "");
+        let key_upper = key.field.name.to_uppercase();
         let asc = key.ascending;
-        // Key offset and length resolved at runtime from field metadata
-        w.line(&format!(
-            "    SortKeySpec::alphanumeric_field(&ws.{field_name}, {asc}),"
-        ));
+        if let Some(&(offset, length)) = sfm.get(&key_upper) {
+            w.line(&format!(
+                "    SortKeySpec::new({offset}, {length}, {asc}, SortKeyType::Alphanumeric),"
+            ));
+        } else {
+            // Fallback: use field byte_length at runtime
+            let field_name = cobol_to_rust_name(&key.field.name, "");
+            w.line(&format!(
+                "    SortKeySpec::new(0, ws.{field_name}.byte_length(), {asc}, SortKeyType::Alphanumeric),"
+            ));
+        }
     }
     w.line("];");
 
-    // Config
+    // Config -- compute record length from sort field map or use a default
+    let reclen_key = format!("__RECLEN_{}", sort.file_name.to_uppercase());
+    let reclen = sfm.get(&reclen_key).map_or(80, |&(_, len)| len);
     let stable = sort.duplicates;
     w.line(&format!(
-        "let sort_config = SortConfig::new(ws.{fname}_rec_len).with_stable({stable});"
+        "let sort_config = SortConfig::new({reclen}).with_stable({stable});"
     ));
 
     // Input
@@ -1692,25 +2076,32 @@ fn generate_sort(w: &mut RustWriter, sort: &SortStatement, _cmap: &ConditionMap)
     // Execute sort
     w.line("let _sort_result = CobolSortEngine::sort_using_giving(");
     w.line("    &sort_keys, &sort_config, None,");
-    w.line("    &mut sort_inputs.iter_mut().map(|f| f.as_mut()).collect::<Vec<_>>(),");
-    w.line("    &mut sort_outputs.iter_mut().map(|f| f.as_mut()).collect::<Vec<_>>(),");
+    w.line("    &mut sort_inputs.iter_mut().map(|f| &mut **f).collect::<Vec<_>>(),");
+    w.line("    &mut sort_outputs.iter_mut().map(|f| &mut **f).collect::<Vec<_>>(),");
     w.line(");");
 
     w.close_block("}");
 }
 
-fn generate_merge(w: &mut RustWriter, merge: &MergeStatement, _cmap: &ConditionMap) {
+fn generate_merge(w: &mut RustWriter, merge: &MergeStatement, _cmap: &ConditionMap, sfm: &SortFieldMap) {
     let fname = cobol_to_rust_name(&merge.file_name, "");
     w.open_block("{");
 
-    // Build key specs
+    // Build key specs from sort field map
     w.line("let merge_keys = vec![");
     for key in &merge.keys {
-        let field_name = cobol_to_rust_name(&key.field.name, "");
+        let key_upper = key.field.name.to_uppercase();
         let asc = key.ascending;
-        w.line(&format!(
-            "    SortKeySpec::alphanumeric_field(&ws.{field_name}, {asc}),"
-        ));
+        if let Some(&(offset, length)) = sfm.get(&key_upper) {
+            w.line(&format!(
+                "    SortKeySpec::new({offset}, {length}, {asc}, SortKeyType::Alphanumeric),"
+            ));
+        } else {
+            let field_name = cobol_to_rust_name(&key.field.name, "");
+            w.line(&format!(
+                "    SortKeySpec::new(0, ws.{field_name}.byte_length(), {asc}, SortKeyType::Alphanumeric),"
+            ));
+        }
     }
     w.line("];");
 
@@ -1737,7 +2128,7 @@ fn generate_merge(w: &mut RustWriter, merge: &MergeStatement, _cmap: &ConditionM
                 .first()
                 .map_or_else(|| fname.clone(), |f| cobol_to_rust_name(f, ""));
             w.line("let _merge_result = merge_engine.merge_files(");
-            w.line("    &mut merge_inputs.iter_mut().map(|f| f.as_mut()).collect::<Vec<_>>(),");
+            w.line("    &mut merge_inputs.iter_mut().map(|f| &mut **f).collect::<Vec<_>>(),");
             w.line(&format!("    &mut ws.{output_ref},"));
             w.line(");");
         }
@@ -1765,7 +2156,7 @@ fn generate_release(w: &mut RustWriter, rel: &ReleaseStatement) {
     }
 }
 
-fn generate_return(w: &mut RustWriter, ret: &ReturnStatement, cmap: &ConditionMap, ptable: &[ParagraphIndex]) {
+fn generate_return(w: &mut RustWriter, ret: &ReturnStatement, cmap: &ConditionMap, ptable: &[ParagraphIndex], rfm: &RecordFileMap, sfm: &SortFieldMap) {
     let fname = cobol_to_rust_name(&ret.file_name, "");
 
     if !ret.at_end.is_empty() || !ret.not_at_end.is_empty() {
@@ -1775,17 +2166,17 @@ fn generate_return(w: &mut RustWriter, ret: &ReturnStatement, cmap: &ConditionMa
         if let Some(ref into_ref) = ret.into {
             let into_expr = data_ref_expr(into_ref);
             w.line(&format!(
-                "{into_expr}.fill_bytes(&record_data[..{into_expr}.byte_length().min(record_data.len())]);"
+                "{into_expr}.set_raw_bytes(&record_data[..{into_expr}.byte_length().min(record_data.len())]);"
             ));
         }
         for stmt in &ret.not_at_end {
-            generate_statement(w, stmt, cmap, ptable);
+            generate_statement(w, stmt, cmap, ptable, rfm, sfm);
         }
         w.close_block("}");
 
         w.open_block("None => {");
         for stmt in &ret.at_end {
-            generate_statement(w, stmt, cmap, ptable);
+            generate_statement(w, stmt, cmap, ptable, rfm, sfm);
         }
         w.close_block("}");
 
@@ -1870,7 +2261,7 @@ fn generate_inspect(w: &mut RustWriter, insp: &InspectStatement, _cmap: &Conditi
         w.line("];");
 
         w.line("cobol_inspect_replacing(&mut target_bytes, &specs);");
-        w.line(&format!("{target}.fill_bytes(&target_bytes);"));
+        w.line(&format!("{target}.set_raw_bytes(&target_bytes);"));
         w.close_block("}");
     }
 
@@ -1883,9 +2274,9 @@ fn generate_inspect(w: &mut RustWriter, insp: &InspectStatement, _cmap: &Conditi
             "let mut target_bytes = {target}.as_bytes().to_vec();"
         ));
         w.line(&format!(
-            "cobol_inspect_converting(&mut target_bytes, &{from_expr}, &{to_expr}, &[]);"
+            "cobol_inspect_converting(&mut target_bytes, {from_expr}, {to_expr}, &[]);"
         ));
-        w.line(&format!("{target}.fill_bytes(&target_bytes);"));
+        w.line(&format!("{target}.set_raw_bytes(&target_bytes);"));
         w.close_block("}");
     }
 }
@@ -1915,7 +2306,7 @@ fn operand_to_bytes_expr(op: &Operand) -> String {
     }
 }
 
-fn generate_string(w: &mut RustWriter, s: &StringStatement, cmap: &ConditionMap, ptable: &[ParagraphIndex]) {
+fn generate_string(w: &mut RustWriter, s: &StringStatement, cmap: &ConditionMap, ptable: &[ParagraphIndex], rfm: &RecordFileMap, sfm: &SortFieldMap) {
     let into = data_ref_expr(&s.into);
 
     w.open_block("{");
@@ -1959,7 +2350,7 @@ fn generate_string(w: &mut RustWriter, s: &StringStatement, cmap: &ConditionMap,
     w.line(
         "let string_result = cobol_string(&sources, &mut target_bytes, &mut ptr);",
     );
-    w.line(&format!("{into}.fill_bytes(&target_bytes);"));
+    w.line(&format!("{into}.set_raw_bytes(&target_bytes);"));
 
     // Update pointer field
     if let Some(ref ptr) = s.pointer {
@@ -1973,12 +2364,12 @@ fn generate_string(w: &mut RustWriter, s: &StringStatement, cmap: &ConditionMap,
     if !s.on_overflow.is_empty() || !s.not_on_overflow.is_empty() {
         w.open_block("if string_result == StringResult::Overflow {");
         for stmt in &s.on_overflow {
-            generate_statement(w, stmt, cmap, ptable);
+            generate_statement(w, stmt, cmap, ptable, rfm, sfm);
         }
         w.dedent();
         w.open_block("} else {");
         for stmt in &s.not_on_overflow {
-            generate_statement(w, stmt, cmap, ptable);
+            generate_statement(w, stmt, cmap, ptable, rfm, sfm);
         }
         w.close_block("}");
     }
@@ -1986,7 +2377,7 @@ fn generate_string(w: &mut RustWriter, s: &StringStatement, cmap: &ConditionMap,
     w.close_block("}");
 }
 
-fn generate_unstring(w: &mut RustWriter, u: &UnstringStatement, cmap: &ConditionMap, ptable: &[ParagraphIndex]) {
+fn generate_unstring(w: &mut RustWriter, u: &UnstringStatement, cmap: &ConditionMap, ptable: &[ParagraphIndex], rfm: &RecordFileMap, sfm: &SortFieldMap) {
     let source = data_ref_expr(&u.source);
 
     w.open_block("{");
@@ -2051,7 +2442,7 @@ fn generate_unstring(w: &mut RustWriter, u: &UnstringStatement, cmap: &Condition
     // Copy results back to fields
     for (i, into) in u.into.iter().enumerate() {
         let tgt = data_ref_expr(&into.target);
-        w.line(&format!("{tgt}.fill_bytes(&unstr_buf_{i});"));
+        w.line(&format!("{tgt}.set_raw_bytes(&unstr_buf_{i});"));
     }
 
     // Update pointer
@@ -2074,12 +2465,12 @@ fn generate_unstring(w: &mut RustWriter, u: &UnstringStatement, cmap: &Condition
     if !u.on_overflow.is_empty() || !u.not_on_overflow.is_empty() {
         w.open_block("if unstring_result == UnstringResult::Overflow {");
         for stmt in &u.on_overflow {
-            generate_statement(w, stmt, cmap, ptable);
+            generate_statement(w, stmt, cmap, ptable, rfm, sfm);
         }
         w.dedent();
         w.open_block("} else {");
         for stmt in &u.not_on_overflow {
-            generate_statement(w, stmt, cmap, ptable);
+            generate_statement(w, stmt, cmap, ptable, rfm, sfm);
         }
         w.close_block("}");
     }
@@ -2103,7 +2494,7 @@ mod tests {
     #[test]
     fn operand_formatting() {
         let op = Operand::Literal(Literal::Numeric("42".to_string()));
-        assert_eq!(operand_expr(&op), "dec!(42)");
+        assert_eq!(operand_expr(&op), r#""42".parse::<Decimal>().unwrap()"#);
 
         let op = Operand::Literal(Literal::Alphanumeric("HELLO".to_string()));
         assert_eq!(operand_expr(&op), "\"HELLO\"");
@@ -2129,7 +2520,7 @@ mod tests {
             op: ComparisonOp::GreaterThan,
             right: Operand::Literal(Literal::Numeric("0".to_string())),
         };
-        assert_eq!(condition_expr(&cond, &empty_cmap()), "ws.ws_x.to_decimal() > dec!(0)");
+        assert_eq!(condition_expr(&cond, &empty_cmap()), r#"ws.ws_x.to_decimal() > "0".parse::<Decimal>().unwrap()"#);
     }
 
     #[test]
@@ -2146,7 +2537,7 @@ mod tests {
                 "1".to_string(),
             )))),
         };
-        assert_eq!(arith_expr_str(&expr), "(ws.ws_a.to_decimal() + dec!(1))");
+        assert_eq!(arith_expr_str(&expr), r#"(ws.ws_a.to_decimal() + "1".parse::<Decimal>().unwrap())"#);
     }
 
     #[test]
@@ -2243,7 +2634,7 @@ mod tests {
             invalid_key: Vec::new(),
             not_invalid_key: Vec::new(),
         };
-        generate_read(&mut w, &stmt, &empty_cmap(), &[]);
+        generate_read(&mut w, &stmt, &empty_cmap(), &[], &HashMap::new(), &HashMap::new());
         let output = w.finish();
         assert!(output.contains("ws.input_file.read_next()"));
         assert!(output.contains("ws.ws_record"));
@@ -2267,12 +2658,11 @@ mod tests {
             invalid_key: Vec::new(),
             not_invalid_key: Vec::new(),
         };
-        generate_read(&mut w, &stmt, &empty_cmap(), &[]);
+        generate_read(&mut w, &stmt, &empty_cmap(), &[], &HashMap::new(), &HashMap::new());
         let output = w.finish();
-        assert!(output.contains("match ws.input_file.read_next()"));
-        assert!(output.contains("Ok(data)"));
-        assert!(output.contains("Err(_)"));
-        assert!(output.contains("END OF FILE"));
+        assert!(output.contains("ws.input_file.read_next()"), "missing read_next: {output}");
+        assert!(output.contains("_status.is_success()"), "missing is_success: {output}");
+        assert!(output.contains("END OF FILE"), "missing END OF FILE: {output}");
     }
 
     #[test]
@@ -2287,8 +2677,9 @@ mod tests {
             at_eop: Vec::new(),
             not_at_eop: Vec::new(),
         };
-        generate_write(&mut w, &stmt, &empty_cmap(), &[]);
+        generate_write(&mut w, &stmt, &empty_cmap(), &[], &HashMap::new(), &HashMap::new());
         let output = w.finish();
+        // No RecordFileMap entry -> fallback to {rec}_file pattern
         assert!(output.contains("ws.out_record_file.write_record(ws.out_record.as_bytes())"));
     }
 
@@ -2304,7 +2695,7 @@ mod tests {
             at_eop: Vec::new(),
             not_at_eop: Vec::new(),
         };
-        generate_write(&mut w, &stmt, &empty_cmap(), &[]);
+        generate_write(&mut w, &stmt, &empty_cmap(), &[], &HashMap::new(), &HashMap::new());
         let output = w.finish();
         assert!(output.contains("write_record"));
         assert!(output.contains("\\x0C"));
@@ -2319,8 +2710,9 @@ mod tests {
             invalid_key: Vec::new(),
             not_invalid_key: Vec::new(),
         };
-        generate_rewrite(&mut w, &stmt, &empty_cmap(), &[]);
+        generate_rewrite(&mut w, &stmt, &empty_cmap(), &[], &HashMap::new(), &HashMap::new());
         let output = w.finish();
+        // No RecordFileMap entry -> fallback to {rec}_file pattern
         assert!(output.contains("ws.master_rec_file.rewrite_record(ws.master_rec.as_bytes())"));
     }
 
@@ -2332,7 +2724,7 @@ mod tests {
             invalid_key: Vec::new(),
             not_invalid_key: Vec::new(),
         };
-        generate_delete(&mut w, &stmt, &empty_cmap(), &[]);
+        generate_delete(&mut w, &stmt, &empty_cmap(), &[], &HashMap::new(), &HashMap::new());
         let output = w.finish();
         assert!(output.contains("ws.indexed_file.delete_record()"));
     }
@@ -2351,11 +2743,11 @@ mod tests {
             })],
             not_invalid_key: Vec::new(),
         };
-        generate_delete(&mut w, &stmt, &empty_cmap(), &[]);
+        generate_delete(&mut w, &stmt, &empty_cmap(), &[], &HashMap::new(), &HashMap::new());
         let output = w.finish();
-        assert!(output.contains("match ws.indexed_file.delete_record()"));
-        assert!(output.contains("Err(_)"));
-        assert!(output.contains("KEY NOT FOUND"));
+        assert!(output.contains("ws.indexed_file.delete_record()"), "missing delete_record: {output}");
+        assert!(output.contains("_status.is_success()"), "missing is_success: {output}");
+        assert!(output.contains("KEY NOT FOUND"), "missing KEY NOT FOUND: {output}");
     }
 
     // -----------------------------------------------------------------------
@@ -2385,7 +2777,7 @@ mod tests {
             input: SortInput::Using(vec!["INPUT-FILE".to_string()]),
             output: SortOutput::Giving(vec!["OUTPUT-FILE".to_string()]),
         };
-        generate_sort(&mut w, &stmt, &empty_cmap());
+        generate_sort(&mut w, &stmt, &empty_cmap(), &HashMap::new());
         let output = w.finish();
         assert!(output.contains("sort_keys"));
         assert!(output.contains("SortKeySpec"));
@@ -2412,7 +2804,7 @@ mod tests {
             },
             output: SortOutput::Giving(vec!["OUTPUT-FILE".to_string()]),
         };
-        generate_sort(&mut w, &stmt, &empty_cmap());
+        generate_sort(&mut w, &stmt, &empty_cmap(), &HashMap::new());
         let output = w.finish();
         assert!(output.contains("INPUT PROCEDURE"));
         assert!(output.contains("with_stable(true)"));
@@ -2431,7 +2823,7 @@ mod tests {
             using: vec!["FILE-A".to_string(), "FILE-B".to_string()],
             output: SortOutput::Giving(vec!["OUTPUT-FILE".to_string()]),
         };
-        generate_merge(&mut w, &stmt, &empty_cmap());
+        generate_merge(&mut w, &stmt, &empty_cmap(), &HashMap::new());
         let output = w.finish();
         assert!(output.contains("merge_keys"));
         assert!(output.contains("CobolMergeEngine"));
@@ -2479,7 +2871,7 @@ mod tests {
             })],
             not_at_end: Vec::new(),
         };
-        generate_return(&mut w, &stmt, &empty_cmap(), &[]);
+        generate_return(&mut w, &stmt, &empty_cmap(), &[], &HashMap::new(), &HashMap::new());
         let output = w.finish();
         assert!(output.contains("match returner.return_record()"));
         assert!(output.contains("Some(record_data)"));
@@ -2568,7 +2960,7 @@ mod tests {
             on_overflow: Vec::new(),
             not_on_overflow: Vec::new(),
         };
-        generate_string(&mut w, &stmt, &empty_cmap(), &[]);
+        generate_string(&mut w, &stmt, &empty_cmap(), &[], &HashMap::new(), &HashMap::new());
         let output = w.finish();
         assert!(output.contains("StringSourceSpec::by_size"));
         assert!(output.contains("StringSourceSpec::by_literal"));
@@ -2602,7 +2994,7 @@ mod tests {
             on_overflow: Vec::new(),
             not_on_overflow: Vec::new(),
         };
-        generate_unstring(&mut w, &stmt, &empty_cmap(), &[]);
+        generate_unstring(&mut w, &stmt, &empty_cmap(), &[], &HashMap::new(), &HashMap::new());
         let output = w.finish();
         assert!(output.contains("UnstringDelimSpec::new"));
         assert!(output.contains("cobol_unstring_simple"));
@@ -2686,7 +3078,7 @@ mod tests {
             }),
         };
         let expr = data_ref_expr(&dr);
-        assert!(expr.contains("ws.ws_pos.to_decimal().to_u32().unwrap() as usize"));
+        assert!(expr.contains("decimal_to_usize(ws.ws_pos.to_decimal())"));
         assert!(expr.contains("3usize"));
     }
 
@@ -2855,7 +3247,7 @@ mod tests {
         }));
         assert_eq!(
             ref_mod_index_expr(&expr),
-            "ws.ws_pos.to_decimal().to_u32().unwrap() as usize"
+            "decimal_to_usize(ws.ws_pos.to_decimal())"
         );
     }
 
@@ -2999,7 +3391,7 @@ mod tests {
             ref_mod: None,
         };
         let expr = condition_name_expr(&dr, &cmap);
-        assert_eq!(expr, "ws.ws_status.to_decimal() == dec!(1)");
+        assert_eq!(expr, r#"ws.ws_status.to_decimal() == "1".parse::<Decimal>().unwrap()"#);
     }
 
     #[test]
@@ -3063,8 +3455,8 @@ mod tests {
             ref_mod: None,
         };
         let expr = condition_name_expr(&dr, &cmap);
-        assert!(expr.contains("ws.ws_score.to_decimal() >= dec!(60)"));
-        assert!(expr.contains("ws.ws_score.to_decimal() <= dec!(100)"));
+        assert!(expr.contains(r#"ws.ws_score.to_decimal() >= "60".parse::<Decimal>().unwrap()"#));
+        assert!(expr.contains(r#"ws.ws_score.to_decimal() <= "100".parse::<Decimal>().unwrap()"#));
     }
 
     #[test]
@@ -3096,7 +3488,7 @@ mod tests {
         };
         generate_set(&mut w, &stmt, &cmap);
         let output = w.finish();
-        assert!(output.contains("ws.ws_status.pack(dec!(1));"));
+        assert!(output.contains(r#"ws.ws_status.pack("1".parse::<Decimal>().unwrap());"#));
     }
 
     #[test]
@@ -3198,13 +3590,13 @@ mod tests {
             ref_mod: None,
         })));
         let expr = condition_expr(&cond, &cmap);
-        assert_eq!(expr, "!(ws.ws_status.to_decimal() == dec!(1))");
+        assert_eq!(expr, r#"!(ws.ws_status.to_decimal() == "1".parse::<Decimal>().unwrap())"#);
     }
 
     #[test]
     fn literal_to_decimal_expr_numeric() {
         let lit = Literal::Numeric("42".to_string());
-        assert_eq!(literal_to_decimal_expr(&lit), "dec!(42)");
+        assert_eq!(literal_to_decimal_expr(&lit), r#""42".parse::<Decimal>().unwrap()"#);
     }
 
     #[test]
@@ -3235,7 +3627,7 @@ mod tests {
             on_exception: Vec::new(),
             not_on_exception: Vec::new(),
         };
-        generate_call(&mut w, &call, &empty_cmap(), &[]);
+        generate_call(&mut w, &call, &empty_cmap(), &[], &HashMap::new(), &HashMap::new());
         let output = w.finish();
         assert!(
             output.contains("cobol_call(&mut ctx.dispatcher, \"SUBPROG\""),
@@ -3267,7 +3659,7 @@ mod tests {
             on_exception: Vec::new(),
             not_on_exception: Vec::new(),
         };
-        generate_call(&mut w, &call, &empty_cmap(), &[]);
+        generate_call(&mut w, &call, &empty_cmap(), &[], &HashMap::new(), &HashMap::new());
         let output = w.finish();
         assert!(
             output.contains("call_param_by_ref"),
@@ -3305,7 +3697,7 @@ mod tests {
                 no_advancing: false,
             })],
         };
-        generate_call(&mut w, &call, &empty_cmap(), &[]);
+        generate_call(&mut w, &call, &empty_cmap(), &[], &HashMap::new(), &HashMap::new());
         let output = w.finish();
         assert!(
             output.contains("match cobol_call("),
@@ -3338,7 +3730,7 @@ mod tests {
             on_exception: Vec::new(),
             not_on_exception: Vec::new(),
         };
-        generate_call(&mut w, &call, &empty_cmap(), &[]);
+        generate_call(&mut w, &call, &empty_cmap(), &[], &HashMap::new(), &HashMap::new());
         let output = w.finish();
         assert!(
             output.contains("cobol_call("),
@@ -3372,10 +3764,10 @@ mod tests {
             on_exception: Vec::new(),
             not_on_exception: Vec::new(),
         };
-        generate_call(&mut w, &call, &empty_cmap(), &[]);
+        generate_call(&mut w, &call, &empty_cmap(), &[], &HashMap::new(), &HashMap::new());
         let output = w.finish();
         assert!(
-            output.contains("clone_boxed"),
+            output.contains(".clone()"),
             "BY CONTENT should create a temp copy: {output}"
         );
         assert!(
@@ -3429,7 +3821,7 @@ mod tests {
             using_params: vec![],
             returning: None,
         };
-        generate_procedure_division(&mut w, &proc_div, &empty_cmap());
+        generate_procedure_division(&mut w, &proc_div, &empty_cmap(), &HashMap::new(), &HashMap::new());
         let output = w.finish();
         assert!(output.contains("let mut _pc: usize = 0;"), "missing _pc decl: {output}");
         assert!(output.contains("0 => main_para(ws, ctx),"), "missing index 0 dispatch: {output}");
@@ -3450,7 +3842,7 @@ mod tests {
             using_params: vec![],
             returning: None,
         };
-        generate_procedure_division(&mut w, &proc_div, &empty_cmap());
+        generate_procedure_division(&mut w, &proc_div, &empty_cmap(), &HashMap::new(), &HashMap::new());
         let output = w.finish();
         assert!(output.contains("ctx.goto_target.take()"), "missing goto_target.take(): {output}");
         assert!(output.contains("\"A-PARA\" => 0,"), "missing A-PARA goto lookup: {output}");
@@ -3476,7 +3868,7 @@ mod tests {
     #[test]
     fn stop_run_returns() {
         let mut w = RustWriter::new();
-        generate_statement(&mut w, &Statement::StopRun, &empty_cmap(), &[]);
+        generate_statement(&mut w, &Statement::StopRun, &empty_cmap(), &[], &HashMap::new(), &HashMap::new());
         let output = w.finish();
         assert!(output.contains("ctx.stop_run();"), "missing ctx.stop_run(): {output}");
         assert!(output.contains("return;"), "missing return after stop_run: {output}");
@@ -3485,7 +3877,7 @@ mod tests {
     #[test]
     fn exit_program_sets_flag() {
         let mut w = RustWriter::new();
-        generate_statement(&mut w, &Statement::ExitProgram, &empty_cmap(), &[]);
+        generate_statement(&mut w, &Statement::ExitProgram, &empty_cmap(), &[], &HashMap::new(), &HashMap::new());
         let output = w.finish();
         assert!(output.contains("ctx.exit_program = true;"), "missing exit_program flag: {output}");
         assert!(output.contains("return;"), "missing return after exit_program: {output}");
@@ -3501,7 +3893,7 @@ mod tests {
             loop_type: PerformLoopType::Once,
             body: vec![],
         };
-        generate_perform(&mut w, &perf, &empty_cmap(), &ptable);
+        generate_perform(&mut w, &perf, &empty_cmap(), &ptable, &HashMap::new(), &HashMap::new());
         let output = w.finish();
         assert!(output.contains("let mut _perf_pc: usize = 0;"), "missing _perf_pc: {output}");
         assert!(output.contains("while _perf_pc <= 2"), "missing while loop: {output}");
@@ -3565,11 +3957,11 @@ mod tests {
             invalid_key: vec![],
             not_invalid_key: vec![],
         };
-        generate_start(&mut w, &start, &empty_cmap(), &[]);
+        generate_start(&mut w, &start, &empty_cmap(), &[], &HashMap::new(), &HashMap::new());
         let output = w.finish();
         assert!(
-            output.contains("ws.input_file.start_first().expect(\"START INPUT-FILE\");"),
-            "missing start_first: {output}"
+            output.contains("ws.input_file.start(&[], std::cmp::Ordering::Equal)"),
+            "missing start: {output}"
         );
     }
 
@@ -3585,7 +3977,7 @@ mod tests {
             invalid_key: vec![],
             not_invalid_key: vec![],
         };
-        generate_start(&mut w, &start, &empty_cmap(), &[]);
+        generate_start(&mut w, &start, &empty_cmap(), &[], &HashMap::new(), &HashMap::new());
         let output = w.finish();
         assert!(
             output.contains("ws.master_file.start(ws.ws_key.as_bytes(), std::cmp::Ordering::Equal)"),
@@ -3605,7 +3997,7 @@ mod tests {
             invalid_key: vec![],
             not_invalid_key: vec![],
         };
-        generate_start(&mut w, &start, &empty_cmap(), &[]);
+        generate_start(&mut w, &start, &empty_cmap(), &[], &HashMap::new(), &HashMap::new());
         let output = w.finish();
         assert!(
             output.contains("std::cmp::Ordering::Greater"),
@@ -3629,10 +4021,10 @@ mod tests {
             })],
             not_invalid_key: vec![],
         };
-        generate_start(&mut w, &start, &empty_cmap(), &[]);
+        generate_start(&mut w, &start, &empty_cmap(), &[], &HashMap::new(), &HashMap::new());
         let output = w.finish();
-        assert!(output.contains("match ws.master_file.start("), "missing match: {output}");
-        assert!(output.contains("Ok(())"), "missing Ok arm: {output}");
-        assert!(output.contains("Err(_)"), "missing Err arm: {output}");
+        assert!(output.contains("ws.master_file.start("), "missing start call: {output}");
+        assert!(output.contains("_status.is_success()"), "missing is_success: {output}");
+        assert!(output.contains("KEY NOT FOUND"), "missing KEY NOT FOUND: {output}");
     }
 }

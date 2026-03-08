@@ -1,3 +1,5 @@
+use rust_decimal::Decimal;
+
 use cobol_core::category::DataCategory;
 use cobol_core::config::{DiagnosticLevel, RuntimeConfig};
 use cobol_core::traits::{CobolField, CobolNumeric};
@@ -195,28 +197,15 @@ fn store_alphanumeric_to_numeric(
 
 /// Store a decimal value into a numeric destination field.
 ///
-/// This is the core storage path: handles truncation, precision, and sign.
+/// Uses `set_value_from_decimal` which dispatches to the correct internal
+/// format (BCD for COMP-3, binary for COMP/COMP-5, float for COMP-1/COMP-2,
+/// zoned for DISPLAY numeric, editing for numeric-edited).
 fn store_numeric_to_dest(
     value: rust_decimal::Decimal,
     dest: &mut dyn CobolField,
     _config: &RuntimeConfig,
 ) {
-    // We need to get the numeric interface. Since we know dest is Numeric category,
-    // we rely on the caller having set up the types correctly.
-    // The dest's as_bytes_mut() will be used through display_bytes + set pattern.
-    // For now, write the formatted numeric display to the dest bytes.
-    let dest_bytes = dest.as_bytes_mut();
-    let formatted = format!("{value}");
-    let src = formatted.as_bytes();
-
-    // Write display representation: right-justify, zero-pad left
-    dest_bytes.fill(b'0');
-    if src.len() <= dest_bytes.len() {
-        let start = dest_bytes.len() - src.len();
-        dest_bytes[start..].copy_from_slice(src);
-    } else {
-        dest_bytes.copy_from_slice(&src[src.len() - dest_bytes.len()..]);
-    }
+    dest.set_value_from_decimal(value);
 }
 
 /// Convert diagnostic level from config.
@@ -225,6 +214,43 @@ fn diagnostic_level(config: &RuntimeConfig) -> MoveDiagnostic {
         DiagnosticLevel::Silent => MoveDiagnostic::Silent,
         DiagnosticLevel::Warn => MoveDiagnostic::Warn,
         DiagnosticLevel::Strict => MoveDiagnostic::Strict,
+    }
+}
+
+/// MOVE a numeric literal (Decimal value) to any destination field.
+///
+/// Handles COBOL `MOVE 12345 TO dest` where the source is a numeric literal.
+/// Uses `set_value_from_decimal` for numeric types (proper BCD/binary/float
+/// storage) and falls back to display-format text for alphanumeric destinations.
+pub fn move_numeric_literal(
+    value: Decimal,
+    dest: &mut dyn CobolField,
+    _config: &RuntimeConfig,
+) {
+    dest.set_value_from_decimal(value);
+}
+
+/// MOVE an alphanumeric literal (byte slice) to any destination field.
+///
+/// Handles COBOL `MOVE "HELLO" TO dest` where the source is a string literal.
+/// Routes through the standard MOVE dispatch using the destination's category.
+pub fn move_alphanumeric_literal(
+    src: &[u8],
+    dest: &mut dyn CobolField,
+    config: &RuntimeConfig,
+) {
+    let dest_cat = dest.category();
+    match dest_cat {
+        DataCategory::Numeric | DataCategory::NumericEdited => {
+            store_alphanumeric_to_numeric(src, dest, config);
+        }
+        _ => {
+            // Alphanumeric to alpha/alphanumeric/group: left-justify, space-pad
+            let dest_bytes = dest.as_bytes_mut();
+            let copy_len = src.len().min(dest_bytes.len());
+            dest_bytes[..copy_len].copy_from_slice(&src[..copy_len]);
+            dest_bytes[copy_len..].fill(b' ');
+        }
     }
 }
 

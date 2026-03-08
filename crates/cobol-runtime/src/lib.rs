@@ -14,3 +14,8 @@ pub mod special_regs;
 pub mod ref_mod;
 pub mod string_verb;
 pub mod unstring_verb;
+
+// Re-export rust_decimal crate so generated code can resolve the `dec!()` macro.
+// The macro expands to `rust_decimal::Decimal::from_parts(...)`, which requires
+// `rust_decimal` as a visible path in the calling crate.
+pub use rust_decimal;

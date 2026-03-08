@@ -30,6 +30,17 @@ pub trait CobolField: std::fmt::Debug {
     /// Fill all storage bytes with a single value.
     fn fill_bytes(&mut self, byte: u8);
 
+    /// Write raw bytes into the field's storage, truncating or padding as needed.
+    fn set_raw_bytes(&mut self, src: &[u8]) {
+        let dest = self.as_bytes_mut();
+        let copy_len = src.len().min(dest.len());
+        dest[..copy_len].copy_from_slice(&src[..copy_len]);
+        // Pad remainder with spaces
+        for b in &mut dest[copy_len..] {
+            *b = b' ';
+        }
+    }
+
     /// JUSTIFIED RIGHT flag (only meaningful for alphabetic/alphanumeric).
     fn is_justified_right(&self) -> bool {
         false
@@ -42,6 +53,48 @@ pub trait CobolField: std::fmt::Debug {
 
     /// COBOL INITIALIZE default: called by INITIALIZE verb.
     fn initialize_default(&mut self);
+
+    /// COBOL class condition: IS NUMERIC.
+    ///
+    /// For alphanumeric fields, checks if all bytes are digits (0x30-0x39)
+    /// or spaces. For numeric fields, always true.
+    fn is_numeric(&self) -> bool {
+        self.as_bytes().iter().all(|&b| b.is_ascii_digit() || b == b' ' || b == b'+' || b == b'-' || b == b'.')
+    }
+
+    /// COBOL class condition: IS ALPHABETIC.
+    ///
+    /// Checks if all bytes are letters (A-Z, a-z) or spaces.
+    fn is_alphabetic(&self) -> bool {
+        self.as_bytes().iter().all(|&b| b.is_ascii_alphabetic() || b == b' ')
+    }
+
+    /// COBOL class condition: IS ALPHABETIC-LOWER.
+    fn is_alphabetic_lower(&self) -> bool {
+        self.as_bytes().iter().all(|&b| b.is_ascii_lowercase() || b == b' ')
+    }
+
+    /// COBOL class condition: IS ALPHABETIC-UPPER.
+    fn is_alphabetic_upper(&self) -> bool {
+        self.as_bytes().iter().all(|&b| b.is_ascii_uppercase() || b == b' ')
+    }
+
+    /// Set a numeric value into this field using the correct internal format.
+    ///
+    /// For numeric types (COMP-3, COMP, COMP-1, COMP-2, DISPLAY numeric),
+    /// this calls `set_decimal` to write using the proper internal storage
+    /// format (BCD, binary, float, etc.).
+    ///
+    /// Default implementation: formats as display string and writes raw bytes.
+    /// Numeric types MUST override this.
+    fn set_value_from_decimal(&mut self, value: Decimal) {
+        let formatted = format!("{value}");
+        let src = formatted.as_bytes();
+        let dest = self.as_bytes_mut();
+        let copy_len = src.len().min(dest.len());
+        dest[..copy_len].copy_from_slice(&src[..copy_len]);
+        dest[copy_len..].fill(b' ');
+    }
 }
 
 /// Numeric items: any field with a numeric value.
@@ -66,6 +119,21 @@ pub trait CobolNumeric: CobolField {
     /// Numeric comparison (decimal-point-aligned).
     fn compare_numeric(&self, other: &dyn CobolNumeric) -> Ordering {
         self.to_decimal().cmp(&other.to_decimal())
+    }
+
+    /// COBOL sign condition: IS POSITIVE (value > 0).
+    fn is_positive(&self) -> bool {
+        self.to_decimal() > Decimal::ZERO
+    }
+
+    /// COBOL sign condition: IS NEGATIVE (value < 0).
+    fn is_negative(&self) -> bool {
+        self.to_decimal() < Decimal::ZERO
+    }
+
+    /// COBOL sign condition: IS ZERO (value == 0).
+    fn is_zero(&self) -> bool {
+        self.to_decimal() == Decimal::ZERO
     }
 }
 

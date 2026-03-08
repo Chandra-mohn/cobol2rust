@@ -69,6 +69,20 @@ pub trait CobolFile {
     /// REWRITE verb (update current record).
     fn rewrite_record(&mut self, record: &[u8]) -> FileStatusCode;
 
+    /// DELETE verb (remove current or keyed record).
+    ///
+    /// Default returns NOT_OPEN; overridden by indexed and relative files.
+    fn delete_record(&mut self) -> FileStatusCode {
+        FileStatusCode::BAD_OPEN_MODE
+    }
+
+    /// START verb (position cursor for subsequent sequential reads).
+    ///
+    /// Default returns NOT_OPEN; overridden by indexed and relative files.
+    fn start(&mut self, _key: &[u8], _ordering: std::cmp::Ordering) -> FileStatusCode {
+        FileStatusCode::BAD_OPEN_MODE
+    }
+
     /// The file's organization.
     fn organization(&self) -> FileOrganization;
 

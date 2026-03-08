@@ -173,7 +173,7 @@ pub enum Literal {
 }
 
 /// Figurative constants in COBOL.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub enum FigurativeConstant {
     Spaces,
     Zeros,
@@ -181,6 +181,8 @@ pub enum FigurativeConstant {
     LowValues,
     Quotes,
     Nulls,
+    /// ALL "x" -- repeats the given string to fill the field.
+    All(String),
 }
 
 /// Condition value for 88-level items.
@@ -215,6 +217,10 @@ pub struct FileDescription {
     pub file_status: Option<String>,
     /// Record definitions (01-level items under FD).
     pub records: Vec<DataEntry>,
+    /// Names of 01-level records under this FD (for building RecordFileMap).
+    /// Populated by the file listener; `records` may be empty when records are
+    /// captured separately by `DataDivisionListener`.
+    pub record_names: Vec<String>,
     /// RECORDING MODE (F, V, U).
     pub recording_mode: Option<RecordingMode>,
     /// RECORD CONTAINS size specification.
@@ -486,6 +492,8 @@ pub struct DivideStatement {
     pub direction: DivideDirection,
     /// INTO/BY targets (mutated in place).
     pub into: Vec<ArithTarget>,
+    /// BY operand for DIVIDE x BY y GIVING z (can be a literal).
+    pub by_operand: Option<Operand>,
     /// GIVING targets.
     pub giving: Vec<ArithTarget>,
     /// REMAINDER target.

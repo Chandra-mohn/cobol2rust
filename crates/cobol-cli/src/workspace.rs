@@ -316,9 +316,16 @@ pub fn cobol_name_to_crate(name: &str) -> String {
     }
 }
 
-/// Discover all `.cbl` files in a directory (non-recursive for now).
+/// Discover all `.cbl` files in a directory (recursive).
 fn discover_cobol_files(dir: &Path) -> Result<Vec<PathBuf>> {
     let mut files = Vec::new();
+    collect_cobol_files_recursive(dir, &mut files)?;
+    files.sort();
+    Ok(files)
+}
+
+/// Recursively collect `.cbl`/`.cob`/`.cobol` files from a directory tree.
+fn collect_cobol_files_recursive(dir: &Path, files: &mut Vec<PathBuf>) -> Result<()> {
     let entries = fs::read_dir(dir)
         .into_diagnostic()
         .wrap_err_with(|| format!("failed to read directory {}", dir.display()))?;
@@ -326,7 +333,9 @@ fn discover_cobol_files(dir: &Path) -> Result<Vec<PathBuf>> {
     for entry in entries {
         let entry = entry.into_diagnostic()?;
         let path = entry.path();
-        if path.is_file() {
+        if path.is_dir() {
+            collect_cobol_files_recursive(&path, files)?;
+        } else if path.is_file() {
             if let Some(ext) = path.extension() {
                 let ext_lower = ext.to_string_lossy().to_lowercase();
                 if ext_lower == "cbl" || ext_lower == "cob" || ext_lower == "cobol" {
@@ -335,9 +344,7 @@ fn discover_cobol_files(dir: &Path) -> Result<Vec<PathBuf>> {
             }
         }
     }
-
-    files.sort();
-    Ok(files)
+    Ok(())
 }
 
 /// Discover directories containing `.cpy` files.

@@ -52,6 +52,11 @@ pub struct TranspileArgs {
     /// Read/write manifest for main/lib overrides.
     #[arg(long)]
     pub manifest: Option<PathBuf>,
+
+    /// Path to cobol-runtime crate (for workspace mode path dependency).
+    /// If not specified, the workspace Cargo.toml uses a crates.io version spec.
+    #[arg(long)]
+    pub runtime_path: Option<PathBuf>,
 }
 
 /// Run the transpile subcommand.
@@ -151,7 +156,13 @@ fn run_workspace(cli: &Cli, args: &TranspileArgs) -> Result<ExitCode> {
     }
 
     // Write workspace Cargo.toml
-    let workspace_toml = generate_workspace_cargo_toml(&members);
+    let runtime_path_str = args.runtime_path.as_ref().map(|p| {
+        // Canonicalize to absolute path so it works regardless of output location
+        let canonical = p.canonicalize().unwrap_or_else(|_| p.clone());
+        canonical.to_string_lossy().to_string()
+    });
+    let workspace_toml =
+        generate_workspace_cargo_toml(&members, runtime_path_str.as_deref());
     fs::write(output_dir.join("Cargo.toml"), &workspace_toml)
         .into_diagnostic()
         .wrap_err("failed to write workspace Cargo.toml")?;
@@ -305,7 +316,10 @@ fn build_config(cli: &Cli, args: &TranspileArgs) -> Result<TranspileConfig> {
 }
 
 /// Generate workspace root `Cargo.toml`.
-fn generate_workspace_cargo_toml(members: &[String]) -> String {
+///
+/// The `runtime_path` specifies how to resolve the `cobol-runtime` dependency.
+/// If `None`, uses a crates.io version spec; otherwise uses a path dependency.
+fn generate_workspace_cargo_toml(members: &[String], runtime_path: Option<&str>) -> String {
     let mut out = String::from("[workspace]\n");
     out.push_str("resolver = \"2\"\n");
     out.push_str("members = [\n");
@@ -314,7 +328,14 @@ fn generate_workspace_cargo_toml(members: &[String]) -> String {
     }
     out.push_str("]\n\n");
     out.push_str("[workspace.dependencies]\n");
-    out.push_str("cobol-runtime = \"0.1\"\n");
+    if let Some(path) = runtime_path {
+        let _ = writeln!(
+            out,
+            "cobol-runtime = {{ path = \"{path}\", features = [\"full\"] }}"
+        );
+    } else {
+        out.push_str("cobol-runtime = { version = \"0.1\", features = [\"full\"] }\n");
+    }
     out
 }
 

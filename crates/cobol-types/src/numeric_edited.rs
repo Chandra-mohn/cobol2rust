@@ -404,6 +404,10 @@ impl CobolField for NumericEdited {
             self.blank_when_zero,
         );
     }
+
+    fn set_value_from_decimal(&mut self, value: Decimal) {
+        self.set_from_numeric(value, value.is_sign_negative());
+    }
 }
 
 impl CobolNumericEdited for NumericEdited {

@@ -68,6 +68,17 @@ pub fn cobol_function_ord(data: &[u8]) -> Decimal {
     Decimal::from(data[0] as u32 + 1) // COBOL ORD is 1-based
 }
 
+/// FUNCTION CHAR(n) -- returns character at ordinal position n (1-based).
+pub fn cobol_function_char(n: Decimal) -> Vec<u8> {
+    let pos = n.to_u32().unwrap_or(0);
+    if pos == 0 {
+        return vec![b' '];
+    }
+    // COBOL CHAR is 1-based, so position 1 = byte 0
+    let byte = (pos - 1).min(255) as u8;
+    vec![byte]
+}
+
 /// FUNCTION ORD-MAX(args) -- position (1-based) of max value.
 pub fn cobol_function_ord_max(args: &[Decimal]) -> Decimal {
     if args.is_empty() {

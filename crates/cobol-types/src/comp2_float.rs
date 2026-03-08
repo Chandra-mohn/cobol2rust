@@ -99,6 +99,10 @@ impl CobolField for Comp2Float {
         self.value = 0.0;
         self.sync_byte_cache();
     }
+
+    fn set_value_from_decimal(&mut self, value: Decimal) {
+        self.set_decimal(value);
+    }
 }
 
 impl CobolNumeric for Comp2Float {

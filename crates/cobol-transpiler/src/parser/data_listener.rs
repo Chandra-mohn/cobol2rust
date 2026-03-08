@@ -338,6 +338,15 @@ fn parse_condition_literal(s: &str) -> Literal {
         _ => {}
     }
 
+    // Check for ALL "x" pattern (ANTLR concatenates to ALL"x")
+    if upper.starts_with("ALL") {
+        let rest = &s.trim()[3..];
+        let inner = strip_cobol_quotes(rest);
+        if !inner.is_empty() {
+            return Literal::Figurative(crate::ast::FigurativeConstant::All(inner));
+        }
+    }
+
     // Check if numeric (digits, optional sign, optional decimal point)
     let trimmed = s.trim();
     if trimmed

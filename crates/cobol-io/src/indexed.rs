@@ -151,7 +151,7 @@ impl IndexedFile {
     /// START -- position the cursor for subsequent sequential reads.
     ///
     /// The cursor is set to the first key >= the given key.
-    pub fn start(&mut self, key: &[u8]) -> FileStatusCode {
+    pub fn start_at_key(&mut self, key: &[u8]) -> FileStatusCode {
         if self.conn.is_none() {
             return FileStatusCode::NOT_OPEN;
         }
@@ -354,6 +354,19 @@ impl CobolFile for IndexedFile {
             Ok(_) => FileStatusCode::SUCCESS,
             Err(_) => FileStatusCode::PERM_ERROR,
         }
+    }
+
+    fn delete_record(&mut self) -> FileStatusCode {
+        let key = match &self.last_read_key {
+            Some(k) => k.clone(),
+            None => return FileStatusCode::NO_PRIOR_READ,
+        };
+        self.delete_by_key(&key)
+    }
+
+    fn start(&mut self, key: &[u8], _ordering: std::cmp::Ordering) -> FileStatusCode {
+        // Delegate to the inherent start_at_key method (always uses >= comparison)
+        self.start_at_key(key)
     }
 
     fn organization(&self) -> FileOrganization {
@@ -591,7 +604,7 @@ mod tests {
         f.open(FileOpenMode::Input);
         // START at "BBB" -- should position so next READ returns BBB's record
         let start_key = make_record(b"BBB", b"")[..10].to_vec();
-        assert_eq!(f.start(&start_key), FileStatusCode::SUCCESS);
+        assert_eq!(f.start_at_key(&start_key), FileStatusCode::SUCCESS);
 
         // read_next after START reads the record AFTER the positioned key
         let (s, d) = f.read_next();

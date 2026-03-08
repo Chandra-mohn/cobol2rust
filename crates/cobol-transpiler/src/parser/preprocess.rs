@@ -156,11 +156,80 @@ pub fn detect_source_format(source: &str) -> SourceFormat {
     }
 }
 
+/// Strip IDENTIFICATION DIVISION metadata paragraphs that confuse the ANTLR parser.
+///
+/// AUTHOR, DATE-WRITTEN, DATE-COMPILED, INSTALLATION, SECURITY, REMARKS
+/// are optional ID division paragraphs. Their content is free-form text that
+/// can contain hyphens, periods, and other characters that the parser may
+/// misinterpret as COBOL statements. Since this metadata is not needed for
+/// transpilation, we blank these lines.
+fn strip_id_division_metadata(source: &str) -> String {
+    let mut lines: Vec<String> = Vec::new();
+    let mut in_metadata = false;
+
+    for line in source.lines() {
+        let trimmed = line.trim().to_uppercase();
+
+        // Detect start of a metadata paragraph
+        if trimmed.starts_with("AUTHOR")
+            || trimmed.starts_with("DATE-WRITTEN")
+            || trimmed.starts_with("DATE-COMPILED")
+            || trimmed.starts_with("INSTALLATION")
+            || trimmed.starts_with("SECURITY")
+            || trimmed.starts_with("REMARKS")
+        {
+            // Check it's actually a paragraph header (contains a period)
+            if trimmed.contains('.') {
+                in_metadata = true;
+                lines.push(String::new());
+                // If the line ends with a period after content, metadata ends on this line
+                let after_keyword = if let Some(pos) = trimmed.find('.') {
+                    trimmed[pos + 1..].trim().to_string()
+                } else {
+                    String::new()
+                };
+                // If there's content after the first period that also ends with a period,
+                // the metadata is self-contained on this line
+                if after_keyword.ends_with('.') || after_keyword.is_empty() {
+                    in_metadata = false;
+                }
+                continue;
+            }
+        }
+
+        // End metadata at next recognized division/section/paragraph header
+        if in_metadata {
+            if trimmed.starts_with("ENVIRONMENT")
+                || trimmed.starts_with("DATA")
+                || trimmed.starts_with("PROCEDURE")
+                || trimmed.starts_with("PROGRAM-ID")
+                || trimmed.starts_with("WORKING-STORAGE")
+                || trimmed.starts_with("FILE")
+                || trimmed.starts_with("LINKAGE")
+                || trimmed.starts_with("LOCAL-STORAGE")
+            {
+                in_metadata = false;
+                lines.push(line.to_string());
+            } else {
+                // Still in metadata -- blank this line
+                lines.push(String::new());
+            }
+            continue;
+        }
+
+        lines.push(line.to_string());
+    }
+
+    lines.join("\n")
+}
+
 /// Auto-detect format and preprocess accordingly.
 pub fn preprocess(source: &str) -> Result<String> {
-    match detect_source_format(source) {
-        SourceFormat::Fixed => preprocess_fixed_format(source),
-        SourceFormat::Free => Ok(preprocess_free_format(source)),
+    // Strip IDENTIFICATION DIVISION metadata paragraphs first
+    let cleaned = strip_id_division_metadata(source);
+    match detect_source_format(&cleaned) {
+        SourceFormat::Fixed => preprocess_fixed_format(&cleaned),
+        SourceFormat::Free => Ok(preprocess_free_format(&cleaned)),
     }
 }
 

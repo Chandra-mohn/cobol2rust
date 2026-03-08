@@ -560,14 +560,14 @@ fn e2e_move_figurative() {
 
     let rust_code = transpile(cobol).expect("transpile failed");
 
-    // MOVE SPACES generates cobol_move with SPACES
+    // MOVE SPACES generates FigurativeConstant::Spaces.fill_field
     assert!(
-        rust_code.contains("cobol_move"),
-        "missing MOVE -> cobol_move"
+        rust_code.contains("FigurativeConstant::Spaces.fill_field"),
+        "missing MOVE SPACES -> FigurativeConstant::Spaces.fill_field"
     );
     assert!(
-        rust_code.contains("SPACES"),
-        "missing SPACES figurative constant"
+        rust_code.contains("Spaces"),
+        "missing Spaces figurative constant"
     );
 }
 
@@ -677,8 +677,8 @@ fn e2e_file_io_statements() {
         "missing read_next call: {rust_code}"
     );
     assert!(
-        rust_code.contains("Err(_)"),
-        "missing AT END error branch: {rust_code}"
+        rust_code.contains("_status.is_success()"),
+        "missing AT END status check: {rust_code}"
     );
     assert!(
         rust_code.contains("EOF"),
@@ -1334,10 +1334,10 @@ fn e2e_start_statement() {
         rust_code.contains("idx_file.start("),
         "missing start call: {rust_code}"
     );
-    // Should have match for INVALID KEY handling
+    // Should have status-based INVALID KEY handling
     assert!(
-        rust_code.contains("Ok(())") && rust_code.contains("Err(_)"),
-        "missing INVALID KEY match: {rust_code}"
+        rust_code.contains("_status.is_success()"),
+        "missing INVALID KEY status check: {rust_code}"
     );
 }
 
@@ -2485,10 +2485,10 @@ fn e2e_copybook_features() {
 
     let rust_code = transpile_with_config(cobol, &config).expect("transpile_with_config failed");
 
-    // MOVE and ADD should be present
+    // MOVE and ADD should be present (literal MOVEs use move_alphanumeric_literal/move_numeric_literal)
     assert!(
-        rust_code.contains("cobol_move"),
-        "missing cobol_move: {rust_code}"
+        rust_code.contains("move_alphanumeric_literal") || rust_code.contains("move_numeric_literal"),
+        "missing move_alphanumeric_literal or move_numeric_literal: {rust_code}"
     );
     assert!(
         rust_code.contains("cobol_add"),
@@ -2696,7 +2696,7 @@ fn e2e_compute_uses_decimal_conversion() {
 }
 
 // ---------------------------------------------------------------------------
-// Test: COMPUTE with literal operands uses dec!() (not PackedDecimal wrapper)
+// Test: COMPUTE with literal operands uses Decimal parse (not PackedDecimal wrapper)
 // ---------------------------------------------------------------------------
 #[test]
 fn e2e_compute_literal_uses_decimal_macro() {
@@ -2715,10 +2715,10 @@ fn e2e_compute_literal_uses_decimal_macro() {
 
     let rust_code = transpile(cobol).expect("transpile failed");
 
-    // Literal 5 in COMPUTE should become dec!(5), not a PackedDecimal temp
+    // Literal 5 in COMPUTE should use Decimal parse, not a PackedDecimal temp
     assert!(
-        rust_code.contains("dec!(5)"),
-        "literal in COMPUTE should use dec!(): {rust_code}"
+        rust_code.contains("\"5\".parse::<Decimal>().unwrap()"),
+        "literal in COMPUTE should use Decimal parse: {rust_code}"
     );
     // Field should use .to_decimal()
     assert!(

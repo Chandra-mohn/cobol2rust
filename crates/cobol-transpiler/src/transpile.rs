@@ -84,12 +84,11 @@ fn generate_rust(program: &crate::ast::CobolProgram) -> Result<String> {
     w.line("#![allow(unused_imports, unused_variables, non_snake_case)]");
     w.blank_line();
     w.line("use cobol_runtime::prelude::*;");
-    w.line("use rust_decimal_macros::dec;");
     w.blank_line();
 
     // Generate WorkingStorage struct
     if let Some(ref data_div) = program.data_division {
-        generate_working_storage(&mut w, &data_div.working_storage);
+        generate_working_storage(&mut w, &data_div.working_storage, &data_div.file_section);
         w.blank_line();
 
         // Generate LinkageSection struct if present
@@ -144,9 +143,55 @@ fn generate_rust(program: &crate::ast::CobolProgram) -> Result<String> {
         build_condition_map(&[])
     };
 
+    // Build record-to-file map from FILE SECTION
+    let record_file_map: crate::codegen::proc_gen::RecordFileMap = program
+        .data_division
+        .as_ref()
+        .map_or_else(HashMap::new, |dd| {
+            let mut m = HashMap::new();
+            for fd in &dd.file_section {
+                // Use record_names captured by the file listener
+                for rname in &fd.record_names {
+                    m.insert(rname.clone(), fd.file_name.clone());
+                }
+                // Also check records (populated if data was parsed inline)
+                for record in &fd.records {
+                    m.insert(record.name.to_uppercase(), fd.file_name.clone());
+                }
+            }
+            m
+        });
+
+    // Build sort/merge field offset map from SD records
+    let sort_field_map: crate::codegen::proc_gen::SortFieldMap = program
+        .data_division
+        .as_ref()
+        .map_or_else(HashMap::new, |dd| {
+            let mut m = HashMap::new();
+            for fd in &dd.file_section {
+                if fd.descriptor_type == crate::ast::FileDescriptorType::Sd {
+                    // Walk the SD record's children and compute byte offsets
+                    for record in &fd.records {
+                        let mut offset: usize = 0;
+                        for child in &record.children {
+                            let len = compute_field_byte_length(child);
+                            m.insert(child.name.to_uppercase(), (offset, len));
+                            offset += len;
+                        }
+                        // Store total record length
+                        m.insert(
+                            format!("__RECLEN_{}", fd.file_name.to_uppercase()),
+                            (0, offset),
+                        );
+                    }
+                }
+            }
+            m
+        });
+
     // Generate procedure division
     if let Some(ref proc_div) = program.procedure_division {
-        generate_procedure_division(&mut w, proc_div, &cmap);
+        generate_procedure_division(&mut w, proc_div, &cmap, &record_file_map, &sort_field_map);
         w.blank_line();
     }
 
@@ -159,6 +204,37 @@ fn generate_rust(program: &crate::ast::CobolProgram) -> Result<String> {
     w.close_block("}");
 
     Ok(w.finish())
+}
+
+/// Compute the byte length of a data entry from its PIC clause and usage.
+fn compute_field_byte_length(entry: &crate::ast::DataEntry) -> usize {
+    // If byte_length was already computed during layout, use it
+    if let Some(len) = entry.byte_length {
+        return len;
+    }
+    // Compute from PIC clause
+    if let Some(ref pic) = entry.pic {
+        match entry.usage {
+            crate::ast::Usage::Display => {
+                // Display: use display_length (accounts for editing, signs, etc.)
+                pic.display_length as usize
+            }
+            crate::ast::Usage::Comp3 => {
+                // Packed: (total_digits + 2) / 2 -- includes sign nibble
+                (pic.total_digits as usize + 2) / 2
+            }
+            crate::ast::Usage::Comp | crate::ast::Usage::Comp5 => {
+                let digits = pic.total_digits as usize;
+                if digits <= 4 { 2 } else if digits <= 9 { 4 } else { 8 }
+            }
+            crate::ast::Usage::Comp1 => 4,
+            crate::ast::Usage::Comp2 => 8,
+            _ => pic.display_length as usize,
+        }
+    } else {
+        // Group item: sum of children
+        entry.children.iter().map(compute_field_byte_length).sum::<usize>().max(1)
+    }
 }
 
 #[cfg(test)]

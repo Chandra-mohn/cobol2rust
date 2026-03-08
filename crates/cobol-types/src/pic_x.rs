@@ -7,7 +7,7 @@ use cobol_core::traits::CobolField;
 /// - Left-justified by default (JUSTIFIED RIGHT overrides)
 /// - Space-padded on right
 /// - Right-truncated on assignment if source is longer
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct PicX {
     data: Vec<u8>,
     justified_right: bool,

@@ -357,6 +357,38 @@ impl CobolFile for RelativeFile {
         self.rewrite_at_key(self.current_key, record)
     }
 
+    fn delete_record(&mut self) -> FileStatusCode {
+        if self.current_key == 0 {
+            return FileStatusCode::NO_PRIOR_READ;
+        }
+        self.delete_at_key(self.current_key)
+    }
+
+    fn start(&mut self, key: &[u8], ordering: std::cmp::Ordering) -> FileStatusCode {
+        if self.file.is_none() {
+            return FileStatusCode::NOT_OPEN;
+        }
+        // Parse key bytes as a numeric string to get relative key number
+        let key_str = String::from_utf8_lossy(key);
+        let key_num: usize = key_str.trim().parse().unwrap_or(0);
+        if key_num == 0 {
+            return FileStatusCode::RECORD_NOT_FOUND;
+        }
+        // Position cursor so next read_next starts from the right place
+        match ordering {
+            std::cmp::Ordering::Equal => {
+                self.current_key = key_num.saturating_sub(1);
+            }
+            std::cmp::Ordering::Greater => {
+                self.current_key = key_num;
+            }
+            std::cmp::Ordering::Less => {
+                self.current_key = key_num.saturating_sub(2);
+            }
+        }
+        FileStatusCode::SUCCESS
+    }
+
     fn organization(&self) -> FileOrganization {
         FileOrganization::Relative
     }

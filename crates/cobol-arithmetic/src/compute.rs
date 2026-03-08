@@ -6,6 +6,15 @@ use cobol_core::traits::CobolNumeric;
 use crate::result::ArithResult;
 use crate::store::store_arithmetic_result;
 
+/// Safe division for COMPUTE expressions.
+///
+/// Returns `Decimal::MAX` on division by zero so that `cobol_compute` will
+/// detect a size error instead of panicking.
+#[inline]
+pub fn cobol_checked_div(lhs: Decimal, rhs: Decimal) -> Decimal {
+    lhs.checked_div(rhs).unwrap_or(Decimal::MAX)
+}
+
 /// COMPUTE dest = expression [ROUNDED]
 ///
 /// The expression is evaluated by the transpiler into a single Decimal value.

@@ -4,7 +4,9 @@
 //! Each 01-level record becomes a struct, with fields generated from
 //! the child entries.
 
-use crate::ast::{DataEntry, Literal};
+use std::collections::HashSet;
+
+use crate::ast::{AccessMode, DataEntry, FileDescription, FileOrganization, Literal};
 use crate::codegen::rust_writer::RustWriter;
 use crate::symbol_table::{resolve_type, RustType};
 
@@ -12,27 +14,57 @@ use crate::symbol_table::{resolve_type, RustType};
 pub fn generate_working_storage(
     w: &mut RustWriter,
     records: &[DataEntry],
+    file_section: &[FileDescription],
 ) {
+    // Pre-pass: collect all leaf field names to detect duplicates
+    let mut name_counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    for record in records {
+        collect_leaf_names(record, &mut name_counts);
+    }
+    for fd in file_section {
+        for record in &fd.records {
+            collect_leaf_names(record, &mut name_counts);
+        }
+    }
+    let duplicates: HashSet<String> = name_counts
+        .iter()
+        .filter(|(_, count)| **count > 1)
+        .map(|(name, _)| name.clone())
+        .collect();
+
+    let mut filler_counter = 0u32;
+
     w.line("/// Working storage data fields.");
     w.line("#[allow(non_snake_case)]");
     w.open_block("pub struct WorkingStorage {");
 
-    for record in records {
-        if record.level == 77 {
-            // Standalone field
-            generate_field(w, record, "");
-        } else if record.level == 1 {
-            if record.children.is_empty() {
-                // Elementary 01-level
-                generate_field(w, record, "");
-            } else {
-                // Group: flatten children as fields
-                generate_group_fields(w, record, "");
-            }
+    // FILE SECTION: file handle fields
+    for fd in file_section {
+        let fname = cobol_to_rust_name(&fd.file_name, "");
+        let file_type = file_handle_type(fd);
+        w.line(&format!("pub {fname}: {file_type},"));
+    }
+
+    // FILE SECTION: record fields (same as WS fields)
+    for fd in file_section {
+        for record in &fd.records {
+            generate_ws_record(w, record, &duplicates, &mut filler_counter);
         }
     }
 
+    // WORKING-STORAGE SECTION fields
+    for record in records {
+        generate_ws_record(w, record, &duplicates, &mut filler_counter);
+    }
+
     // Second pass: generate level-66 RENAMES fields
+    for fd in file_section {
+        for record in &fd.records {
+            if record.level == 1 {
+                generate_renames_fields(w, record, "");
+            }
+        }
+    }
     for record in records {
         if record.level == 1 {
             generate_renames_fields(w, record, "");
@@ -43,24 +75,39 @@ pub fn generate_working_storage(
     w.blank_line();
 
     // Generate new() constructor
+    filler_counter = 0;
     w.open_block("impl WorkingStorage {");
     w.line("#[allow(non_snake_case)]");
     w.open_block("pub fn new() -> Self {");
     w.open_block("Self {");
 
-    for record in records {
-        if record.level == 77 {
-            generate_field_init(w, record, "");
-        } else if record.level == 1 {
-            if record.children.is_empty() {
-                generate_field_init(w, record, "");
-            } else {
-                generate_group_field_inits(w, record, "");
-            }
+    // FILE SECTION: file handle inits
+    for fd in file_section {
+        let fname = cobol_to_rust_name(&fd.file_name, "");
+        let init = file_handle_init(fd, records);
+        w.line(&format!("{fname}: {init},"));
+    }
+
+    // FILE SECTION: record inits
+    for fd in file_section {
+        for record in &fd.records {
+            generate_ws_record_init(w, record, &duplicates, &mut filler_counter);
         }
     }
 
+    // WORKING-STORAGE SECTION inits
+    for record in records {
+        generate_ws_record_init(w, record, &duplicates, &mut filler_counter);
+    }
+
     // Second pass: initialize level-66 RENAMES fields
+    for fd in file_section {
+        for record in &fd.records {
+            if record.level == 1 {
+                generate_renames_field_inits(w, record, "");
+            }
+        }
+    }
     for record in records {
         if record.level == 1 {
             generate_renames_field_inits(w, record, "");
@@ -70,6 +117,232 @@ pub fn generate_working_storage(
     w.close_block("}");
     w.close_block("}");
     w.close_block("}");
+}
+
+/// Generate struct fields for a single WS or FILE SECTION record.
+fn generate_ws_record(
+    w: &mut RustWriter,
+    record: &DataEntry,
+    duplicates: &HashSet<String>,
+    filler_counter: &mut u32,
+) {
+    if record.level == 77 {
+        generate_field(w, record, "", duplicates, filler_counter, &[]);
+    } else if record.level == 1 {
+        if has_data_children(record) {
+            let group_size = compute_group_byte_length(record);
+            if group_size > 0 {
+                let group_name = cobol_to_rust_name(&record.name, "");
+                w.line(&format!(
+                    "pub {group_name}: PicX, /* GROUP {group_size} bytes */",
+                ));
+            }
+            generate_group_fields(w, record, &record.name, duplicates, filler_counter, &[]);
+        } else {
+            generate_field(w, record, "", duplicates, filler_counter, &[]);
+        }
+    }
+}
+
+/// Generate init expressions for a single WS or FILE SECTION record.
+fn generate_ws_record_init(
+    w: &mut RustWriter,
+    record: &DataEntry,
+    duplicates: &HashSet<String>,
+    filler_counter: &mut u32,
+) {
+    if record.level == 77 {
+        generate_field_init(w, record, "", duplicates, filler_counter, &[]);
+    } else if record.level == 1 {
+        if has_data_children(record) {
+            let group_size = compute_group_byte_length(record);
+            if group_size > 0 {
+                let group_name = cobol_to_rust_name(&record.name, "");
+                w.line(&format!(
+                    "{group_name}: PicX::spaces({group_size}),",
+                ));
+            }
+            generate_group_field_inits(w, record, &record.name, duplicates, filler_counter, &[]);
+        } else {
+            generate_field_init(w, record, "", duplicates, filler_counter, &[]);
+        }
+    }
+}
+
+/// Determine the Rust file handle type for a `FileDescription`.
+fn file_handle_type(fd: &FileDescription) -> &'static str {
+    match fd.organization {
+        FileOrganization::Indexed => "IndexedFile",
+        FileOrganization::Relative => "RelativeFile",
+        FileOrganization::Sequential | FileOrganization::LineSequential => "SequentialFile",
+    }
+}
+
+/// Generate the initialization expression for a file handle field.
+fn file_handle_init(fd: &FileDescription, ws_records: &[DataEntry]) -> String {
+    let default_assign = fd.file_name.to_lowercase();
+    let assign = fd
+        .assign_to
+        .as_deref()
+        .unwrap_or(&default_assign);
+    // Try fd.records first, then fall back to searching WS records
+    let record_len = fd
+        .records
+        .first()
+        .map(|r| compute_group_byte_length(r).max(1))
+        .or_else(|| {
+            // Find the first 01-level record in WS that isn't a simple field
+            // (heuristic: records under FD are usually groups with children)
+            ws_records.iter()
+                .find(|r| r.level == 1 && !r.children.is_empty())
+                .map(|r| compute_group_byte_length(r).max(1))
+        })
+        .unwrap_or(80);
+
+    match fd.organization {
+        FileOrganization::Sequential | FileOrganization::LineSequential => {
+            let org = match fd.organization {
+                FileOrganization::LineSequential => "FileOrganization::LineSequential",
+                _ => "FileOrganization::Sequential",
+            };
+            format!(
+                "SequentialFile::new(\"{}\".to_string(), std::path::PathBuf::from(\"{assign}\"), {org}, {record_len})",
+                fd.file_name
+            )
+        }
+        FileOrganization::Relative => {
+            let access = match fd.access_mode {
+                AccessMode::Random => "FileAccessMode::Random",
+                AccessMode::Dynamic => "FileAccessMode::Dynamic",
+                AccessMode::Sequential => "FileAccessMode::Sequential",
+            };
+            format!(
+                "RelativeFile::new(\"{}\".to_string(), std::path::PathBuf::from(\"{assign}\"), {record_len}, {access})",
+                fd.file_name
+            )
+        }
+        FileOrganization::Indexed => {
+            let access = match fd.access_mode {
+                AccessMode::Random => "FileAccessMode::Random",
+                AccessMode::Dynamic => "FileAccessMode::Dynamic",
+                AccessMode::Sequential => "FileAccessMode::Sequential",
+            };
+            // Compute key offset and length from record layout
+            let (key_offset, key_length) = compute_key_position(fd, ws_records);
+            format!(
+                "IndexedFile::new(\"{}\".to_string(), std::path::PathBuf::from(\"{assign}\"), {record_len}, {access}, {key_offset}, {key_length})",
+                fd.file_name
+            )
+        }
+    }
+}
+
+/// Compute the byte offset and length of the record key field within the record.
+fn compute_key_position(fd: &FileDescription, ws_records: &[DataEntry]) -> (usize, usize) {
+    let key_name = fd.record_key.as_deref().unwrap_or("");
+    if key_name.is_empty() {
+        return (0, 5); // default fallback
+    }
+    let key_upper = key_name.to_uppercase();
+    // Walk the first record's children to find the key field
+    // Try fd.records first, then WS records
+    let search_records: Vec<&DataEntry> = if fd.records.is_empty() {
+        ws_records.iter().filter(|r| r.level == 1).collect()
+    } else {
+        fd.records.iter().collect()
+    };
+    if let Some(record) = search_records.first() {
+        if let Some((offset, length)) = find_field_position(record, &key_upper, 0) {
+            return (offset, length);
+        }
+    }
+    (0, 5) // fallback
+}
+
+/// Find a field's byte offset and length within a record hierarchy.
+fn find_field_position(entry: &DataEntry, target: &str, base_offset: usize) -> Option<(usize, usize)> {
+    if entry.name.to_uppercase() == target {
+        let size = entry.byte_length.unwrap_or_else(|| compute_group_byte_length(entry));
+        return Some((base_offset, size));
+    }
+    let mut offset = base_offset;
+    for child in &entry.children {
+        if child.level == 88 || child.level == 66 {
+            continue;
+        }
+        if let Some(result) = find_field_position(child, target, offset) {
+            return Some(result);
+        }
+        let child_size = child.byte_length.unwrap_or_else(|| compute_group_byte_length(child));
+        offset += child_size;
+    }
+    None
+}
+
+/// Check if a DataEntry has real (non-88, non-66) children making it a group.
+fn has_data_children(entry: &DataEntry) -> bool {
+    entry.children.iter().any(|c| c.level != 88 && c.level != 66)
+}
+
+/// Collect all leaf field names to detect duplicates.
+fn collect_leaf_names(entry: &DataEntry, counts: &mut std::collections::HashMap<String, usize>) {
+    if entry.level == 88 || entry.level == 66 {
+        return;
+    }
+    let name_upper = entry.name.to_uppercase();
+    if name_upper == "FILLER" || name_upper.is_empty() {
+        return; // FILLER items are numbered separately
+    }
+    if entry.children.is_empty() {
+        let rust_name = cobol_to_rust_name(&entry.name, "");
+        *counts.entry(rust_name).or_insert(0) += 1;
+    } else {
+        for child in &entry.children {
+            collect_leaf_names(child, counts);
+        }
+    }
+}
+
+/// Compute total byte length for a group record.
+fn compute_group_byte_length(entry: &DataEntry) -> usize {
+    if let Some(len) = entry.byte_length {
+        return len;
+    }
+    // Fallback: sum children
+    let mut total = 0usize;
+    for child in &entry.children {
+        if child.level == 88 || child.level == 66 {
+            continue;
+        }
+        if child.children.is_empty() {
+            total += child.byte_length.unwrap_or(0);
+        } else {
+            total += compute_group_byte_length(child);
+        }
+    }
+    total
+}
+
+/// Resolve the Rust field name for a data entry, handling FILLER numbering
+/// and duplicate-name disambiguation.
+fn resolve_field_name(
+    entry: &DataEntry,
+    parent_group: &str,
+    duplicates: &HashSet<String>,
+    filler_counter: &mut u32,
+) -> String {
+    let name_upper = entry.name.to_uppercase();
+    if name_upper == "FILLER" || name_upper.is_empty() {
+        *filler_counter += 1;
+        return format!("_filler_{}", *filler_counter);
+    }
+    let base_name = cobol_to_rust_name(&entry.name, "");
+    if duplicates.contains(&base_name) && !parent_group.is_empty() {
+        // Disambiguate with parent group prefix
+        cobol_to_rust_name(&entry.name, parent_group)
+    } else {
+        base_name
+    }
 }
 
 /// Generate the `LinkageSection` struct and its `new()` constructor.
@@ -84,18 +357,37 @@ pub fn generate_linkage_section(
         return;
     }
 
+    // Linkage sections are smaller; still apply duplicate/filler logic for consistency
+    let mut name_counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    for record in records {
+        collect_leaf_names(record, &mut name_counts);
+    }
+    let duplicates: HashSet<String> = name_counts
+        .iter()
+        .filter(|(_, count)| **count > 1)
+        .map(|(name, _)| name.clone())
+        .collect();
+    let mut filler_counter = 0u32;
+
     w.line("/// Linkage section data fields (CALL parameters).");
     w.line("#[allow(non_snake_case)]");
     w.open_block("pub struct LinkageSection {");
 
     for record in records {
         if record.level == 77 {
-            generate_field(w, record, "");
+            generate_field(w, record, "", &duplicates, &mut filler_counter, &[]);
         } else if record.level == 1 {
-            if record.children.is_empty() {
-                generate_field(w, record, "");
+            if has_data_children(record) {
+                let group_size = compute_group_byte_length(record);
+                if group_size > 0 {
+                    let group_name = cobol_to_rust_name(&record.name, "");
+                    w.line(&format!(
+                        "pub {group_name}: PicX, /* GROUP {group_size} bytes */",
+                    ));
+                }
+                generate_group_fields(w, record, &record.name, &duplicates, &mut filler_counter, &[]);
             } else {
-                generate_group_fields(w, record, "");
+                generate_field(w, record, "", &duplicates, &mut filler_counter, &[]);
             }
         }
     }
@@ -103,6 +395,7 @@ pub fn generate_linkage_section(
     w.close_block("}");
     w.blank_line();
 
+    filler_counter = 0;
     w.open_block("impl LinkageSection {");
     w.line("#[allow(non_snake_case)]");
     w.open_block("pub fn new() -> Self {");
@@ -110,12 +403,19 @@ pub fn generate_linkage_section(
 
     for record in records {
         if record.level == 77 {
-            generate_field_init(w, record, "");
+            generate_field_init(w, record, "", &duplicates, &mut filler_counter, &[]);
         } else if record.level == 1 {
-            if record.children.is_empty() {
-                generate_field_init(w, record, "");
+            if has_data_children(record) {
+                let group_size = compute_group_byte_length(record);
+                if group_size > 0 {
+                    let group_name = cobol_to_rust_name(&record.name, "");
+                    w.line(&format!(
+                        "{group_name}: PicX::spaces({group_size}),",
+                    ));
+                }
+                generate_group_field_inits(w, record, &record.name, &duplicates, &mut filler_counter, &[]);
             } else {
-                generate_group_field_inits(w, record, "");
+                generate_field_init(w, record, "", &duplicates, &mut filler_counter, &[]);
             }
         }
     }
@@ -126,8 +426,18 @@ pub fn generate_linkage_section(
 }
 
 /// Generate a single field declaration.
-fn generate_field(w: &mut RustWriter, entry: &DataEntry, prefix: &str) {
-    let field_name = cobol_to_rust_name(&entry.name, prefix);
+///
+/// `ancestor_occurs` tracks OCCURS counts from parent groups (outermost first),
+/// enabling nested `CobolArray` types for multi-dimensional COBOL tables.
+fn generate_field(
+    w: &mut RustWriter,
+    entry: &DataEntry,
+    parent_group: &str,
+    duplicates: &HashSet<String>,
+    filler_counter: &mut u32,
+    ancestor_occurs: &[usize],
+) {
+    let field_name = resolve_field_name(entry, parent_group, duplicates, filler_counter);
 
     // REDEFINES: generate a RedefinesGroup for shared byte storage
     if entry.redefines.is_some() {
@@ -143,29 +453,45 @@ fn generate_field(w: &mut RustWriter, entry: &DataEntry, prefix: &str) {
 
     // OCCURS DEPENDING ON: variable-length array
     if entry.occurs.is_some() && entry.occurs_depending.is_some() {
+        let inner = format!("CobolVarArray<{rust_type}>");
+        let wrapped = wrap_ancestor_occurs(&inner, ancestor_occurs);
         w.line(&format!(
-            "pub {field_name}: CobolVarArray<{rust_type}>, /* OCCURS DEPENDING ON */"
+            "pub {field_name}: {wrapped}, /* OCCURS DEPENDING ON */"
         ));
         return;
     }
 
     // OCCURS: fixed-size array
     if let Some(count) = entry.occurs {
+        let inner = format!("CobolArray<{rust_type}>");
+        let wrapped = wrap_ancestor_occurs(&inner, ancestor_occurs);
         w.line(&format!(
-            "pub {field_name}: CobolArray<{rust_type}>, /* OCCURS {count} */"
+            "pub {field_name}: {wrapped}, /* OCCURS {count} */"
         ));
         return;
     }
 
-    w.line(&format!("pub {field_name}: {rust_type},"));
+    // Plain field -- wrap in ancestor CobolArrays if any
+    let wrapped = wrap_ancestor_occurs(&rust_type, ancestor_occurs);
+    w.line(&format!("pub {field_name}: {wrapped},"));
 }
 
 /// Generate flattened fields for a group record.
 ///
-/// Children use their own COBOL name without parent group prefix.
-/// `proc_gen` references fields by COBOL name directly via
-/// `cobol_to_rust_name(name, "")`, so Rust field names must match.
-fn generate_group_fields(w: &mut RustWriter, entry: &DataEntry, _prefix: &str) {
+/// Children use their own COBOL name without parent group prefix,
+/// UNLESS the name is duplicated across groups (then prefixed with parent).
+/// FILLER items get unique numbered names.
+///
+/// `ancestor_occurs` tracks OCCURS counts from parent groups for
+/// multi-dimensional array support.
+fn generate_group_fields(
+    w: &mut RustWriter,
+    entry: &DataEntry,
+    parent_group: &str,
+    duplicates: &HashSet<String>,
+    filler_counter: &mut u32,
+    ancestor_occurs: &[usize],
+) {
     for child in &entry.children {
         if child.level == 88 || child.level == 66 {
             continue;
@@ -173,20 +499,44 @@ fn generate_group_fields(w: &mut RustWriter, entry: &DataEntry, _prefix: &str) {
         // REDEFINES group: emit a single RedefinesGroup field
         // (don't recurse into children -- they access via byte offsets)
         if child.redefines.is_some() {
-            generate_field(w, child, "");
+            generate_field(w, child, parent_group, duplicates, filler_counter, ancestor_occurs);
             continue;
         }
-        if child.children.is_empty() {
-            generate_field(w, child, "");
+        if has_data_children(child) {
+            // Sub-group: also emit a PicX overlay for the sub-group itself
+            let sub_size = compute_group_byte_length(child);
+            if sub_size > 0 {
+                let sub_name = resolve_field_name(child, parent_group, duplicates, filler_counter);
+                let pic_type = wrap_ancestor_occurs("PicX", ancestor_occurs);
+                w.line(&format!(
+                    "pub {sub_name}: {pic_type}, /* sub-GROUP {sub_size} bytes */",
+                ));
+            }
+            // If this group has OCCURS, push it onto the ancestor chain
+            let mut child_ancestors = ancestor_occurs.to_vec();
+            if let Some(count) = child.occurs {
+                child_ancestors.push(count as usize);
+            }
+            generate_group_fields(w, child, &child.name, duplicates, filler_counter, &child_ancestors);
         } else {
-            generate_group_fields(w, child, "");
+            generate_field(w, child, parent_group, duplicates, filler_counter, ancestor_occurs);
         }
     }
 }
 
 /// Generate a field initialization expression.
-fn generate_field_init(w: &mut RustWriter, entry: &DataEntry, prefix: &str) {
-    let field_name = cobol_to_rust_name(&entry.name, prefix);
+///
+/// `ancestor_occurs` tracks OCCURS counts from parent groups (outermost first),
+/// enabling nested `CobolArray` inits for multi-dimensional COBOL tables.
+fn generate_field_init(
+    w: &mut RustWriter,
+    entry: &DataEntry,
+    parent_group: &str,
+    duplicates: &HashSet<String>,
+    filler_counter: &mut u32,
+    ancestor_occurs: &[usize],
+) {
+    let field_name = resolve_field_name(entry, parent_group, duplicates, filler_counter);
 
     // REDEFINES: initialize RedefinesGroup with byte size
     if entry.redefines.is_some() {
@@ -201,39 +551,66 @@ fn generate_field_init(w: &mut RustWriter, entry: &DataEntry, prefix: &str) {
     // OCCURS DEPENDING ON: variable-length array
     if let Some(count) = entry.occurs {
         if entry.occurs_depending.is_some() {
-            w.line(&format!(
-                "{field_name}: CobolVarArray::new(vec![{element_init}; {count}], {count}),"
-            ));
+            let inner = format!("CobolVarArray::new(vec![{element_init}; {count}], {count})");
+            let wrapped = wrap_ancestor_occurs_init(&inner, ancestor_occurs);
+            w.line(&format!("{field_name}: {wrapped},"));
             return;
         }
 
         // OCCURS: fixed-size array
-        w.line(&format!(
-            "{field_name}: CobolArray::new(vec![{element_init}; {count}]),"
-        ));
+        let inner = format!("CobolArray::new(vec![{element_init}; {count}])");
+        let wrapped = wrap_ancestor_occurs_init(&inner, ancestor_occurs);
+        w.line(&format!("{field_name}: {wrapped},"));
         return;
     }
 
-    w.line(&format!("{field_name}: {element_init},"));
+    // Plain field -- wrap in ancestor CobolArrays if any
+    let wrapped = wrap_ancestor_occurs_init(&element_init, ancestor_occurs);
+    w.line(&format!("{field_name}: {wrapped},"));
 }
 
 /// Generate field initializations for a group.
 ///
-/// Matches `generate_group_fields`: children use their own name, no parent prefix.
-fn generate_group_field_inits(w: &mut RustWriter, entry: &DataEntry, _prefix: &str) {
+/// Matches `generate_group_fields`: children use their own name, with
+/// duplicate disambiguation and FILLER numbering.
+///
+/// `ancestor_occurs` tracks OCCURS counts from parent groups for
+/// multi-dimensional array support.
+fn generate_group_field_inits(
+    w: &mut RustWriter,
+    entry: &DataEntry,
+    parent_group: &str,
+    duplicates: &HashSet<String>,
+    filler_counter: &mut u32,
+    ancestor_occurs: &[usize],
+) {
     for child in &entry.children {
         if child.level == 88 || child.level == 66 {
             continue;
         }
         // REDEFINES group: single RedefinesGroup init
         if child.redefines.is_some() {
-            generate_field_init(w, child, "");
+            generate_field_init(w, child, parent_group, duplicates, filler_counter, ancestor_occurs);
             continue;
         }
-        if child.children.is_empty() {
-            generate_field_init(w, child, "");
+        if has_data_children(child) {
+            // Sub-group: init the PicX overlay
+            let sub_size = compute_group_byte_length(child);
+            if sub_size > 0 {
+                let sub_name = resolve_field_name(child, parent_group, duplicates, filler_counter);
+                let init = wrap_ancestor_occurs_init(&format!("PicX::spaces({sub_size})"), ancestor_occurs);
+                w.line(&format!(
+                    "{sub_name}: {init},",
+                ));
+            }
+            // If this group has OCCURS, push it onto the ancestor chain
+            let mut child_ancestors = ancestor_occurs.to_vec();
+            if let Some(count) = child.occurs {
+                child_ancestors.push(count as usize);
+            }
+            generate_group_field_inits(w, child, &child.name, duplicates, filler_counter, &child_ancestors);
         } else {
-            generate_group_field_inits(w, child, "");
+            generate_field_init(w, child, parent_group, duplicates, filler_counter, ancestor_occurs);
         }
     }
 }
@@ -351,9 +728,11 @@ fn find_entry_by_name<'a>(record: &'a DataEntry, name: &str) -> Option<&'a DataE
 /// Convert a COBOL data name to a Rust field name.
 ///
 /// COBOL names use hyphens; Rust uses `snake_case`.
+/// Rust keywords are escaped with `r#` prefix.
+/// Names starting with a digit get a `n` prefix (Rust identifiers can't start with digits).
 pub fn cobol_to_rust_name(cobol_name: &str, prefix: &str) -> String {
     let base = cobol_name.to_lowercase().replace('-', "_");
-    if prefix.is_empty() {
+    let name = if prefix.is_empty() {
         base
     } else {
         let pfx = prefix.to_lowercase().replace('-', "_");
@@ -363,6 +742,29 @@ pub fn cobol_to_rust_name(cobol_name: &str, prefix: &str) -> String {
         } else {
             format!("{pfx}_{base}")
         }
+    };
+    // Rust identifiers cannot start with a digit
+    let name = if name.starts_with(|c: char| c.is_ascii_digit()) {
+        format!("n{name}")
+    } else {
+        name
+    };
+    escape_rust_keyword(&name)
+}
+
+/// Escape Rust reserved keywords by prefixing with `r#`.
+fn escape_rust_keyword(name: &str) -> String {
+    match name {
+        "as" | "break" | "const" | "continue" | "crate" | "else" | "enum"
+        | "extern" | "false" | "fn" | "for" | "if" | "impl" | "in" | "let"
+        | "loop" | "match" | "mod" | "move" | "mut" | "pub" | "ref" | "return"
+        | "self" | "static" | "struct" | "super" | "trait" | "true" | "type"
+        | "unsafe" | "use" | "where" | "while" | "async" | "await" | "dyn"
+        | "abstract" | "become" | "box" | "do" | "final" | "macro" | "override"
+        | "priv" | "typeof" | "unsized" | "virtual" | "yield" | "try" => {
+            format!("r#{name}")
+        }
+        _ => name.to_string(),
     }
 }
 
@@ -388,13 +790,9 @@ fn rust_type_string(rt: &RustType) -> String {
             signed,
             pic_limited,
         } => {
-            let storage = if *precision <= 4 {
-                if *signed { "i16" } else { "u16" }
-            } else if *precision <= 9 {
-                if *signed { "i32" } else { "u32" }
-            } else if *signed { "i64" } else { "u64" };
             format!(
-                "{storage} /* COMP P{precision} S{scale} {} */",
+                "CompBinary /* COMP P{precision} S{scale} {} {} */",
+                if *signed { "signed" } else { "unsigned" },
                 if *pic_limited { "PIC-limited" } else { "full-range" }
             )
         }
@@ -436,14 +834,8 @@ fn field_init_expr(entry: &DataEntry, rt: &RustType) -> String {
         RustType::AlphanumericEdited { .. } => {
             alpha_edited_init_expr(entry)
         }
-        RustType::CompBinary { signed, precision, .. } => {
-            if *precision <= 4 {
-                if *signed { "0i16" } else { "0u16" }.to_string()
-            } else if *precision <= 9 {
-                if *signed { "0i32" } else { "0u32" }.to_string()
-            } else {
-                if *signed { "0i64" } else { "0u64" }.to_string()
-            }
+        RustType::CompBinary { signed, precision, scale, pic_limited } => {
+            format!("CompBinary::new({precision}, {scale}, {signed}, {pic_limited})")
         }
         RustType::Float32 => "Comp1Float::new()".to_string(),
         RustType::Float64 => "Comp2Float::new()".to_string(),
@@ -459,30 +851,23 @@ fn value_to_init(lit: &Literal, rt: &RustType) -> String {
         (Literal::Numeric(n), RustType::PackedDecimal { precision, scale, signed }
         | RustType::DisplayNumeric { precision, scale, signed }) => {
             format!(
-                "{{ let mut _p = PackedDecimal::new({precision}, {scale}, {signed}); _p.pack(dec!({n})); _p }}"
+                "{{ let mut _p = PackedDecimal::new({precision}, {scale}, {signed}); _p.pack(\"{n}\".parse::<Decimal>().unwrap()); _p }}"
             )
         }
-        (Literal::Numeric(n), RustType::CompBinary { signed, precision, .. }) => {
-            if *precision <= 4 {
-                if *signed {
-                    format!("{n}i16")
-                } else {
-                    format!("{n}u16")
-                }
-            } else if *precision <= 9 {
-                if *signed {
-                    format!("{n}i32")
-                } else {
-                    format!("{n}u32")
-                }
-            } else if *signed {
-                format!("{n}i64")
-            } else {
-                format!("{n}u64")
-            }
+        (Literal::Numeric(n), RustType::CompBinary { signed, precision, scale, pic_limited }) => {
+            format!(
+                "{{ let mut _c = CompBinary::new({precision}, {scale}, {signed}, {pic_limited}); _c.set_decimal(\"{n}\".parse::<Decimal>().unwrap()); _c }}"
+            )
         }
         (Literal::Numeric(n), RustType::Float32) => format!("Comp1Float::from_f32({n}f32)"),
         (Literal::Numeric(n), RustType::Float64) => format!("Comp2Float::from_f64({n}f64)"),
+        // Numeric value on alphanumeric field (parser may mis-classify quoted strings)
+        (Literal::Numeric(n), RustType::PicX { length }) => {
+            format!("PicX::new({length}, b\"{n}\")")
+        }
+        (Literal::Numeric(n), RustType::PicA { length }) => {
+            format!("PicA::new({length}, b\"{n}\")")
+        }
         (Literal::Numeric(n), _) => n.clone(),
         (Literal::Alphanumeric(s), RustType::PicX { length }) => {
             format!("PicX::new({length}, b\"{s}\")")
@@ -504,7 +889,24 @@ fn value_to_init(lit: &Literal, rt: &RustType) -> String {
                     | RustType::DisplayNumeric { precision, scale, signed } => {
                         format!("PackedDecimal::new({precision}, {scale}, {signed})")
                     }
-                    RustType::CompBinary { .. } => "0".to_string(),
+                    RustType::CompBinary { precision, scale, signed, pic_limited } => {
+                        format!("CompBinary::new({precision}, {scale}, {signed}, {pic_limited})")
+                    }
+                    _ => "Default::default()".to_string(),
+                },
+                FigurativeConstant::All(pattern) => match rt {
+                    RustType::PicX { length } => {
+                        let len = *length as usize;
+                        let repeated = pattern.repeat(len.div_ceil(pattern.len()));
+                        let truncated = &repeated[..len];
+                        format!("PicX::new({length}, b\"{truncated}\")")
+                    }
+                    RustType::PicA { length } => {
+                        let len = *length as usize;
+                        let repeated = pattern.repeat(len.div_ceil(pattern.len()));
+                        let truncated = &repeated[..len];
+                        format!("PicA::new({length}, b\"{truncated}\")")
+                    }
                     _ => "Default::default()".to_string(),
                 },
                 _ => "Default::default()".to_string(),
@@ -544,6 +946,40 @@ fn alpha_edited_init_expr(entry: &DataEntry) -> String {
         "AlphanumericEdited::new(vec![{}])",
         syms.join(", ")
     )
+}
+
+/// Wrap a Rust type string in nested `CobolArray<...>` for each ancestor OCCURS.
+///
+/// For example, if `ancestor_occurs` is `[3]` and `inner` is `CobolArray<PackedDecimal>`,
+/// the result is `CobolArray<CobolArray<PackedDecimal>>`.
+/// The outermost ancestor (first in the slice) becomes the outermost wrapper.
+fn wrap_ancestor_occurs(inner: &str, ancestor_occurs: &[usize]) -> String {
+    if ancestor_occurs.is_empty() {
+        return inner.to_string();
+    }
+    let mut result = inner.to_string();
+    // Wrap from innermost ancestor to outermost so outer is the outermost CobolArray
+    for _count in ancestor_occurs.iter().rev() {
+        result = format!("CobolArray<{result}>");
+    }
+    result
+}
+
+/// Wrap an init expression in nested `CobolArray::new(vec![...])` for each ancestor OCCURS.
+///
+/// For example, if `ancestor_occurs` is `[3]` and `inner` is
+/// `CobolArray::new(vec![PackedDecimal::new(3, 0, false); 3])`,
+/// the result wraps it in `CobolArray::new(vec![...; 3])`.
+fn wrap_ancestor_occurs_init(inner: &str, ancestor_occurs: &[usize]) -> String {
+    if ancestor_occurs.is_empty() {
+        return inner.to_string();
+    }
+    let mut result = inner.to_string();
+    // Wrap from innermost ancestor to outermost
+    for count in ancestor_occurs.iter().rev() {
+        result = format!("CobolArray::new(vec![{result}; {count}])");
+    }
+    result
 }
 
 #[cfg(test)]
@@ -633,7 +1069,7 @@ mod tests {
     fn generate_simple_struct() {
         let records = vec![make_entry("WS-COUNT", 77)];
         let mut w = RustWriter::new();
-        generate_working_storage(&mut w, &records);
+        generate_working_storage(&mut w, &records, &[]);
         let output = w.finish();
         assert!(output.contains("pub struct WorkingStorage"));
         assert!(output.contains("ws_count"));
@@ -648,7 +1084,7 @@ mod tests {
 
         let records = vec![entry];
         let mut w = RustWriter::new();
-        generate_working_storage(&mut w, &records);
+        generate_working_storage(&mut w, &records, &[]);
         let output = w.finish();
 
         assert!(output.contains("CobolArray<PicX"), "should wrap in CobolArray: {output}");
@@ -667,7 +1103,7 @@ mod tests {
 
         let records = vec![entry];
         let mut w = RustWriter::new();
-        generate_working_storage(&mut w, &records);
+        generate_working_storage(&mut w, &records, &[]);
         let output = w.finish();
 
         assert!(
@@ -702,7 +1138,7 @@ mod tests {
         ];
 
         let mut w = RustWriter::new();
-        generate_working_storage(&mut w, &records);
+        generate_working_storage(&mut w, &records, &[]);
         let output = w.finish();
 
         assert!(
@@ -744,7 +1180,7 @@ mod tests {
         ];
 
         let mut w = RustWriter::new();
-        generate_working_storage(&mut w, &records);
+        generate_working_storage(&mut w, &records, &[]);
         let output = w.finish();
 
         // Should have WS-DATE as PicX and WS-DATE-PARTS as RedefinesGroup
@@ -782,7 +1218,7 @@ mod tests {
         };
 
         let mut w = RustWriter::new();
-        generate_working_storage(&mut w, &[record]);
+        generate_working_storage(&mut w, &[record], &[]);
         let output = w.finish();
 
         // RENAMES field should appear in the struct
@@ -813,7 +1249,7 @@ mod tests {
         };
 
         let mut w = RustWriter::new();
-        generate_working_storage(&mut w, &[record]);
+        generate_working_storage(&mut w, &[record], &[]);
         let output = w.finish();
 
         // RENAMES THRU should create a PicX spanning both fields
@@ -842,7 +1278,7 @@ mod tests {
         };
 
         let mut w = RustWriter::new();
-        generate_working_storage(&mut w, &[record]);
+        generate_working_storage(&mut w, &[record], &[]);
         let output = w.finish();
 
         // Single RENAMES of numeric should copy the numeric type
@@ -868,7 +1304,7 @@ mod tests {
         };
 
         let mut w = RustWriter::new();
-        generate_working_storage(&mut w, &[record]);
+        generate_working_storage(&mut w, &[record], &[]);
         let output = w.finish();
 
         // Should still compile and produce valid output without level-66
@@ -884,7 +1320,7 @@ mod tests {
 
         let records = vec![entry];
         let mut w = RustWriter::new();
-        generate_working_storage(&mut w, &records);
+        generate_working_storage(&mut w, &records, &[]);
         let output = w.finish();
 
         assert!(
@@ -919,7 +1355,7 @@ mod tests {
         let entry = make_alpha_edited_entry("WS-FORMATTED", 77, "X(3)BX(3)", 7);
         let records = vec![entry];
         let mut w = RustWriter::new();
-        generate_working_storage(&mut w, &records);
+        generate_working_storage(&mut w, &records, &[]);
         let output = w.finish();
 
         assert!(
@@ -938,7 +1374,7 @@ mod tests {
         let entry = make_alpha_edited_entry("WS-DATE-FMT", 77, "X(2)/X(2)", 5);
         let records = vec![entry];
         let mut w = RustWriter::new();
-        generate_working_storage(&mut w, &records);
+        generate_working_storage(&mut w, &records, &[]);
         let output = w.finish();
 
         assert!(
@@ -963,7 +1399,7 @@ mod tests {
             ..make_entry("WS-RECORD", 1)
         };
         let mut w = RustWriter::new();
-        generate_working_storage(&mut w, &[record]);
+        generate_working_storage(&mut w, &[record], &[]);
         let output = w.finish();
         assert!(
             output.contains("Comp1Float"),
@@ -979,7 +1415,7 @@ mod tests {
             ..make_entry("WS-RECORD", 1)
         };
         let mut w = RustWriter::new();
-        generate_working_storage(&mut w, &[record]);
+        generate_working_storage(&mut w, &[record], &[]);
         let output = w.finish();
         assert!(
             output.contains("Comp2Float"),
@@ -996,7 +1432,7 @@ mod tests {
             ..make_entry("WS-RECORD", 1)
         };
         let mut w = RustWriter::new();
-        generate_working_storage(&mut w, &[record]);
+        generate_working_storage(&mut w, &[record], &[]);
         let output = w.finish();
         assert!(
             output.contains("Comp1Float::from_f32(3.14f32)"),

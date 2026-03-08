@@ -11,12 +11,13 @@
 pub mod copy_expand;
 pub mod copybook;
 pub(crate) mod data_listener;
+pub(crate) mod file_listener;
 pub mod hierarchy;
 pub mod pic_parser;
 pub mod preprocess;
 pub(crate) mod proc_listener;
 
-use crate::ast::{CobolProgram, DataDivision, DataEntry, ProcedureDivision};
+use crate::ast::{CobolProgram, DataDivision, DataEntry, FileDescription, ProcedureDivision};
 use crate::error::{Result, TranspileError};
 use crate::generated::cobol85lexer::Cobol85Lexer;
 use crate::generated::cobol85listener::Cobol85Listener;
@@ -27,6 +28,7 @@ use antlr_rust::parser::Parser as _;
 use antlr_rust::tree::ParseTreeListener;
 
 use data_listener::DataDivisionListener;
+use file_listener::FileListener;
 use hierarchy::{build_hierarchy, compute_layout};
 use preprocess::preprocess;
 use proc_listener::ProcedureDivisionListener;
@@ -50,6 +52,9 @@ pub fn parse_cobol(source: &str) -> Result<CobolProgram> {
     // Parse DATA DIVISION
     let working_storage = parse_data_division(&input)?;
 
+    // Parse FILE SECTION and FILE-CONTROL
+    let file_section = parse_file_section(&input)?;
+
     // Parse PROCEDURE DIVISION
     let procedure_division = parse_procedure_division(&input)?;
 
@@ -62,7 +67,7 @@ pub fn parse_cobol(source: &str) -> Result<CobolProgram> {
             working_storage,
             local_storage: Vec::new(),
             linkage: Vec::new(),
-            file_section: Vec::new(),
+            file_section,
         }),
         procedure_division,
         source_path: None,
@@ -84,6 +89,9 @@ pub fn parse_cobol_from_source(source: &str) -> Result<CobolProgram> {
     // Parse DATA DIVISION
     let working_storage = parse_data_division(&input)?;
 
+    // Parse FILE SECTION and FILE-CONTROL
+    let file_section = parse_file_section(&input)?;
+
     // Parse PROCEDURE DIVISION
     let procedure_division = parse_procedure_division(&input)?;
 
@@ -96,7 +104,7 @@ pub fn parse_cobol_from_source(source: &str) -> Result<CobolProgram> {
             working_storage,
             local_storage: Vec::new(),
             linkage: Vec::new(),
-            file_section: Vec::new(),
+            file_section,
         }),
         procedure_division,
         source_path: None,
@@ -126,6 +134,8 @@ pub fn parse_data_division(source: &str) -> Result<Vec<DataEntry>> {
 /// Parse COBOL source and extract PROCEDURE DIVISION into AST.
 ///
 /// Returns `None` if the source has no procedure division.
+/// Emits a warning to stderr if PROCEDURE DIVISION text is found but
+/// the parser extracts 0 paragraphs (indicates a parser issue).
 pub fn parse_procedure_division(source: &str) -> Result<Option<ProcedureDivision>> {
     let upper = source.to_uppercase();
     if !upper.contains("PROCEDURE DIVISION") {
@@ -134,8 +144,15 @@ pub fn parse_procedure_division(source: &str) -> Result<Option<ProcedureDivision
 
     let listener = run_proc_listener(source)?;
 
-    // If we got nothing, return None
+    // If we got nothing but PROCEDURE DIVISION was in the source, warn
     if listener.sections.is_empty() && listener.paragraphs.is_empty() {
+        eprintln!(
+            "WARNING: PROCEDURE DIVISION text found in source but parser extracted \
+             0 paragraphs and 0 sections. This may indicate a parse error in the \
+             DATA DIVISION or IDENTIFICATION DIVISION that caused ANTLR to \
+             misinterpret the program structure. Check for unsupported syntax \
+             (AUTHOR, DATE-WRITTEN, etc.) or non-ASCII characters."
+        );
         return Ok(None);
     }
 
@@ -150,8 +167,7 @@ pub fn parse_procedure_division(source: &str) -> Result<Option<ProcedureDivision
 /// Run ANTLR4 parse and walk with `ProcedureDivisionListener`.
 fn run_proc_listener(source: &str) -> Result<ProcedureDivisionListener> {
     let input: InputStream<&str> = InputStream::new(source);
-    let mut lexer = Cobol85Lexer::new(input);
-    lexer.remove_error_listeners();
+    let lexer = Cobol85Lexer::new(input);
     let token_stream = CommonTokenStream::new(lexer);
     let mut parser = Cobol85Parser::new(token_stream);
     parser.remove_error_listeners();
@@ -180,6 +196,40 @@ fn run_data_listener(source: &str) -> Result<DataDivisionListener> {
     })?;
 
     let listener = Box::new(DataDivisionListener::new());
+    let listener = Cobol85TreeWalker::walk(listener, &*tree);
+
+    Ok(*listener)
+}
+
+/// Parse FILE-CONTROL SELECT entries and FILE SECTION FD/SD entries.
+///
+/// Returns `FileDescription` structs with file metadata. Record definitions
+/// are empty because they're already captured by `parse_data_division()`.
+fn parse_file_section(source: &str) -> Result<Vec<FileDescription>> {
+    let upper = source.to_uppercase();
+    // Only run the file listener if the source has FILE-CONTROL or FILE SECTION
+    if !upper.contains("FILE-CONTROL") && !upper.contains("FILE SECTION") {
+        return Ok(Vec::new());
+    }
+
+    let listener = run_file_listener(source)?;
+    Ok(listener.into_file_descriptions())
+}
+
+/// Run ANTLR4 parse and walk with `FileListener`.
+fn run_file_listener(source: &str) -> Result<FileListener> {
+    let input: InputStream<&str> = InputStream::new(source);
+    let mut lexer = Cobol85Lexer::new(input);
+    lexer.remove_error_listeners();
+    let token_stream = CommonTokenStream::new(lexer);
+    let mut parser = Cobol85Parser::new(token_stream);
+    parser.remove_error_listeners();
+
+    let tree = parser.startRule().map_err(|e| TranspileError::AntlrError {
+        message: format!("{e:?}"),
+    })?;
+
+    let listener = Box::new(FileListener::new());
     let listener = Cobol85TreeWalker::walk(listener, &*tree);
 
     Ok(*listener)
@@ -504,5 +554,68 @@ mod tests {
         assert_eq!(program.program_id, "EXPANDED");
         assert!(program.data_division.is_some());
         assert!(program.procedure_division.is_some());
+    }
+
+    #[test]
+    fn parse_large_working_storage() {
+        // Test that programs with many WS fields still parse the proc division
+        let mut source = String::from(
+            "IDENTIFICATION DIVISION.\n\
+             PROGRAM-ID. LARGE-WS-TEST.\n\
+             DATA DIVISION.\n\
+             WORKING-STORAGE SECTION.\n"
+        );
+        // Add 600+ WS fields to simulate large_working_storage.cbl
+        for i in 1..=300 {
+            source.push_str(&format!("01  WS-ALPHA-{i:03} PIC X(20).\n"));
+        }
+        for i in 1..=300 {
+            source.push_str(&format!("01  WS-NUM-{i:03}   PIC 9(09).\n"));
+        }
+        source.push_str(
+            "PROCEDURE DIVISION.\n\
+             MAIN-PARAGRAPH.\n\
+                 MOVE \"HELLO\" TO WS-ALPHA-001.\n\
+                 DISPLAY WS-ALPHA-001.\n\
+                 STOP RUN.\n"
+        );
+
+        let result = parse_cobol_from_source(&source);
+        assert!(result.is_ok(), "parse_cobol_from_source failed: {result:?}");
+        let program = result.unwrap();
+        assert_eq!(program.program_id, "LARGE-WS-TEST");
+        assert!(
+            program.procedure_division.is_some(),
+            "procedure_division should NOT be None for programs with PROCEDURE DIVISION"
+        );
+        let pd = program.procedure_division.unwrap();
+        assert!(
+            !pd.paragraphs.is_empty(),
+            "Expected at least 1 paragraph but got 0"
+        );
+    }
+
+    #[test]
+    fn parse_large_ws_from_file() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent().unwrap().parent().unwrap()
+            .join("cobol/volume/large_working_storage.cbl");
+        if !path.exists() {
+            return;
+        }
+        let source = std::fs::read_to_string(&path).unwrap();
+        let result = parse_cobol(&source);
+        assert!(result.is_ok(), "parse_cobol failed: {result:?}");
+        let program = result.unwrap();
+        assert_eq!(program.program_id, "LARGE-WS-TEST");
+        assert!(
+            program.procedure_division.is_some(),
+            "PROCEDURE DIVISION was not parsed from large_working_storage.cbl"
+        );
+        let pd = program.procedure_division.unwrap();
+        assert!(
+            !pd.paragraphs.is_empty(),
+            "Expected at least 1 paragraph but got 0"
+        );
     }
 }

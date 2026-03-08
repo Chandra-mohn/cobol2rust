@@ -81,11 +81,8 @@ impl<'input> Cobol85Listener<'input> for ProcedureDivisionListener {
         // Start new section
         self.current_section_name = ctx
             .procedureSectionHeader()
-            .map(|h| h.get_text().trim().to_uppercase())
-            .map(|s| {
-                // Extract just the section name (before "SECTION")
-                s.split_whitespace().next().unwrap_or("").to_string()
-            });
+            .and_then(|h| h.sectionName())
+            .map(|sn| sn.get_text().trim().to_uppercase());
     }
 
     fn exit_paragraph(
@@ -293,7 +290,7 @@ fn extract_display(ctx: &DisplayStatementContext<'_>) -> Statement {
         .iter()
         .map(|op| {
             if let Some(id) = op.identifier() {
-                Operand::DataRef(extract_data_ref_from_identifier(&id))
+                extract_operand_from_identifier(&id)
             } else if let Some(lit) = op.literal() {
                 extract_literal_operand(&lit)
             } else {
@@ -368,8 +365,11 @@ fn extract_add(ctx: &AddStatementContext<'_>) -> Statement {
             .addTo_all()
             .iter()
             .map(|t| ArithTarget {
-                field: extract_data_ref_from_identifier_text(&t.get_text()),
-                rounded: t.get_text().to_uppercase().contains("ROUNDED"),
+                field: t.identifier().map_or_else(
+                    || extract_data_ref_from_identifier_text(&t.get_text()),
+                    |id| extract_data_ref_from_identifier_text(&id.get_text()),
+                ),
+                rounded: t.ROUNDED().is_some(),
             })
             .collect();
         Statement::Add(AddStatement {
@@ -446,8 +446,11 @@ fn extract_subtract(ctx: &SubtractStatementContext<'_>) -> Statement {
             .subtractMinuend_all()
             .iter()
             .map(|m| ArithTarget {
-                field: extract_data_ref_from_identifier_text(&m.get_text()),
-                rounded: m.get_text().to_uppercase().contains("ROUNDED"),
+                field: m.identifier().map_or_else(
+                    || extract_data_ref_from_identifier_text(&m.get_text()),
+                    |id| extract_data_ref_from_identifier_text(&id.get_text()),
+                ),
+                rounded: m.ROUNDED().is_some(),
             })
             .collect();
         Statement::Subtract(SubtractStatement {
@@ -472,7 +475,7 @@ fn extract_subtract(ctx: &SubtractStatementContext<'_>) -> Statement {
 
 fn extract_multiply(ctx: &MultiplyStatementContext<'_>) -> Statement {
     let multiplicand = if let Some(id) = ctx.identifier() {
-        Operand::DataRef(extract_data_ref_from_identifier(&id))
+        extract_operand_from_identifier(&id)
     } else if let Some(lit) = ctx.literal() {
         extract_literal_operand(&lit)
     } else {
@@ -492,8 +495,11 @@ fn extract_multiply(ctx: &MultiplyStatementContext<'_>) -> Statement {
             .multiplyGivingResult_all()
             .iter()
             .map(|r| ArithTarget {
-                field: extract_data_ref_from_identifier_text(&r.get_text()),
-                rounded: r.get_text().to_uppercase().contains("ROUNDED"),
+                field: r.identifier().map_or_else(
+                    || extract_data_ref_from_identifier_text(&r.get_text()),
+                    |id| extract_data_ref_from_identifier_text(&id.get_text()),
+                ),
+                rounded: r.ROUNDED().is_some(),
             })
             .collect();
         Statement::Multiply(MultiplyStatement {
@@ -511,8 +517,11 @@ fn extract_multiply(ctx: &MultiplyStatementContext<'_>) -> Statement {
             .multiplyRegularOperand_all()
             .iter()
             .map(|o| ArithTarget {
-                field: extract_data_ref_from_identifier_text(&o.get_text()),
-                rounded: o.get_text().to_uppercase().contains("ROUNDED"),
+                field: o.identifier().map_or_else(
+                    || extract_data_ref_from_identifier_text(&o.get_text()),
+                    |id| extract_data_ref_from_identifier_text(&id.get_text()),
+                ),
+                rounded: o.ROUNDED().is_some(),
             })
             .collect();
         Statement::Multiply(MultiplyStatement {
@@ -535,7 +544,7 @@ fn extract_multiply(ctx: &MultiplyStatementContext<'_>) -> Statement {
 
 fn extract_divide(ctx: &DivideStatementContext<'_>) -> Statement {
     let operand = if let Some(id) = ctx.identifier() {
-        Operand::DataRef(extract_data_ref_from_identifier(&id))
+        extract_operand_from_identifier(&id)
     } else if let Some(lit) = ctx.literal() {
         extract_literal_operand(&lit)
     } else {
@@ -545,49 +554,55 @@ fn extract_divide(ctx: &DivideStatementContext<'_>) -> Statement {
     let on_size_error = extract_size_error_stmts(ctx.onSizeErrorPhrase().as_deref());
     let not_on_size_error = extract_not_size_error_stmts(ctx.notOnSizeErrorPhrase().as_deref());
     let remainder = ctx.divideRemainder().map(|r| ArithTarget {
-        field: extract_data_ref_from_identifier_text(&r.get_text()),
+        field: r.identifier().map_or_else(
+            || extract_data_ref_from_identifier_text(&r.get_text()),
+            |id| extract_data_ref_from_identifier_text(&id.get_text()),
+        ),
         rounded: false,
     });
 
     if let Some(into_giving) = ctx.divideIntoGivingStatement() {
-        let into_text = into_giving
-            .identifier()
-            .map(|id| id.get_text())
-            .or_else(|| into_giving.literal().map(|l| l.get_text()))
-            .unwrap_or_default();
+        let into_operand = if let Some(id) = into_giving.identifier() {
+            extract_operand_from_identifier(&id)
+        } else if let Some(lit) = into_giving.literal() {
+            extract_literal_operand(&lit)
+        } else {
+            Operand::Literal(Literal::Numeric("0".to_string()))
+        };
         let giving = into_giving
             .divideGivingPhrase()
-            .map(|gp| extract_giving_phrase_targets(&gp.get_text()))
+            .map(|gp| extract_divide_giving_targets(&gp))
             .unwrap_or_default();
         Statement::Divide(DivideStatement {
             operand,
             direction: DivideDirection::Into,
             into: vec![ArithTarget {
-                field: make_data_ref(&into_text),
+                field: operand_to_data_ref(&into_operand),
                 rounded: false,
             }],
+            by_operand: None,
             giving,
             remainder,
             on_size_error,
             not_on_size_error,
         })
     } else if let Some(by_giving) = ctx.divideByGivingStatement() {
-        let by_text = by_giving
-            .identifier()
-            .map(|id| id.get_text())
-            .or_else(|| by_giving.literal().map(|l| l.get_text()))
-            .unwrap_or_default();
+        let by_op = if let Some(id) = by_giving.identifier() {
+            extract_operand_from_identifier(&id)
+        } else if let Some(lit) = by_giving.literal() {
+            extract_literal_operand(&lit)
+        } else {
+            Operand::Literal(Literal::Numeric("0".to_string()))
+        };
         let giving = by_giving
             .divideGivingPhrase()
-            .map(|gp| extract_giving_phrase_targets(&gp.get_text()))
+            .map(|gp| extract_divide_giving_targets(&gp))
             .unwrap_or_default();
         Statement::Divide(DivideStatement {
             operand,
             direction: DivideDirection::By,
-            into: vec![ArithTarget {
-                field: make_data_ref(&by_text),
-                rounded: false,
-            }],
+            into: Vec::new(),
+            by_operand: Some(by_op),
             giving,
             remainder,
             on_size_error,
@@ -598,14 +613,18 @@ fn extract_divide(ctx: &DivideStatementContext<'_>) -> Statement {
             .divideInto_all()
             .iter()
             .map(|d| ArithTarget {
-                field: extract_data_ref_from_identifier_text(&d.get_text()),
-                rounded: d.get_text().to_uppercase().contains("ROUNDED"),
+                field: d.identifier().map_or_else(
+                    || extract_data_ref_from_identifier_text(&d.get_text()),
+                    |id| extract_data_ref_from_identifier_text(&id.get_text()),
+                ),
+                rounded: d.ROUNDED().is_some(),
             })
             .collect();
         Statement::Divide(DivideStatement {
             operand,
             direction: DivideDirection::Into,
             into,
+            by_operand: None,
             giving: Vec::new(),
             remainder,
             on_size_error,
@@ -616,6 +635,7 @@ fn extract_divide(ctx: &DivideStatementContext<'_>) -> Statement {
             operand,
             direction: DivideDirection::Into,
             into: Vec::new(),
+            by_operand: None,
             giving: Vec::new(),
             remainder: None,
             on_size_error: Vec::new(),
@@ -717,12 +737,18 @@ fn extract_evaluate(ctx: &EvaluateStatementContext<'_>) -> Statement {
                 .evaluateWhen_all()
                 .iter()
                 .map(|w| {
-                    let text = w.get_text().to_uppercase();
-                    let text = text.strip_prefix("WHEN").unwrap_or(&text).trim();
-                    if text == "ANY" || text == "OTHER" {
-                        WhenValue::Any
+                    // Use structured parse tree: evaluateWhen -> evaluateCondition
+                    if let Some(cond_ctx) = w.evaluateCondition() {
+                        extract_when_value_from_condition(&cond_ctx)
                     } else {
-                        WhenValue::Value(extract_identifier_or_literal_from_text(text))
+                        // Fallback to text-based
+                        let text = w.get_text().to_uppercase();
+                        let text = text.strip_prefix("WHEN").unwrap_or(&text).trim();
+                        if text == "ANY" || text == "OTHER" {
+                            WhenValue::Any
+                        } else {
+                            WhenValue::Value(extract_identifier_or_literal_from_text(text))
+                        }
                     }
                 })
                 .collect();
@@ -1148,18 +1174,47 @@ fn extract_start(ctx: &StartStatementContext<'_>) -> Statement {
 }
 
 fn extract_accept(ctx: &AcceptStatementContext<'_>) -> Statement {
-    let text = ctx.get_text().to_uppercase();
-    let name = text
-        .strip_prefix("ACCEPT")
-        .unwrap_or("")
-        .split_whitespace()
-        .next()
-        .unwrap_or("")
-        .to_string();
-    Statement::Accept(AcceptStatement {
-        target: make_data_ref(&name),
-        from: AcceptSource::Sysin,
-    })
+    // Extract target identifier
+    let target = if let Some(id) = ctx.identifier() {
+        extract_data_ref_from_identifier(&id)
+    } else {
+        let text = ctx.get_text().to_uppercase();
+        let name = text
+            .strip_prefix("ACCEPT")
+            .unwrap_or("")
+            .split_whitespace()
+            .next()
+            .unwrap_or("")
+            .to_string();
+        make_data_ref(&name)
+    };
+
+    // Determine source (FROM DATE/TIME/DAY/DAY-OF-WEEK or SYSIN)
+    let from = if let Some(date_ctx) = ctx.acceptFromDateStatement() {
+        if date_ctx.DATE().is_some() {
+            if date_ctx.YYYYMMDD().is_some() {
+                AcceptSource::DateYyyyMmDd
+            } else {
+                AcceptSource::Date
+            }
+        } else if date_ctx.DAY().is_some() {
+            if date_ctx.YYYYDDD().is_some() {
+                AcceptSource::DayYyyyDdd
+            } else {
+                AcceptSource::Day
+            }
+        } else if date_ctx.DAY_OF_WEEK().is_some() {
+            AcceptSource::DayOfWeek
+        } else if date_ctx.TIME().is_some() || date_ctx.TIMER().is_some() {
+            AcceptSource::Time
+        } else {
+            AcceptSource::Date
+        }
+    } else {
+        AcceptSource::Sysin
+    };
+
+    Statement::Accept(AcceptStatement { target, from })
 }
 
 // ---------------------------------------------------------------------------
@@ -1522,6 +1577,9 @@ fn extract_condition(ctx: &ConditionContext<'_>) -> Condition {
         .combinableCondition()
         .map_or(Condition::ConditionName(make_data_ref("TRUE")), |cc| extract_combinable_condition(&cc));
 
+    // Track implied subject/operator for abbreviated conditions (e.g., A = 50 OR 75)
+    let (mut implied_subject, mut implied_op) = extract_implied_subject_op(&base);
+
     // Process AND/OR chains
     let and_or_list = ctx.andOrCondition_all();
     if and_or_list.is_empty() {
@@ -1530,9 +1588,24 @@ fn extract_condition(ctx: &ConditionContext<'_>) -> Condition {
 
     let mut result = base;
     for ao in &and_or_list {
-        let right = ao
-            .combinableCondition()
-            .map_or(Condition::ConditionName(make_data_ref("TRUE")), |cc| extract_combinable_condition(&cc));
+        let right = if let Some(cc) = ao.combinableCondition() {
+            let cond = extract_combinable_condition(&cc);
+            // Update implied subject/op from this condition
+            let (subj, op) = extract_implied_subject_op(&cond);
+            if subj.is_some() {
+                implied_subject = subj;
+                implied_op = op;
+            }
+            cond
+        } else {
+            // Abbreviated condition: expand abbreviations using implied subject
+            let abbrevs = ao.abbreviation_all();
+            if !abbrevs.is_empty() {
+                expand_abbreviation(&abbrevs[0], &implied_subject, implied_op)
+            } else {
+                Condition::ConditionName(make_data_ref("TRUE"))
+            }
+        };
         if ao.AND().is_some() {
             result = Condition::And(Box::new(result), Box::new(right));
         } else {
@@ -1540,6 +1613,47 @@ fn extract_condition(ctx: &ConditionContext<'_>) -> Condition {
         }
     }
     result
+}
+
+/// Extract implied subject and operator from a comparison condition.
+/// Returns (Some(subject_operand), operator) if the condition is a Comparison.
+fn extract_implied_subject_op(cond: &Condition) -> (Option<Operand>, ComparisonOp) {
+    match cond {
+        Condition::Comparison { left, op, .. } => (Some(left.clone()), *op),
+        _ => (None, ComparisonOp::Equal),
+    }
+}
+
+/// Expand an abbreviated condition using the implied subject and operator.
+/// For example: `75` in `A = 50 OR 75` expands to `A = 75`.
+fn expand_abbreviation(
+    abbrev: &AbbreviationContext<'_>,
+    implied_subject: &Option<Operand>,
+    implied_op: ComparisonOp,
+) -> Condition {
+    // Determine operator: use abbreviation's operator if present, else implied
+    let op = abbrev
+        .relationalOperator()
+        .map_or(implied_op, |ro| extract_relational_op(&ro));
+
+    let negated = abbrev.NOT().is_some();
+
+    // Get the value from the abbreviation
+    let right = abbrev
+        .arithmeticExpression()
+        .map(|ae| arith_expr_to_operand(&extract_arith_expr(&ae)))
+        .unwrap_or(Operand::Literal(Literal::Numeric("0".to_string())));
+
+    let left = implied_subject
+        .clone()
+        .unwrap_or(Operand::Literal(Literal::Numeric("0".to_string())));
+
+    let cond = Condition::Comparison { left, op, right };
+    if negated {
+        Condition::Not(Box::new(cond))
+    } else {
+        cond
+    }
 }
 
 fn extract_combinable_condition(
@@ -1789,7 +1903,7 @@ fn extract_basis(ctx: &BasisContext<'_>) -> ArithExpr {
     if let Some(expr) = ctx.arithmeticExpression() {
         ArithExpr::Paren(Box::new(extract_arith_expr(&expr)))
     } else if let Some(id) = ctx.identifier() {
-        ArithExpr::Operand(Operand::DataRef(extract_data_ref_from_identifier(&id)))
+        ArithExpr::Operand(extract_operand_from_identifier(&id))
     } else if let Some(lit) = ctx.literal() {
         ArithExpr::Operand(extract_literal_operand(&lit))
     } else {
@@ -1819,6 +1933,36 @@ fn extract_ref_mod(ctx: &ReferenceModifierContext<'_>) -> RefMod {
         offset: Box::new(offset),
         length,
     }
+}
+
+/// Extract an `Operand` from an `IdentifierContext`, handling function calls.
+fn extract_operand_from_identifier(ctx: &IdentifierContext<'_>) -> Operand {
+    // Check for FUNCTION call first
+    if let Some(fc) = ctx.functionCall() {
+        let func_name = fc.functionName()
+            .map_or_else(|| fc.get_text().to_uppercase(), |fn_ctx| fn_ctx.get_text().to_uppercase());
+        // Strip FUNCTION prefix if present
+        let func_name = func_name.strip_prefix("FUNCTION").unwrap_or(&func_name).trim().to_string();
+        let arguments: Vec<Operand> = fc.argument_all()
+            .iter()
+            .map(|arg| {
+                if let Some(lit) = arg.literal() {
+                    extract_literal_operand(&lit)
+                } else if let Some(id) = arg.identifier() {
+                    extract_operand_from_identifier(&id)
+                } else if let Some(qdn) = arg.qualifiedDataName() {
+                    Operand::DataRef(extract_data_ref_from_qualified(&qdn))
+                } else {
+                    extract_identifier_or_literal_from_text(&arg.get_text())
+                }
+            })
+            .collect();
+        return Operand::Function(FunctionCall {
+            name: func_name,
+            arguments,
+        });
+    }
+    Operand::DataRef(extract_data_ref_from_identifier(ctx))
 }
 
 /// Extract a `DataReference` from an `IdentifierContext`.
@@ -1898,7 +2042,16 @@ fn extract_literal_operand(ctx: &LiteralContext<'_>) -> Operand {
         Operand::Literal(Literal::Numeric(num.get_text().trim().to_string()))
     } else if let Some(fig) = ctx.figurativeConstant() {
         let text = fig.get_text().to_uppercase();
-        let fc = if text.contains("SPACE") {
+        let fc = if text.starts_with("ALL") {
+            // ALL "x" -- extract the literal after ALL
+            let rest = &fig.get_text()[3..];
+            let inner = strip_cobol_quotes(rest);
+            if inner.is_empty() {
+                FigurativeConstant::Spaces
+            } else {
+                FigurativeConstant::All(inner)
+            }
+        } else if text.contains("SPACE") {
             FigurativeConstant::Spaces
         } else if text.contains("ZERO") {
             FigurativeConstant::Zeros
@@ -1928,7 +2081,7 @@ fn extract_operand_from_sending_area(
     ctx: &MoveToSendingAreaContext<'_>,
 ) -> Operand {
     if let Some(id) = ctx.identifier() {
-        Operand::DataRef(extract_data_ref_from_identifier(&id))
+        extract_operand_from_identifier(&id)
     } else if let Some(lit) = ctx.literal() {
         extract_literal_operand(&lit)
     } else {
@@ -1939,7 +2092,7 @@ fn extract_operand_from_sending_area(
 /// Extract operand from `AddFrom` context.
 fn extract_operand_from_add_from(ctx: &AddFromContext<'_>) -> Operand {
     if let Some(id) = ctx.identifier() {
-        Operand::DataRef(extract_data_ref_from_identifier(&id))
+        extract_operand_from_identifier(&id)
     } else if let Some(lit) = ctx.literal() {
         extract_literal_operand(&lit)
     } else {
@@ -1960,11 +2113,70 @@ fn extract_evaluate_subject(
     }
 
     if let Some(id) = ctx.identifier() {
-        EvaluateSubject::Expr(Operand::DataRef(extract_data_ref_from_identifier(&id)))
+        EvaluateSubject::Expr(extract_operand_from_identifier(&id))
     } else if let Some(lit) = ctx.literal() {
         EvaluateSubject::Expr(extract_literal_operand(&lit))
     } else {
         EvaluateSubject::Expr(extract_identifier_or_literal_from_text(&text))
+    }
+}
+
+/// Extract a `WhenValue` from a structured `EvaluateConditionContext`.
+fn extract_when_value_from_condition(ctx: &EvaluateConditionContext<'_>) -> WhenValue {
+    // Alt 1: ANY
+    if ctx.ANY().is_some() {
+        return WhenValue::Any;
+    }
+
+    // Alt 3: condition (boolean expression like WS-A > 75)
+    if let Some(cond) = ctx.condition() {
+        return WhenValue::Condition(extract_condition(&cond));
+    }
+
+    // Alt 4: booleanLiteral (TRUE/FALSE)
+    if let Some(bl) = ctx.booleanLiteral() {
+        let text = bl.get_text().to_uppercase();
+        if text == "TRUE" {
+            return WhenValue::Value(Operand::Literal(Literal::Alphanumeric("TRUE".to_string())));
+        }
+        return WhenValue::Value(Operand::Literal(Literal::Alphanumeric("FALSE".to_string())));
+    }
+
+    // Alt 2: [NOT] evaluateValue [THRU evaluateThrough]
+    if let Some(val_ctx) = ctx.evaluateValue() {
+        let operand = extract_evaluate_value_operand(&val_ctx);
+
+        // Check for THRU range
+        if let Some(through_ctx) = ctx.evaluateThrough() {
+            if let Some(high_val) = through_ctx.evaluateValue() {
+                let high_operand = extract_evaluate_value_operand(&high_val);
+                return WhenValue::Range {
+                    low: operand,
+                    high: high_operand,
+                };
+            }
+        }
+
+        return WhenValue::Value(operand);
+    }
+
+    // Fallback: use raw text
+    let text = ctx.get_text().to_uppercase();
+    WhenValue::Value(extract_identifier_or_literal_from_text(&text))
+}
+
+/// Extract an `Operand` from an `EvaluateValueContext`.
+fn extract_evaluate_value_operand(ctx: &EvaluateValueContext<'_>) -> Operand {
+    if let Some(id) = ctx.identifier() {
+        extract_operand_from_identifier(&id)
+    } else if let Some(lit) = ctx.literal() {
+        extract_literal_operand(&lit)
+    } else if let Some(arith) = ctx.arithmeticExpression() {
+        let expr = extract_arith_expr(&arith);
+        arith_expr_to_operand(&expr)
+    } else {
+        let text = ctx.get_text();
+        extract_identifier_or_literal_from_text(&text)
     }
 }
 
@@ -2027,6 +2239,17 @@ fn make_data_ref(name: &str) -> DataReference {
     }
 }
 
+/// Convert an Operand to a DataReference. For DataRef operands, unwraps the
+/// inner DataReference. For literals, creates a DataReference from the literal text.
+fn operand_to_data_ref(op: &Operand) -> DataReference {
+    match op {
+        Operand::DataRef(dr) => dr.clone(),
+        Operand::Literal(Literal::Numeric(n)) => make_data_ref(n),
+        Operand::Literal(Literal::Alphanumeric(s)) => make_data_ref(s),
+        _ => make_data_ref("0"),
+    }
+}
+
 /// Extract data ref from identifier text (stripping ROUNDED if present).
 fn extract_data_ref_from_identifier_text(text: &str) -> DataReference {
     let clean = text
@@ -2038,7 +2261,8 @@ fn extract_data_ref_from_identifier_text(text: &str) -> DataReference {
     make_data_ref(&clean)
 }
 
-/// Extract giving phrase targets from text.
+/// Extract giving phrase targets from text (fallback for non-ANTLR contexts).
+#[cfg(test)]
 fn extract_giving_phrase_targets(text: &str) -> Vec<ArithTarget> {
     let upper = text.trim().to_uppercase();
     let clean = upper
@@ -2059,6 +2283,20 @@ fn extract_giving_phrase_targets(text: &str) -> Vec<ArithTarget> {
         i += if rounded { 2 } else { 1 };
     }
     targets
+}
+
+/// Extract DIVIDE GIVING targets using ANTLR context (proper identifier/ROUNDED).
+fn extract_divide_giving_targets(ctx: &DivideGivingPhraseContext<'_>) -> Vec<ArithTarget> {
+    ctx.divideGiving_all()
+        .iter()
+        .map(|g| ArithTarget {
+            field: g.identifier().map_or_else(
+                || extract_data_ref_from_identifier_text(&g.get_text()),
+                |id| extract_data_ref_from_identifier_text(&id.get_text()),
+            ),
+            rounded: g.ROUNDED().is_some(),
+        })
+        .collect()
 }
 
 /// Parse an operand from raw text (identifier or literal).

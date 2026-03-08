@@ -13,7 +13,7 @@ pub mod subtract;
 
 // Re-export public API
 pub use add::{cobol_add, cobol_add_giving};
-pub use compute::cobol_compute;
+pub use compute::{cobol_checked_div, cobol_compute};
 pub use divide::{cobol_divide, cobol_divide_by_giving, cobol_divide_giving};
 pub use multiply::{cobol_multiply, cobol_multiply_giving};
 pub use result::ArithResult;
