@@ -17,7 +17,7 @@
 set -euo pipefail
 
 RAMDISK_NAME="RustBuild"
-RAMDISK_SIZE_GB=4
+RAMDISK_SIZE_GB=8
 RAMDISK_MOUNT="/Volumes/${RAMDISK_NAME}"
 TARGET_SUBDIR="cobol2rust-target"
 
