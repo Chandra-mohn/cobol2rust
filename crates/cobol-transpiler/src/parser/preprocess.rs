@@ -312,6 +312,11 @@ pub fn extract_exec_blocks(source: &str) -> ExecExtraction {
     let len = bytes.len();
     let mut i = 0;
 
+    // Find the position of PROCEDURE DIVISION in the source.
+    // EXEC SQL blocks before this point (e.g., INCLUDE SQLCA in DATA DIVISION)
+    // must NOT be replaced with CONTINUE (which is a procedure statement).
+    let proc_div_pos = upper.find("PROCEDURE DIVISION").unwrap_or(len);
+
     while i < len {
         // Look for "EXEC SQL" (case-insensitive)
         if i + 8 <= len && &upper_bytes[i..i + 8] == b"EXEC SQL" {
@@ -330,15 +335,22 @@ pub fn extract_exec_blocks(source: &str) -> ExecExtraction {
                         exec_type: "SQL".to_string(),
                         text: normalized,
                     });
-                    // Replace with CONTINUE so ANTLR sees a valid statement
-                    result.push_str("CONTINUE");
+                    // In PROCEDURE DIVISION: replace with CONTINUE statement.
+                    // Before PROCEDURE DIVISION (DATA DIVISION): remove entirely
+                    // (CONTINUE is not valid in DATA DIVISION).
+                    let in_proc_div = i >= proc_div_pos;
+                    if in_proc_div {
+                        result.push_str("CONTINUE");
+                    }
                     i = end_pos + 8; // skip past END-EXEC
-                    // Skip optional trailing period
+                    // Skip optional trailing whitespace and period
                     while i < len && (bytes[i] == b' ' || bytes[i] == b'\t') {
                         i += 1;
                     }
                     if i < len && bytes[i] == b'.' {
-                        result.push('.');
+                        if in_proc_div {
+                            result.push('.');
+                        }
                         i += 1;
                     }
                     continue;
@@ -363,13 +375,18 @@ pub fn extract_exec_blocks(source: &str) -> ExecExtraction {
                         exec_type: "CICS".to_string(),
                         text: normalized,
                     });
-                    result.push_str("CONTINUE");
+                    let in_proc_div = i >= proc_div_pos;
+                    if in_proc_div {
+                        result.push_str("CONTINUE");
+                    }
                     i = end_pos + 8;
                     while i < len && (bytes[i] == b' ' || bytes[i] == b'\t') {
                         i += 1;
                     }
                     if i < len && bytes[i] == b'.' {
-                        result.push('.');
+                        if in_proc_div {
+                            result.push('.');
+                        }
                         i += 1;
                     }
                     continue;
@@ -513,7 +530,7 @@ WORKING-STORAGE SECTION.";
 
     #[test]
     fn extract_single_exec_sql() {
-        let source = "MOVE 1 TO WS-X.\nEXEC SQL SELECT A INTO :H FROM T END-EXEC.\nSTOP RUN.";
+        let source = "PROCEDURE DIVISION.\nMOVE 1 TO WS-X.\nEXEC SQL SELECT A INTO :H FROM T END-EXEC.\nSTOP RUN.";
         let ext = extract_exec_blocks(source);
         assert_eq!(ext.sql_blocks.len(), 1);
         assert_eq!(ext.sql_blocks[0].exec_type, "SQL");
@@ -587,7 +604,7 @@ WORKING-STORAGE SECTION.";
 
     #[test]
     fn extract_preserves_period_after_end_exec() {
-        let source = "EXEC SQL COMMIT END-EXEC.\nSTOP RUN.";
+        let source = "PROCEDURE DIVISION.\nEXEC SQL COMMIT END-EXEC.\nSTOP RUN.";
         let ext = extract_exec_blocks(source);
         // The period after END-EXEC should be preserved (attached to CONTINUE)
         assert!(ext.cleaned_source.contains("CONTINUE."));
@@ -607,6 +624,18 @@ WORKING-STORAGE SECTION.";
         let ext = extract_exec_blocks(source);
         assert_eq!(ext.sql_blocks.len(), 1);
         assert_eq!(ext.sql_blocks[0].text, "INCLUDE SQLCA");
+    }
+
+    #[test]
+    fn extract_data_division_exec_sql_no_continue() {
+        // EXEC SQL in DATA DIVISION should NOT produce CONTINUE (it's not valid there)
+        let source = "DATA DIVISION.\nEXEC SQL INCLUDE SQLCA END-EXEC.\nPROCEDURE DIVISION.\nEXEC SQL COMMIT END-EXEC.\nSTOP RUN.";
+        let ext = extract_exec_blocks(source);
+        assert_eq!(ext.sql_blocks.len(), 2);
+        // DATA DIVISION block: no CONTINUE inserted
+        assert!(!ext.cleaned_source.starts_with("DATA DIVISION.\nCONTINUE"));
+        // PROCEDURE DIVISION block: CONTINUE inserted
+        assert!(ext.cleaned_source.contains("PROCEDURE DIVISION.\nCONTINUE."));
     }
 
     #[test]

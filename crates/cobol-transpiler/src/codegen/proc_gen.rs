@@ -5,7 +5,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::ast::{ConditionValue, DataEntry, PicClause, PicCategory, ProcedureDivision, Paragraph, Statement, MoveStatement, Operand, Literal, FigurativeConstant, DisplayStatement, AddStatement, SubtractStatement, MultiplyStatement, DivideStatement, DivideDirection, ComputeStatement, IfStatement, EvaluateStatement, EvaluateSubject, WhenValue, PerformStatement, PerformLoopType, GoToStatement, InitializeStatement, InitializeCategory, InitializeReplacing, CallStatement, PassingMode, CancelStatement, AcceptStatement, AcceptSource, OpenStatement, OpenMode, CloseStatement, ReadStatement, WriteStatement, Advancing, RewriteStatement, DeleteStatement, StartStatement, ComparisonOp, SetStatement, SetAction, DataReference, Subscript, ArithExpr, ArithOp, Condition, ClassCondition, SignCondition, SortStatement, SortInput, SortOutput, MergeStatement, ReleaseStatement, ReturnStatement, InspectStatement, InspectWhat, StringStatement, StringDelimiter, UnstringStatement, FunctionCall};
+use crate::ast::{ConditionValue, DataEntry, PicClause, PicCategory, ProcedureDivision, Paragraph, Statement, MoveStatement, Operand, Literal, FigurativeConstant, DisplayStatement, AddStatement, SubtractStatement, MultiplyStatement, DivideStatement, DivideDirection, ComputeStatement, IfStatement, EvaluateStatement, EvaluateSubject, WhenValue, PerformStatement, PerformLoopType, GoToStatement, InitializeStatement, InitializeCategory, InitializeReplacing, CallStatement, PassingMode, CancelStatement, AcceptStatement, AcceptSource, OpenStatement, OpenMode, CloseStatement, ReadStatement, WriteStatement, Advancing, RewriteStatement, DeleteStatement, StartStatement, ComparisonOp, SetStatement, SetAction, DataReference, Subscript, ArithExpr, ArithOp, Condition, ClassCondition, SignCondition, SortStatement, SortInput, SortOutput, MergeStatement, ReleaseStatement, ReturnStatement, InspectStatement, InspectWhat, StringStatement, StringDelimiter, UnstringStatement, FunctionCall, ExecSqlStatement, SqlStatementType};
 use crate::codegen::data_gen::cobol_to_rust_name;
 use crate::codegen::rust_writer::RustWriter;
 
@@ -197,6 +197,7 @@ pub fn generate_procedure_division(
     sort_field_map: &SortFieldMap,
     ws_records: &[DataEntry],
     file_section_records: &[DataEntry],
+    has_sql: bool,
 ) {
     let gcm = build_group_child_map(ws_records, file_section_records);
     // Collect section/paragraph names used as INPUT/OUTPUT PROCEDURE (needed early for dispatch)
@@ -241,7 +242,11 @@ pub fn generate_procedure_division(
 
     // Generate run() with program counter dispatch loop
     w.line("/// Execute the COBOL program.");
-    w.open_block("pub fn run(ws: &mut WorkingStorage, ctx: &mut ProgramContext) {");
+    if has_sql {
+        w.open_block("pub fn run(ws: &mut WorkingStorage, ctx: &mut ProgramContext, sql: &mut dyn CobolSqlRuntime) {");
+    } else {
+        w.open_block("pub fn run(ws: &mut WorkingStorage, ctx: &mut ProgramContext) {");
+    }
 
     if para_table.is_empty() {
         w.close_block("}");
@@ -255,7 +260,11 @@ pub fn generate_procedure_division(
     // Dispatch match
     w.open_block("match _pc {");
     for pi in &para_table {
-        w.line(&format!("{} => {}(ws, ctx),", pi.index, pi.rust_name));
+        if has_sql {
+            w.line(&format!("{} => {}(ws, ctx, sql),", pi.index, pi.rust_name));
+        } else {
+            w.line(&format!("{} => {}(ws, ctx),", pi.index, pi.rust_name));
+        }
     }
     w.line("_ => break,");
     w.close_block("}");
@@ -279,7 +288,7 @@ pub fn generate_procedure_division(
 
     // Generate paragraph functions (outside sections)
     for para in &proc_div.paragraphs {
-        generate_paragraph_fn(w, para, cmap, &para_table, record_file_map, sort_field_map, &spn, None, &gcm);
+        generate_paragraph_fn(w, para, cmap, &para_table, record_file_map, sort_field_map, &spn, None, &gcm, has_sql);
     }
 
     // Generate section paragraphs and section wrapper functions
@@ -305,7 +314,7 @@ pub fn generate_procedure_division(
 
         // Generate individual paragraph functions
         for para in &section.paragraphs {
-            generate_paragraph_fn(w, para, cmap, &para_table, record_file_map, sort_field_map, &spn, extra_param, &gcm);
+            generate_paragraph_fn(w, para, cmap, &para_table, record_file_map, sort_field_map, &spn, extra_param, &gcm, has_sql);
         }
 
         // Generate section-level wrapper function that calls all paragraphs
@@ -320,6 +329,10 @@ pub fn generate_procedure_division(
                 w.open_block(&format!(
                     "fn {section_fn}(ws: &mut WorkingStorage, ctx: &mut ProgramContext, returner: &mut Returner) {{"
                 ));
+            } else if has_sql {
+                w.open_block(&format!(
+                    "fn {section_fn}(ws: &mut WorkingStorage, ctx: &mut ProgramContext, sql: &mut dyn CobolSqlRuntime) {{"
+                ));
             } else {
                 w.open_block(&format!(
                     "fn {section_fn}(ws: &mut WorkingStorage, ctx: &mut ProgramContext) {{"
@@ -331,6 +344,8 @@ pub fn generate_procedure_division(
                     w.line(&format!("{para_fn}(ws, ctx, releaser);"));
                 } else if section_is_output {
                     w.line(&format!("{para_fn}(ws, ctx, returner);"));
+                } else if has_sql {
+                    w.line(&format!("{para_fn}(ws, ctx, sql);"));
                 } else {
                     w.line(&format!("{para_fn}(ws, ctx);"));
                 }
@@ -346,7 +361,7 @@ pub fn generate_procedure_division(
 ///
 /// `extra_param`: If `Some("releaser")`, adds `releaser: &mut Releaser` param.
 ///                If `Some("returner")`, adds `returner: &mut Returner` param.
-fn generate_paragraph_fn(w: &mut RustWriter, para: &Paragraph, cmap: &ConditionMap, ptable: &[ParagraphIndex], rfm: &RecordFileMap, sfm: &SortFieldMap, _spn: &SortProcedureNames, extra_param: Option<&str>, gcm: &GroupChildMap) {
+fn generate_paragraph_fn(w: &mut RustWriter, para: &Paragraph, cmap: &ConditionMap, ptable: &[ParagraphIndex], rfm: &RecordFileMap, sfm: &SortFieldMap, _spn: &SortProcedureNames, extra_param: Option<&str>, gcm: &GroupChildMap, has_sql: bool) {
     let fn_name = cobol_to_rust_name(&para.name, "");
     w.line("#[allow(non_snake_case, unused_variables)]");
     match extra_param {
@@ -356,14 +371,22 @@ fn generate_paragraph_fn(w: &mut RustWriter, para: &Paragraph, cmap: &ConditionM
         Some("returner") => w.open_block(&format!(
             "fn {fn_name}(ws: &mut WorkingStorage, ctx: &mut ProgramContext, returner: &mut Returner) {{"
         )),
-        _ => w.open_block(&format!(
-            "fn {fn_name}(ws: &mut WorkingStorage, ctx: &mut ProgramContext) {{"
-        )),
+        _ => {
+            if has_sql {
+                w.open_block(&format!(
+                    "fn {fn_name}(ws: &mut WorkingStorage, ctx: &mut ProgramContext, sql: &mut dyn CobolSqlRuntime) {{"
+                ));
+            } else {
+                w.open_block(&format!(
+                    "fn {fn_name}(ws: &mut WorkingStorage, ctx: &mut ProgramContext) {{"
+                ));
+            }
+        }
     }
 
     for sentence in &para.sentences {
         for stmt in &sentence.statements {
-            generate_statement(w, stmt, cmap, ptable, rfm, sfm, gcm);
+            generate_statement(w, stmt, cmap, ptable, rfm, sfm, gcm, has_sql);
         }
     }
 
@@ -372,7 +395,7 @@ fn generate_paragraph_fn(w: &mut RustWriter, para: &Paragraph, cmap: &ConditionM
 }
 
 /// Generate Rust code for a single statement.
-fn generate_statement(w: &mut RustWriter, stmt: &Statement, cmap: &ConditionMap, ptable: &[ParagraphIndex], rfm: &RecordFileMap, sfm: &SortFieldMap, gcm: &GroupChildMap) {
+fn generate_statement(w: &mut RustWriter, stmt: &Statement, cmap: &ConditionMap, ptable: &[ParagraphIndex], rfm: &RecordFileMap, sfm: &SortFieldMap, gcm: &GroupChildMap, has_sql: bool) {
     match stmt {
         Statement::Move(m) => generate_move(w, m, gcm),
         Statement::Display(d) => generate_display(w, d),
@@ -381,9 +404,9 @@ fn generate_statement(w: &mut RustWriter, stmt: &Statement, cmap: &ConditionMap,
         Statement::Multiply(m) => generate_multiply(w, m),
         Statement::Divide(d) => generate_divide(w, d),
         Statement::Compute(c) => generate_compute(w, c),
-        Statement::If(i) => generate_if(w, i, cmap, ptable, rfm, sfm, gcm),
-        Statement::Evaluate(e) => generate_evaluate(w, e, cmap, ptable, rfm, sfm, gcm),
-        Statement::Perform(p) => generate_perform(w, p, cmap, ptable, rfm, sfm, gcm),
+        Statement::If(i) => generate_if(w, i, cmap, ptable, rfm, sfm, gcm, has_sql),
+        Statement::Evaluate(e) => generate_evaluate(w, e, cmap, ptable, rfm, sfm, gcm, has_sql),
+        Statement::Perform(p) => generate_perform(w, p, cmap, ptable, rfm, sfm, gcm, has_sql),
         Statement::GoTo(g) => generate_goto(w, g),
         Statement::StopRun => {
             w.line("ctx.stop_run();");
@@ -401,31 +424,348 @@ fn generate_statement(w: &mut RustWriter, stmt: &Statement, cmap: &ConditionMap,
         }
         Statement::ExitParagraph | Statement::ExitSection => w.line("return;"),
         Statement::Initialize(init) => generate_initialize(w, init, gcm),
-        Statement::Call(call) => generate_call(w, call, cmap, ptable, rfm, sfm, gcm),
+        Statement::Call(call) => generate_call(w, call, cmap, ptable, rfm, sfm, gcm, has_sql),
         Statement::Cancel(cancel) => generate_cancel(w, cancel),
         Statement::Accept(acc) => generate_accept(w, acc),
         Statement::Open(open) => generate_open(w, open),
         Statement::Close(close) => generate_close(w, close),
-        Statement::Read(read) => generate_read(w, read, cmap, ptable, rfm, sfm, gcm),
-        Statement::Write(write) => generate_write(w, write, cmap, ptable, rfm, sfm, gcm),
-        Statement::Rewrite(rw) => generate_rewrite(w, rw, cmap, ptable, rfm, sfm, gcm),
-        Statement::Delete(del) => generate_delete(w, del, cmap, ptable, rfm, sfm, gcm),
+        Statement::Read(read) => generate_read(w, read, cmap, ptable, rfm, sfm, gcm, has_sql),
+        Statement::Write(write) => generate_write(w, write, cmap, ptable, rfm, sfm, gcm, has_sql),
+        Statement::Rewrite(rw) => generate_rewrite(w, rw, cmap, ptable, rfm, sfm, gcm, has_sql),
+        Statement::Delete(del) => generate_delete(w, del, cmap, ptable, rfm, sfm, gcm, has_sql),
         Statement::Sort(sort) => generate_sort(w, sort, cmap, sfm),
         Statement::Merge(merge) => generate_merge(w, merge, cmap, sfm),
         Statement::Release(rel) => generate_release(w, rel),
-        Statement::Return(ret) => generate_return(w, ret, cmap, ptable, rfm, sfm, gcm),
+        Statement::Return(ret) => generate_return(w, ret, cmap, ptable, rfm, sfm, gcm, has_sql),
         Statement::Inspect(insp) => generate_inspect(w, insp, cmap),
-        Statement::String(s) => generate_string(w, s, cmap, ptable, rfm, sfm, gcm),
-        Statement::Unstring(u) => generate_unstring(w, u, cmap, ptable, rfm, sfm, gcm),
+        Statement::String(s) => generate_string(w, s, cmap, ptable, rfm, sfm, gcm, has_sql),
+        Statement::Unstring(u) => generate_unstring(w, u, cmap, ptable, rfm, sfm, gcm, has_sql),
         Statement::Set(set) => generate_set(w, set, cmap),
-        Statement::Start(start) => generate_start(w, start, cmap, ptable, rfm, sfm, gcm),
+        Statement::Start(start) => generate_start(w, start, cmap, ptable, rfm, sfm, gcm, has_sql),
         Statement::Alter(_) => {
             w.line(&format!("// TODO: unsupported statement: {stmt:?}"));
         }
-        Statement::ExecSql(sql) => {
-            w.line(&format!("// EXEC SQL: {} (codegen not yet implemented)", sql.raw_sql));
+        Statement::ExecSql(exec) => generate_exec_sql(w, exec),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// SQL statement generator
+// ---------------------------------------------------------------------------
+
+/// Generate Rust code for an EXEC SQL statement.
+///
+/// Maps each `SqlStatementType` variant to the corresponding `CobolSqlRuntime`
+/// trait method call. Host variables are converted to `HostVar` / `HostVarMut`
+/// arrays using partial struct borrows from `ws`.
+fn generate_exec_sql(w: &mut RustWriter, exec: &ExecSqlStatement) {
+    match &exec.sql_type {
+        SqlStatementType::IncludeSqlca => {
+            // EXEC SQL INCLUDE SQLCA -- no codegen needed, SQLCA is injected
+            // into WorkingStorage by data_gen when has_sql is true.
+            w.line("// EXEC SQL INCLUDE SQLCA (handled by data_gen)");
+        }
+        SqlStatementType::SelectInto => {
+            // SELECT ... INTO :host-var ... WHERE :host-var ...
+            generate_sql_query(w, exec);
+        }
+        SqlStatementType::Insert | SqlStatementType::Update | SqlStatementType::Delete => {
+            generate_sql_update(w, exec);
+        }
+        SqlStatementType::Commit => {
+            w.line("sql.commit(&mut ws.sqlca);");
+        }
+        SqlStatementType::Rollback => {
+            w.line("sql.rollback(&mut ws.sqlca);");
+        }
+        SqlStatementType::DeclareCursor => {
+            generate_sql_declare_cursor(w, exec);
+        }
+        SqlStatementType::OpenCursor => {
+            if let Some(ref cursor_name) = exec.cursor_name {
+                w.line(&format!(
+                    "sql.open_cursor(\"{}\", &mut ws.sqlca);",
+                    cursor_name.to_uppercase()
+                ));
+            }
+        }
+        SqlStatementType::FetchCursor => {
+            generate_sql_fetch_cursor(w, exec);
+        }
+        SqlStatementType::CloseCursor => {
+            if let Some(ref cursor_name) = exec.cursor_name {
+                w.line(&format!(
+                    "sql.close_cursor(\"{}\", &mut ws.sqlca);",
+                    cursor_name.to_uppercase()
+                ));
+            }
+        }
+        SqlStatementType::Prepare => {
+            generate_sql_prepare(w, exec);
+        }
+        SqlStatementType::Execute => {
+            generate_sql_execute(w, exec);
+        }
+        SqlStatementType::ExecuteImmediate => {
+            generate_sql_execute_immediate(w, exec);
+        }
+        SqlStatementType::Savepoint => {
+            // Extract savepoint name from raw SQL: "SAVEPOINT name"
+            let sp_name = exec.raw_sql.trim()
+                .strip_prefix("SAVEPOINT")
+                .or_else(|| exec.raw_sql.trim().strip_prefix("savepoint"))
+                .unwrap_or("SP1")
+                .trim();
+            w.line(&format!("sql.savepoint(\"{sp_name}\", &mut ws.sqlca);"));
+        }
+        SqlStatementType::Other(keyword) => {
+            w.line(&format!(
+                "// EXEC SQL {keyword} -- unsupported SQL statement type"
+            ));
+            w.line(&format!(
+                "// raw SQL: {}",
+                exec.raw_sql.replace('\n', " ")
+            ));
         }
     }
+}
+
+/// Generate `sql.exec_query(...)` for SELECT INTO.
+fn generate_sql_query(w: &mut RustWriter, exec: &ExecSqlStatement) {
+    let sql_text = host_vars_to_placeholders(&exec.raw_sql);
+    w.open_block("{");
+
+    // Build input params array
+    if !exec.input_vars.is_empty() {
+        for (i, hv) in exec.input_vars.iter().enumerate() {
+            let field = cobol_to_rust_name(&hv.field_name, "");
+            if let Some(ref ind) = hv.indicator {
+                let ind_field = cobol_to_rust_name(ind, "");
+                w.line(&format!(
+                    "let _p{i} = HostVar::with_indicator(&ws.{field}, &ws.{ind_field});"
+                ));
+            } else {
+                w.line(&format!("let _p{i} = HostVar::new(&ws.{field});"));
+            }
+        }
+        let params: Vec<String> = (0..exec.input_vars.len()).map(|i| format!("_p{i}")).collect();
+        w.line(&format!("let _params = [{}];", params.join(", ")));
+    } else {
+        w.line("let _params: [HostVar<'_>; 0] = [];");
+    }
+
+    // Build output fields array
+    if !exec.output_vars.is_empty() {
+        for (i, hv) in exec.output_vars.iter().enumerate() {
+            let field = cobol_to_rust_name(&hv.field_name, "");
+            if let Some(ref ind) = hv.indicator {
+                let ind_field = cobol_to_rust_name(ind, "");
+                w.line(&format!(
+                    "let mut _o{i} = HostVarMut::with_indicator(&mut ws.{field}, &mut ws.{ind_field});"
+                ));
+            } else {
+                w.line(&format!(
+                    "let mut _o{i} = HostVarMut::new(&mut ws.{field});"
+                ));
+            }
+        }
+        let outputs: Vec<String> = (0..exec.output_vars.len()).map(|i| format!("_o{i}")).collect();
+        w.line(&format!(
+            "let mut _into = [{}];",
+            outputs.join(", ")
+        ));
+    } else {
+        w.line("let mut _into: [HostVarMut<'_>; 0] = [];");
+    }
+
+    w.line(&format!(
+        "sql.exec_query(\"{}\", &_params, &mut _into, &mut ws.sqlca);",
+        escape_sql(&sql_text)
+    ));
+    w.close_block("}");
+}
+
+/// Generate `sql.exec_update(...)` for INSERT, UPDATE, DELETE.
+fn generate_sql_update(w: &mut RustWriter, exec: &ExecSqlStatement) {
+    let sql_text = host_vars_to_placeholders(&exec.raw_sql);
+    w.open_block("{");
+
+    if !exec.input_vars.is_empty() {
+        for (i, hv) in exec.input_vars.iter().enumerate() {
+            let field = cobol_to_rust_name(&hv.field_name, "");
+            if let Some(ref ind) = hv.indicator {
+                let ind_field = cobol_to_rust_name(ind, "");
+                w.line(&format!(
+                    "let _p{i} = HostVar::with_indicator(&ws.{field}, &ws.{ind_field});"
+                ));
+            } else {
+                w.line(&format!("let _p{i} = HostVar::new(&ws.{field});"));
+            }
+        }
+        let params: Vec<String> = (0..exec.input_vars.len()).map(|i| format!("_p{i}")).collect();
+        w.line(&format!("let _params = [{}];", params.join(", ")));
+    } else {
+        w.line("let _params: [HostVar<'_>; 0] = [];");
+    }
+
+    w.line(&format!(
+        "sql.exec_update(\"{}\", &_params, &mut ws.sqlca);",
+        escape_sql(&sql_text)
+    ));
+    w.close_block("}");
+}
+
+/// Generate `sql.declare_cursor(...)`.
+fn generate_sql_declare_cursor(w: &mut RustWriter, exec: &ExecSqlStatement) {
+    let cursor_name = exec.cursor_name.as_deref().unwrap_or("UNKNOWN");
+    let sql_text = host_vars_to_placeholders(&exec.raw_sql);
+    w.open_block("{");
+
+    if !exec.input_vars.is_empty() {
+        for (i, hv) in exec.input_vars.iter().enumerate() {
+            let field = cobol_to_rust_name(&hv.field_name, "");
+            if let Some(ref ind) = hv.indicator {
+                let ind_field = cobol_to_rust_name(ind, "");
+                w.line(&format!(
+                    "let _p{i} = HostVar::with_indicator(&ws.{field}, &ws.{ind_field});"
+                ));
+            } else {
+                w.line(&format!("let _p{i} = HostVar::new(&ws.{field});"));
+            }
+        }
+        let params: Vec<String> = (0..exec.input_vars.len()).map(|i| format!("_p{i}")).collect();
+        w.line(&format!("let _params = [{}];", params.join(", ")));
+    } else {
+        w.line("let _params: [HostVar<'_>; 0] = [];");
+    }
+
+    w.line(&format!(
+        "sql.declare_cursor(\"{}\", \"{}\", &_params, &mut ws.sqlca);",
+        cursor_name.to_uppercase(),
+        escape_sql(&sql_text)
+    ));
+    w.close_block("}");
+}
+
+/// Generate `sql.fetch_cursor(...)`.
+fn generate_sql_fetch_cursor(w: &mut RustWriter, exec: &ExecSqlStatement) {
+    let cursor_name = exec.cursor_name.as_deref().unwrap_or("UNKNOWN");
+    w.open_block("{");
+
+    if !exec.output_vars.is_empty() {
+        for (i, hv) in exec.output_vars.iter().enumerate() {
+            let field = cobol_to_rust_name(&hv.field_name, "");
+            if let Some(ref ind) = hv.indicator {
+                let ind_field = cobol_to_rust_name(ind, "");
+                w.line(&format!(
+                    "let mut _o{i} = HostVarMut::with_indicator(&mut ws.{field}, &mut ws.{ind_field});"
+                ));
+            } else {
+                w.line(&format!(
+                    "let mut _o{i} = HostVarMut::new(&mut ws.{field});"
+                ));
+            }
+        }
+        let outputs: Vec<String> = (0..exec.output_vars.len()).map(|i| format!("_o{i}")).collect();
+        w.line(&format!(
+            "let mut _into = [{}];",
+            outputs.join(", ")
+        ));
+    } else {
+        w.line("let mut _into: [HostVarMut<'_>; 0] = [];");
+    }
+
+    w.line(&format!(
+        "sql.fetch_cursor(\"{}\", &mut _into, &mut ws.sqlca);",
+        cursor_name.to_uppercase()
+    ));
+    w.close_block("}");
+}
+
+/// Generate `sql.prepare(...)`.
+fn generate_sql_prepare(w: &mut RustWriter, exec: &ExecSqlStatement) {
+    let stmt_name = exec.prepared_name.as_deref().unwrap_or("UNKNOWN");
+    // PREPARE stmt-name FROM :host-var
+    // The input_vars[0] contains the SQL source text field
+    if let Some(hv) = exec.input_vars.first() {
+        let field = cobol_to_rust_name(&hv.field_name, "");
+        w.open_block("{");
+        w.line(&format!("let _src = HostVar::new(&ws.{field});"));
+        w.line(&format!(
+            "sql.prepare(\"{}\", &_src, &mut ws.sqlca);",
+            stmt_name.to_uppercase()
+        ));
+        w.close_block("}");
+    }
+}
+
+/// Generate `sql.execute_prepared(...)`.
+fn generate_sql_execute(w: &mut RustWriter, exec: &ExecSqlStatement) {
+    let stmt_name = exec.prepared_name.as_deref().unwrap_or("UNKNOWN");
+    w.open_block("{");
+
+    if !exec.input_vars.is_empty() {
+        for (i, hv) in exec.input_vars.iter().enumerate() {
+            let field = cobol_to_rust_name(&hv.field_name, "");
+            if let Some(ref ind) = hv.indicator {
+                let ind_field = cobol_to_rust_name(ind, "");
+                w.line(&format!(
+                    "let _p{i} = HostVar::with_indicator(&ws.{field}, &ws.{ind_field});"
+                ));
+            } else {
+                w.line(&format!("let _p{i} = HostVar::new(&ws.{field});"));
+            }
+        }
+        let params: Vec<String> = (0..exec.input_vars.len()).map(|i| format!("_p{i}")).collect();
+        w.line(&format!("let _params = [{}];", params.join(", ")));
+    } else {
+        w.line("let _params: [HostVar<'_>; 0] = [];");
+    }
+
+    w.line(&format!(
+        "sql.execute_prepared(\"{}\", &_params, &mut ws.sqlca);",
+        stmt_name.to_uppercase()
+    ));
+    w.close_block("}");
+}
+
+/// Generate `sql.execute_immediate(...)`.
+fn generate_sql_execute_immediate(w: &mut RustWriter, exec: &ExecSqlStatement) {
+    if let Some(hv) = exec.input_vars.first() {
+        let field = cobol_to_rust_name(&hv.field_name, "");
+        w.open_block("{");
+        w.line(&format!("let _src = HostVar::new(&ws.{field});"));
+        w.line("sql.execute_immediate(&_src, &mut ws.sqlca);");
+        w.close_block("}");
+    }
+}
+
+/// Replace `:HOST-VAR` references in SQL text with `?` placeholders.
+fn host_vars_to_placeholders(sql: &str) -> String {
+    let mut result = String::with_capacity(sql.len());
+    let mut chars = sql.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == ':' {
+            // Check if this starts a host variable name (letter or digit after colon)
+            if chars.peek().is_some_and(|c| c.is_ascii_alphanumeric() || *c == '_') {
+                result.push('?');
+                // Skip the host variable name
+                while chars.peek().is_some_and(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '-') {
+                    chars.next();
+                }
+            } else {
+                result.push(ch);
+            }
+        } else {
+            result.push(ch);
+        }
+    }
+    result
+}
+
+/// Escape double quotes and backslashes for embedding SQL in a Rust string literal.
+fn escape_sql(sql: &str) -> String {
+    sql.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
 // ---------------------------------------------------------------------------
@@ -776,11 +1116,11 @@ fn generate_compute(w: &mut RustWriter, c: &ComputeStatement) {
     }
 }
 
-fn generate_if(w: &mut RustWriter, i: &IfStatement, cmap: &ConditionMap, ptable: &[ParagraphIndex], rfm: &RecordFileMap, sfm: &SortFieldMap, gcm: &GroupChildMap) {
+fn generate_if(w: &mut RustWriter, i: &IfStatement, cmap: &ConditionMap, ptable: &[ParagraphIndex], rfm: &RecordFileMap, sfm: &SortFieldMap, gcm: &GroupChildMap, has_sql: bool) {
     let cond = condition_expr(&i.condition, cmap);
     w.open_block(&format!("if {cond} {{"));
     for stmt in &i.then_body {
-        generate_statement(w, stmt, cmap, ptable, rfm, sfm, gcm);
+        generate_statement(w, stmt, cmap, ptable, rfm, sfm, gcm, has_sql);
     }
     if i.else_body.is_empty() {
         w.close_block("}");
@@ -788,13 +1128,13 @@ fn generate_if(w: &mut RustWriter, i: &IfStatement, cmap: &ConditionMap, ptable:
         w.dedent();
         w.open_block("} else {");
         for stmt in &i.else_body {
-            generate_statement(w, stmt, cmap, ptable, rfm, sfm, gcm);
+            generate_statement(w, stmt, cmap, ptable, rfm, sfm, gcm, has_sql);
         }
         w.close_block("}");
     }
 }
 
-fn generate_evaluate(w: &mut RustWriter, e: &EvaluateStatement, cmap: &ConditionMap, ptable: &[ParagraphIndex], rfm: &RecordFileMap, sfm: &SortFieldMap, gcm: &GroupChildMap) {
+fn generate_evaluate(w: &mut RustWriter, e: &EvaluateStatement, cmap: &ConditionMap, ptable: &[ParagraphIndex], rfm: &RecordFileMap, sfm: &SortFieldMap, gcm: &GroupChildMap, has_sql: bool) {
     let subject_op = e.subjects.first().and_then(|subj| match subj {
         EvaluateSubject::Expr(op) => Some(op.clone()),
         EvaluateSubject::Bool(_) => None,
@@ -861,7 +1201,7 @@ fn generate_evaluate(w: &mut RustWriter, e: &EvaluateStatement, cmap: &Condition
         }
         w.open_block(&format!("{keyword} {cond} {{"));
         for stmt in &branch.body {
-            generate_statement(w, stmt, cmap, ptable, rfm, sfm, gcm);
+            generate_statement(w, stmt, cmap, ptable, rfm, sfm, gcm, has_sql);
         }
     }
 
@@ -869,7 +1209,7 @@ fn generate_evaluate(w: &mut RustWriter, e: &EvaluateStatement, cmap: &Condition
         w.dedent();
         w.open_block("} else {");
         for stmt in &e.when_other {
-            generate_statement(w, stmt, cmap, ptable, rfm, sfm, gcm);
+            generate_statement(w, stmt, cmap, ptable, rfm, sfm, gcm, has_sql);
         }
     }
 
@@ -878,20 +1218,24 @@ fn generate_evaluate(w: &mut RustWriter, e: &EvaluateStatement, cmap: &Condition
     }
 }
 
-fn generate_perform(w: &mut RustWriter, p: &PerformStatement, cmap: &ConditionMap, ptable: &[ParagraphIndex], rfm: &RecordFileMap, sfm: &SortFieldMap, gcm: &GroupChildMap) {
+fn generate_perform(w: &mut RustWriter, p: &PerformStatement, cmap: &ConditionMap, ptable: &[ParagraphIndex], rfm: &RecordFileMap, sfm: &SortFieldMap, gcm: &GroupChildMap, has_sql: bool) {
     match &p.loop_type {
         PerformLoopType::Once => {
             if let Some(ref target) = p.target {
                 if let Some(ref thru_name) = p.thru {
-                    generate_perform_thru_inline(w, &target.name, thru_name, ptable);
+                    generate_perform_thru_inline(w, &target.name, thru_name, ptable, has_sql);
                 } else {
                     let fn_name = cobol_to_rust_name(&target.name, "");
-                    w.line(&format!("{fn_name}(ws, ctx);"));
+                    if has_sql {
+                        w.line(&format!("{fn_name}(ws, ctx, sql);"));
+                    } else {
+                        w.line(&format!("{fn_name}(ws, ctx);"));
+                    }
                 }
             } else {
                 // Inline perform (once)
                 for stmt in &p.body {
-                    generate_statement(w, stmt, cmap, ptable, rfm, sfm, gcm);
+                    generate_statement(w, stmt, cmap, ptable, rfm, sfm, gcm, has_sql);
                 }
             }
         }
@@ -902,10 +1246,14 @@ fn generate_perform(w: &mut RustWriter, p: &PerformStatement, cmap: &ConditionMa
                     "for _cobol_i in 0..{count_usize} {{"
                 ));
                 if let Some(ref thru_name) = p.thru {
-                    generate_perform_thru_inline(w, &target.name, thru_name, ptable);
+                    generate_perform_thru_inline(w, &target.name, thru_name, ptable, has_sql);
                 } else {
                     let fn_name = cobol_to_rust_name(&target.name, "");
-                    w.line(&format!("{fn_name}(ws, ctx);"));
+                    if has_sql {
+                        w.line(&format!("{fn_name}(ws, ctx, sql);"));
+                    } else {
+                        w.line(&format!("{fn_name}(ws, ctx);"));
+                    }
                 }
                 w.close_block("}");
             } else {
@@ -913,7 +1261,7 @@ fn generate_perform(w: &mut RustWriter, p: &PerformStatement, cmap: &ConditionMa
                     "for _cobol_i in 0..{count_usize} {{"
                 ));
                 for stmt in &p.body {
-                    generate_statement(w, stmt, cmap, ptable, rfm, sfm, gcm);
+                    generate_statement(w, stmt, cmap, ptable, rfm, sfm, gcm, has_sql);
                 }
                 w.close_block("}");
             }
@@ -924,9 +1272,9 @@ fn generate_perform(w: &mut RustWriter, p: &PerformStatement, cmap: &ConditionMa
         } => {
             let cond = condition_expr(condition, cmap);
             if *test_before {
-                generate_perform_until_before(w, &cond, p, cmap, ptable, rfm, sfm, gcm);
+                generate_perform_until_before(w, &cond, p, cmap, ptable, rfm, sfm, gcm, has_sql);
             } else {
-                generate_perform_until_after(w, &cond, p, cmap, ptable, rfm, sfm, gcm);
+                generate_perform_until_after(w, &cond, p, cmap, ptable, rfm, sfm, gcm, has_sql);
             }
         }
         PerformLoopType::Varying {
@@ -954,14 +1302,18 @@ fn generate_perform(w: &mut RustWriter, p: &PerformStatement, cmap: &ConditionMa
 
             if let Some(ref target) = p.target {
                 if let Some(ref thru_name) = p.thru {
-                    generate_perform_thru_inline(w, &target.name, thru_name, ptable);
+                    generate_perform_thru_inline(w, &target.name, thru_name, ptable, has_sql);
                 } else {
                     let fn_name = cobol_to_rust_name(&target.name, "");
-                    w.line(&format!("{fn_name}(ws, ctx);"));
+                    if has_sql {
+                        w.line(&format!("{fn_name}(ws, ctx, sql);"));
+                    } else {
+                        w.line(&format!("{fn_name}(ws, ctx);"));
+                    }
                 }
             } else {
                 for stmt in &p.body {
-                    generate_statement(w, stmt, cmap, ptable, rfm, sfm, gcm);
+                    generate_statement(w, stmt, cmap, ptable, rfm, sfm, gcm, has_sql);
                 }
             }
 
@@ -982,7 +1334,7 @@ fn generate_perform(w: &mut RustWriter, p: &PerformStatement, cmap: &ConditionMa
 }
 
 /// Generate an inline dispatch loop for PERFORM target THRU end.
-fn generate_perform_thru_inline(w: &mut RustWriter, target_name: &str, thru_name: &str, ptable: &[ParagraphIndex]) {
+fn generate_perform_thru_inline(w: &mut RustWriter, target_name: &str, thru_name: &str, ptable: &[ParagraphIndex], has_sql: bool) {
     let target_upper = target_name.to_uppercase();
     let thru_upper = thru_name.to_uppercase();
     let start_idx = ptable.iter().position(|pi| pi.name == target_upper);
@@ -993,7 +1345,11 @@ fn generate_perform_thru_inline(w: &mut RustWriter, target_name: &str, thru_name
         w.open_block(&format!("while _perf_pc <= {e} {{"));
         w.open_block("match _perf_pc {");
         for pi in &ptable[s..=e] {
-            w.line(&format!("{} => {}(ws, ctx),", pi.index, pi.rust_name));
+            if has_sql {
+                w.line(&format!("{} => {}(ws, ctx, sql),", pi.index, pi.rust_name));
+            } else {
+                w.line(&format!("{} => {}(ws, ctx),", pi.index, pi.rust_name));
+            }
         }
         w.line("_ => break,");
         w.close_block("}");
@@ -1004,39 +1360,43 @@ fn generate_perform_thru_inline(w: &mut RustWriter, target_name: &str, thru_name
     } else {
         // Fallback: just call the target
         let fn_name = cobol_to_rust_name(target_name, "");
-        w.line(&format!("{fn_name}(ws, ctx);"));
+        if has_sql {
+            w.line(&format!("{fn_name}(ws, ctx, sql);"));
+        } else {
+            w.line(&format!("{fn_name}(ws, ctx);"));
+        }
     }
 }
 
-fn generate_perform_until_before(w: &mut RustWriter, cond: &str, p: &PerformStatement, cmap: &ConditionMap, ptable: &[ParagraphIndex], rfm: &RecordFileMap, sfm: &SortFieldMap, gcm: &GroupChildMap) {
+fn generate_perform_until_before(w: &mut RustWriter, cond: &str, p: &PerformStatement, cmap: &ConditionMap, ptable: &[ParagraphIndex], rfm: &RecordFileMap, sfm: &SortFieldMap, gcm: &GroupChildMap, has_sql: bool) {
     w.open_block(&format!("while !({cond}) {{"));
     if let Some(ref target) = p.target {
         if let Some(ref thru_name) = p.thru {
-            generate_perform_thru_inline(w, &target.name, thru_name, ptable);
+            generate_perform_thru_inline(w, &target.name, thru_name, ptable, has_sql);
         } else {
             let fn_name = cobol_to_rust_name(&target.name, "");
             w.line(&format!("{fn_name}(ws, ctx);"));
         }
     } else {
         for stmt in &p.body {
-            generate_statement(w, stmt, cmap, ptable, rfm, sfm, gcm);
+            generate_statement(w, stmt, cmap, ptable, rfm, sfm, gcm, has_sql);
         }
     }
     w.close_block("}");
 }
 
-fn generate_perform_until_after(w: &mut RustWriter, cond: &str, p: &PerformStatement, cmap: &ConditionMap, ptable: &[ParagraphIndex], rfm: &RecordFileMap, sfm: &SortFieldMap, gcm: &GroupChildMap) {
+fn generate_perform_until_after(w: &mut RustWriter, cond: &str, p: &PerformStatement, cmap: &ConditionMap, ptable: &[ParagraphIndex], rfm: &RecordFileMap, sfm: &SortFieldMap, gcm: &GroupChildMap, has_sql: bool) {
     w.open_block("loop {");
     if let Some(ref target) = p.target {
         if let Some(ref thru_name) = p.thru {
-            generate_perform_thru_inline(w, &target.name, thru_name, ptable);
+            generate_perform_thru_inline(w, &target.name, thru_name, ptable, has_sql);
         } else {
             let fn_name = cobol_to_rust_name(&target.name, "");
             w.line(&format!("{fn_name}(ws, ctx);"));
         }
     } else {
         for stmt in &p.body {
-            generate_statement(w, stmt, cmap, ptable, rfm, sfm, gcm);
+            generate_statement(w, stmt, cmap, ptable, rfm, sfm, gcm, has_sql);
         }
     }
     w.open_block(&format!("if {cond} {{"));
@@ -1136,7 +1496,7 @@ fn emit_initialize_children(w: &mut RustWriter, children: &[(String, bool)], gcm
     }
 }
 
-fn generate_call(w: &mut RustWriter, call: &CallStatement, cmap: &ConditionMap, ptable: &[ParagraphIndex], rfm: &RecordFileMap, sfm: &SortFieldMap, gcm: &GroupChildMap) {
+fn generate_call(w: &mut RustWriter, call: &CallStatement, cmap: &ConditionMap, ptable: &[ParagraphIndex], rfm: &RecordFileMap, sfm: &SortFieldMap, gcm: &GroupChildMap, has_sql: bool) {
     let program = match &call.program {
         Operand::Literal(Literal::Alphanumeric(s)) => format!("\"{s}\""),
         other => operand_expr(other),
@@ -1209,14 +1569,14 @@ fn generate_call(w: &mut RustWriter, call: &CallStatement, cmap: &ConditionMap, 
         w.open_block("Ok(rc) => {");
         w.line("ctx.return_code = rc;");
         for stmt in &call.not_on_exception {
-            generate_statement(w, stmt, cmap, ptable, rfm, sfm, gcm);
+            generate_statement(w, stmt, cmap, ptable, rfm, sfm, gcm, has_sql);
         }
         w.close_block("}");
 
         // Err path -- ON EXCEPTION
         w.open_block("Err(_e) => {");
         for stmt in &call.on_exception {
-            generate_statement(w, stmt, cmap, ptable, rfm, sfm, gcm);
+            generate_statement(w, stmt, cmap, ptable, rfm, sfm, gcm, has_sql);
         }
         w.close_block("}");
 
@@ -1308,7 +1668,7 @@ fn generate_close(w: &mut RustWriter, close: &CloseStatement) {
 }
 
 #[allow(unused_variables)]
-fn generate_read(w: &mut RustWriter, read: &ReadStatement, cmap: &ConditionMap, ptable: &[ParagraphIndex], rfm: &RecordFileMap, sfm: &SortFieldMap, gcm: &GroupChildMap) {
+fn generate_read(w: &mut RustWriter, read: &ReadStatement, cmap: &ConditionMap, ptable: &[ParagraphIndex], rfm: &RecordFileMap, sfm: &SortFieldMap, gcm: &GroupChildMap, has_sql: bool) {
     let fname = cobol_to_rust_name(&read.file_name, "");
 
     // read_next() and read_by_key() both return (FileStatusCode, Option<Vec<u8>>)
@@ -1334,14 +1694,14 @@ fn generate_read(w: &mut RustWriter, read: &ReadStatement, cmap: &ConditionMap, 
             w.close_block("}");
         }
         for stmt in &read.not_at_end {
-            generate_statement(w, stmt, cmap, ptable, rfm, sfm, gcm);
+            generate_statement(w, stmt, cmap, ptable, rfm, sfm, gcm, has_sql);
         }
         w.close_block("}");
 
         if !read.at_end.is_empty() {
             w.open_block("else {");
             for stmt in &read.at_end {
-                generate_statement(w, stmt, cmap, ptable, rfm, sfm, gcm);
+                generate_statement(w, stmt, cmap, ptable, rfm, sfm, gcm, has_sql);
             }
             w.close_block("}");
         }
@@ -1359,14 +1719,14 @@ fn generate_read(w: &mut RustWriter, read: &ReadStatement, cmap: &ConditionMap, 
             w.close_block("}");
         }
         for stmt in &read.not_invalid_key {
-            generate_statement(w, stmt, cmap, ptable, rfm, sfm, gcm);
+            generate_statement(w, stmt, cmap, ptable, rfm, sfm, gcm, has_sql);
         }
         w.close_block("}");
 
         if !read.invalid_key.is_empty() {
             w.open_block("else {");
             for stmt in &read.invalid_key {
-                generate_statement(w, stmt, cmap, ptable, rfm, sfm, gcm);
+                generate_statement(w, stmt, cmap, ptable, rfm, sfm, gcm, has_sql);
             }
             w.close_block("}");
         }
@@ -1389,7 +1749,7 @@ fn generate_read(w: &mut RustWriter, read: &ReadStatement, cmap: &ConditionMap, 
     }
 }
 
-fn generate_write(w: &mut RustWriter, write: &WriteStatement, cmap: &ConditionMap, ptable: &[ParagraphIndex], rfm: &RecordFileMap, sfm: &SortFieldMap, gcm: &GroupChildMap) {
+fn generate_write(w: &mut RustWriter, write: &WriteStatement, cmap: &ConditionMap, ptable: &[ParagraphIndex], rfm: &RecordFileMap, sfm: &SortFieldMap, gcm: &GroupChildMap, has_sql: bool) {
     let rec = cobol_to_rust_name(&write.record_name, "");
     // Look up the file handle for this record
     let file_field = rfm
@@ -1428,14 +1788,14 @@ fn generate_write(w: &mut RustWriter, write: &WriteStatement, cmap: &ConditionMa
         w.line(&format!("let _status = {write_call};"));
         w.open_block("if _status.is_success() {");
         for stmt in &write.not_invalid_key {
-            generate_statement(w, stmt, cmap, ptable, rfm, sfm, gcm);
+            generate_statement(w, stmt, cmap, ptable, rfm, sfm, gcm, has_sql);
         }
         w.close_block("}");
 
         if !write.invalid_key.is_empty() {
             w.open_block("else {");
             for stmt in &write.invalid_key {
-                generate_statement(w, stmt, cmap, ptable, rfm, sfm, gcm);
+                generate_statement(w, stmt, cmap, ptable, rfm, sfm, gcm, has_sql);
             }
             w.close_block("}");
         }
@@ -1445,7 +1805,7 @@ fn generate_write(w: &mut RustWriter, write: &WriteStatement, cmap: &ConditionMa
     }
 }
 
-fn generate_rewrite(w: &mut RustWriter, rw: &RewriteStatement, cmap: &ConditionMap, ptable: &[ParagraphIndex], rfm: &RecordFileMap, sfm: &SortFieldMap, gcm: &GroupChildMap) {
+fn generate_rewrite(w: &mut RustWriter, rw: &RewriteStatement, cmap: &ConditionMap, ptable: &[ParagraphIndex], rfm: &RecordFileMap, sfm: &SortFieldMap, gcm: &GroupChildMap, has_sql: bool) {
     let rec = cobol_to_rust_name(&rw.record_name, "");
     let file_field = rfm
         .get(&rw.record_name.to_uppercase())
@@ -1466,14 +1826,14 @@ fn generate_rewrite(w: &mut RustWriter, rw: &RewriteStatement, cmap: &ConditionM
         w.line(&format!("let _status = {rewrite_call};"));
         w.open_block("if _status.is_success() {");
         for stmt in &rw.not_invalid_key {
-            generate_statement(w, stmt, cmap, ptable, rfm, sfm, gcm);
+            generate_statement(w, stmt, cmap, ptable, rfm, sfm, gcm, has_sql);
         }
         w.close_block("}");
 
         if !rw.invalid_key.is_empty() {
             w.open_block("else {");
             for stmt in &rw.invalid_key {
-                generate_statement(w, stmt, cmap, ptable, rfm, sfm, gcm);
+                generate_statement(w, stmt, cmap, ptable, rfm, sfm, gcm, has_sql);
             }
             w.close_block("}");
         }
@@ -1487,7 +1847,7 @@ fn generate_rewrite(w: &mut RustWriter, rw: &RewriteStatement, cmap: &ConditionM
 }
 
 #[allow(unused_variables)]
-fn generate_delete(w: &mut RustWriter, del: &DeleteStatement, cmap: &ConditionMap, ptable: &[ParagraphIndex], rfm: &RecordFileMap, sfm: &SortFieldMap, gcm: &GroupChildMap) {
+fn generate_delete(w: &mut RustWriter, del: &DeleteStatement, cmap: &ConditionMap, ptable: &[ParagraphIndex], rfm: &RecordFileMap, sfm: &SortFieldMap, gcm: &GroupChildMap, has_sql: bool) {
     let fname = cobol_to_rust_name(&del.file_name, "");
     let delete_call = format!("ws.{fname}.delete_record()");
 
@@ -1496,14 +1856,14 @@ fn generate_delete(w: &mut RustWriter, del: &DeleteStatement, cmap: &ConditionMa
         w.line(&format!("let _status = {delete_call};"));
         w.open_block("if _status.is_success() {");
         for stmt in &del.not_invalid_key {
-            generate_statement(w, stmt, cmap, ptable, rfm, sfm, gcm);
+            generate_statement(w, stmt, cmap, ptable, rfm, sfm, gcm, has_sql);
         }
         w.close_block("}");
 
         if !del.invalid_key.is_empty() {
             w.open_block("else {");
             for stmt in &del.invalid_key {
-                generate_statement(w, stmt, cmap, ptable, rfm, sfm, gcm);
+                generate_statement(w, stmt, cmap, ptable, rfm, sfm, gcm, has_sql);
             }
             w.close_block("}");
         }
@@ -1520,7 +1880,7 @@ fn generate_delete(w: &mut RustWriter, del: &DeleteStatement, cmap: &ConditionMa
 ///
 /// START positions a file cursor for subsequent sequential READ operations.
 /// Supports KEY IS EQUAL/GREATER/NOT LESS conditions with INVALID KEY handlers.
-fn generate_start(w: &mut RustWriter, start: &StartStatement, cmap: &ConditionMap, ptable: &[ParagraphIndex], rfm: &RecordFileMap, sfm: &SortFieldMap, gcm: &GroupChildMap) {
+fn generate_start(w: &mut RustWriter, start: &StartStatement, cmap: &ConditionMap, ptable: &[ParagraphIndex], rfm: &RecordFileMap, sfm: &SortFieldMap, gcm: &GroupChildMap, has_sql: bool) {
     let fname = cobol_to_rust_name(&start.file_name, "");
 
     let start_call = if let Some(ref cond) = start.key_condition {
@@ -1541,14 +1901,14 @@ fn generate_start(w: &mut RustWriter, start: &StartStatement, cmap: &ConditionMa
         w.line(&format!("let _status = {start_call};"));
         w.open_block("if _status.is_success() {");
         for stmt in &start.not_invalid_key {
-            generate_statement(w, stmt, cmap, ptable, rfm, sfm, gcm);
+            generate_statement(w, stmt, cmap, ptable, rfm, sfm, gcm, has_sql);
         }
         w.close_block("}");
 
         if !start.invalid_key.is_empty() {
             w.open_block("else {");
             for stmt in &start.invalid_key {
-                generate_statement(w, stmt, cmap, ptable, rfm, sfm, gcm);
+                generate_statement(w, stmt, cmap, ptable, rfm, sfm, gcm, has_sql);
             }
             w.close_block("}");
         }
@@ -2484,7 +2844,7 @@ fn generate_release(w: &mut RustWriter, rel: &ReleaseStatement) {
     }
 }
 
-fn generate_return(w: &mut RustWriter, ret: &ReturnStatement, cmap: &ConditionMap, ptable: &[ParagraphIndex], rfm: &RecordFileMap, sfm: &SortFieldMap, gcm: &GroupChildMap) {
+fn generate_return(w: &mut RustWriter, ret: &ReturnStatement, cmap: &ConditionMap, ptable: &[ParagraphIndex], rfm: &RecordFileMap, sfm: &SortFieldMap, gcm: &GroupChildMap, has_sql: bool) {
     let fname = cobol_to_rust_name(&ret.file_name, "");
 
     if !ret.at_end.is_empty() || !ret.not_at_end.is_empty() {
@@ -2498,13 +2858,13 @@ fn generate_return(w: &mut RustWriter, ret: &ReturnStatement, cmap: &ConditionMa
             ));
         }
         for stmt in &ret.not_at_end {
-            generate_statement(w, stmt, cmap, ptable, rfm, sfm, gcm);
+            generate_statement(w, stmt, cmap, ptable, rfm, sfm, gcm, has_sql);
         }
         w.close_block("}");
 
         w.open_block("None => {");
         for stmt in &ret.at_end {
-            generate_statement(w, stmt, cmap, ptable, rfm, sfm, gcm);
+            generate_statement(w, stmt, cmap, ptable, rfm, sfm, gcm, has_sql);
         }
         w.close_block("}");
 
@@ -2634,7 +2994,7 @@ fn operand_to_bytes_expr(op: &Operand) -> String {
     }
 }
 
-fn generate_string(w: &mut RustWriter, s: &StringStatement, cmap: &ConditionMap, ptable: &[ParagraphIndex], rfm: &RecordFileMap, sfm: &SortFieldMap, gcm: &GroupChildMap) {
+fn generate_string(w: &mut RustWriter, s: &StringStatement, cmap: &ConditionMap, ptable: &[ParagraphIndex], rfm: &RecordFileMap, sfm: &SortFieldMap, gcm: &GroupChildMap, has_sql: bool) {
     let into = data_ref_expr(&s.into);
 
     w.open_block("{");
@@ -2692,12 +3052,12 @@ fn generate_string(w: &mut RustWriter, s: &StringStatement, cmap: &ConditionMap,
     if !s.on_overflow.is_empty() || !s.not_on_overflow.is_empty() {
         w.open_block("if string_result == StringResult::Overflow {");
         for stmt in &s.on_overflow {
-            generate_statement(w, stmt, cmap, ptable, rfm, sfm, gcm);
+            generate_statement(w, stmt, cmap, ptable, rfm, sfm, gcm, has_sql);
         }
         w.dedent();
         w.open_block("} else {");
         for stmt in &s.not_on_overflow {
-            generate_statement(w, stmt, cmap, ptable, rfm, sfm, gcm);
+            generate_statement(w, stmt, cmap, ptable, rfm, sfm, gcm, has_sql);
         }
         w.close_block("}");
     }
@@ -2705,7 +3065,7 @@ fn generate_string(w: &mut RustWriter, s: &StringStatement, cmap: &ConditionMap,
     w.close_block("}");
 }
 
-fn generate_unstring(w: &mut RustWriter, u: &UnstringStatement, cmap: &ConditionMap, ptable: &[ParagraphIndex], rfm: &RecordFileMap, sfm: &SortFieldMap, gcm: &GroupChildMap) {
+fn generate_unstring(w: &mut RustWriter, u: &UnstringStatement, cmap: &ConditionMap, ptable: &[ParagraphIndex], rfm: &RecordFileMap, sfm: &SortFieldMap, gcm: &GroupChildMap, has_sql: bool) {
     let source = data_ref_expr(&u.source);
 
     w.open_block("{");
@@ -2793,12 +3153,12 @@ fn generate_unstring(w: &mut RustWriter, u: &UnstringStatement, cmap: &Condition
     if !u.on_overflow.is_empty() || !u.not_on_overflow.is_empty() {
         w.open_block("if unstring_result == UnstringResult::Overflow {");
         for stmt in &u.on_overflow {
-            generate_statement(w, stmt, cmap, ptable, rfm, sfm, gcm);
+            generate_statement(w, stmt, cmap, ptable, rfm, sfm, gcm, has_sql);
         }
         w.dedent();
         w.open_block("} else {");
         for stmt in &u.not_on_overflow {
-            generate_statement(w, stmt, cmap, ptable, rfm, sfm, gcm);
+            generate_statement(w, stmt, cmap, ptable, rfm, sfm, gcm, has_sql);
         }
         w.close_block("}");
     }
@@ -2962,7 +3322,7 @@ mod tests {
             invalid_key: Vec::new(),
             not_invalid_key: Vec::new(),
         };
-        generate_read(&mut w, &stmt, &empty_cmap(), &[], &HashMap::new(), &HashMap::new(), &HashMap::new());
+        generate_read(&mut w, &stmt, &empty_cmap(), &[], &HashMap::new(), &HashMap::new(), &HashMap::new(), false);
         let output = w.finish();
         assert!(output.contains("ws.input_file.read_next()"));
         assert!(output.contains("ws.ws_record"));
@@ -2986,7 +3346,7 @@ mod tests {
             invalid_key: Vec::new(),
             not_invalid_key: Vec::new(),
         };
-        generate_read(&mut w, &stmt, &empty_cmap(), &[], &HashMap::new(), &HashMap::new(), &HashMap::new());
+        generate_read(&mut w, &stmt, &empty_cmap(), &[], &HashMap::new(), &HashMap::new(), &HashMap::new(), false);
         let output = w.finish();
         assert!(output.contains("ws.input_file.read_next()"), "missing read_next: {output}");
         assert!(output.contains("_status.is_success()"), "missing is_success: {output}");
@@ -3005,7 +3365,7 @@ mod tests {
             at_eop: Vec::new(),
             not_at_eop: Vec::new(),
         };
-        generate_write(&mut w, &stmt, &empty_cmap(), &[], &HashMap::new(), &HashMap::new(), &HashMap::new());
+        generate_write(&mut w, &stmt, &empty_cmap(), &[], &HashMap::new(), &HashMap::new(), &HashMap::new(), false);
         let output = w.finish();
         // No RecordFileMap entry -> fallback to {rec}_file pattern
         assert!(output.contains("ws.out_record_file.write_record(ws.out_record.as_bytes())"));
@@ -3023,7 +3383,7 @@ mod tests {
             at_eop: Vec::new(),
             not_at_eop: Vec::new(),
         };
-        generate_write(&mut w, &stmt, &empty_cmap(), &[], &HashMap::new(), &HashMap::new(), &HashMap::new());
+        generate_write(&mut w, &stmt, &empty_cmap(), &[], &HashMap::new(), &HashMap::new(), &HashMap::new(), false);
         let output = w.finish();
         assert!(output.contains("write_record"));
         assert!(output.contains("\\x0C"));
@@ -3038,7 +3398,7 @@ mod tests {
             invalid_key: Vec::new(),
             not_invalid_key: Vec::new(),
         };
-        generate_rewrite(&mut w, &stmt, &empty_cmap(), &[], &HashMap::new(), &HashMap::new(), &HashMap::new());
+        generate_rewrite(&mut w, &stmt, &empty_cmap(), &[], &HashMap::new(), &HashMap::new(), &HashMap::new(), false);
         let output = w.finish();
         // No RecordFileMap entry -> fallback to {rec}_file pattern
         assert!(output.contains("ws.master_rec_file.rewrite_record(ws.master_rec.as_bytes())"));
@@ -3052,7 +3412,7 @@ mod tests {
             invalid_key: Vec::new(),
             not_invalid_key: Vec::new(),
         };
-        generate_delete(&mut w, &stmt, &empty_cmap(), &[], &HashMap::new(), &HashMap::new(), &HashMap::new());
+        generate_delete(&mut w, &stmt, &empty_cmap(), &[], &HashMap::new(), &HashMap::new(), &HashMap::new(), false);
         let output = w.finish();
         assert!(output.contains("ws.indexed_file.delete_record()"));
     }
@@ -3071,7 +3431,7 @@ mod tests {
             })],
             not_invalid_key: Vec::new(),
         };
-        generate_delete(&mut w, &stmt, &empty_cmap(), &[], &HashMap::new(), &HashMap::new(), &HashMap::new());
+        generate_delete(&mut w, &stmt, &empty_cmap(), &[], &HashMap::new(), &HashMap::new(), &HashMap::new(), false);
         let output = w.finish();
         assert!(output.contains("ws.indexed_file.delete_record()"), "missing delete_record: {output}");
         assert!(output.contains("_status.is_success()"), "missing is_success: {output}");
@@ -3200,7 +3560,7 @@ mod tests {
             })],
             not_at_end: Vec::new(),
         };
-        generate_return(&mut w, &stmt, &empty_cmap(), &[], &HashMap::new(), &HashMap::new(), &HashMap::new());
+        generate_return(&mut w, &stmt, &empty_cmap(), &[], &HashMap::new(), &HashMap::new(), &HashMap::new(), false);
         let output = w.finish();
         assert!(output.contains("match returner.return_record()"));
         assert!(output.contains("Some(record_data)"));
@@ -3289,7 +3649,7 @@ mod tests {
             on_overflow: Vec::new(),
             not_on_overflow: Vec::new(),
         };
-        generate_string(&mut w, &stmt, &empty_cmap(), &[], &HashMap::new(), &HashMap::new(), &HashMap::new());
+        generate_string(&mut w, &stmt, &empty_cmap(), &[], &HashMap::new(), &HashMap::new(), &HashMap::new(), false);
         let output = w.finish();
         assert!(output.contains("StringSourceSpec::by_size"));
         assert!(output.contains("StringSourceSpec::by_literal"));
@@ -3323,7 +3683,7 @@ mod tests {
             on_overflow: Vec::new(),
             not_on_overflow: Vec::new(),
         };
-        generate_unstring(&mut w, &stmt, &empty_cmap(), &[], &HashMap::new(), &HashMap::new(), &HashMap::new());
+        generate_unstring(&mut w, &stmt, &empty_cmap(), &[], &HashMap::new(), &HashMap::new(), &HashMap::new(), false);
         let output = w.finish();
         assert!(output.contains("UnstringDelimSpec::new"));
         assert!(output.contains("cobol_unstring_simple"));
@@ -3958,7 +4318,7 @@ mod tests {
             on_exception: Vec::new(),
             not_on_exception: Vec::new(),
         };
-        generate_call(&mut w, &call, &empty_cmap(), &[], &HashMap::new(), &HashMap::new(), &HashMap::new());
+        generate_call(&mut w, &call, &empty_cmap(), &[], &HashMap::new(), &HashMap::new(), &HashMap::new(), false);
         let output = w.finish();
         assert!(
             output.contains("cobol_call(&mut ctx.dispatcher, \"SUBPROG\""),
@@ -3990,7 +4350,7 @@ mod tests {
             on_exception: Vec::new(),
             not_on_exception: Vec::new(),
         };
-        generate_call(&mut w, &call, &empty_cmap(), &[], &HashMap::new(), &HashMap::new(), &HashMap::new());
+        generate_call(&mut w, &call, &empty_cmap(), &[], &HashMap::new(), &HashMap::new(), &HashMap::new(), false);
         let output = w.finish();
         assert!(
             output.contains("call_param_by_ref"),
@@ -4028,7 +4388,7 @@ mod tests {
                 no_advancing: false,
             })],
         };
-        generate_call(&mut w, &call, &empty_cmap(), &[], &HashMap::new(), &HashMap::new(), &HashMap::new());
+        generate_call(&mut w, &call, &empty_cmap(), &[], &HashMap::new(), &HashMap::new(), &HashMap::new(), false);
         let output = w.finish();
         assert!(
             output.contains("match cobol_call("),
@@ -4061,7 +4421,7 @@ mod tests {
             on_exception: Vec::new(),
             not_on_exception: Vec::new(),
         };
-        generate_call(&mut w, &call, &empty_cmap(), &[], &HashMap::new(), &HashMap::new(), &HashMap::new());
+        generate_call(&mut w, &call, &empty_cmap(), &[], &HashMap::new(), &HashMap::new(), &HashMap::new(), false);
         let output = w.finish();
         assert!(
             output.contains("cobol_call("),
@@ -4095,7 +4455,7 @@ mod tests {
             on_exception: Vec::new(),
             not_on_exception: Vec::new(),
         };
-        generate_call(&mut w, &call, &empty_cmap(), &[], &HashMap::new(), &HashMap::new(), &HashMap::new());
+        generate_call(&mut w, &call, &empty_cmap(), &[], &HashMap::new(), &HashMap::new(), &HashMap::new(), false);
         let output = w.finish();
         assert!(
             output.contains(".clone()"),
@@ -4152,7 +4512,7 @@ mod tests {
             using_params: vec![],
             returning: None,
         };
-        generate_procedure_division(&mut w, &proc_div, &empty_cmap(), &HashMap::new(), &HashMap::new(), &[], &[]);
+        generate_procedure_division(&mut w, &proc_div, &empty_cmap(), &HashMap::new(), &HashMap::new(), &[], &[], false);
         let output = w.finish();
         assert!(output.contains("let mut _pc: usize = 0;"), "missing _pc decl: {output}");
         assert!(output.contains("0 => main_para(ws, ctx),"), "missing index 0 dispatch: {output}");
@@ -4173,7 +4533,7 @@ mod tests {
             using_params: vec![],
             returning: None,
         };
-        generate_procedure_division(&mut w, &proc_div, &empty_cmap(), &HashMap::new(), &HashMap::new(), &[], &[]);
+        generate_procedure_division(&mut w, &proc_div, &empty_cmap(), &HashMap::new(), &HashMap::new(), &[], &[], false);
         let output = w.finish();
         assert!(output.contains("ctx.goto_target.take()"), "missing goto_target.take(): {output}");
         assert!(output.contains("\"A-PARA\" => 0,"), "missing A-PARA goto lookup: {output}");
@@ -4199,7 +4559,7 @@ mod tests {
     #[test]
     fn stop_run_returns() {
         let mut w = RustWriter::new();
-        generate_statement(&mut w, &Statement::StopRun, &empty_cmap(), &[], &HashMap::new(), &HashMap::new(), &HashMap::new());
+        generate_statement(&mut w, &Statement::StopRun, &empty_cmap(), &[], &HashMap::new(), &HashMap::new(), &HashMap::new(), false);
         let output = w.finish();
         assert!(output.contains("ctx.stop_run();"), "missing ctx.stop_run(): {output}");
         assert!(output.contains("return;"), "missing return after stop_run: {output}");
@@ -4208,7 +4568,7 @@ mod tests {
     #[test]
     fn exit_program_sets_flag() {
         let mut w = RustWriter::new();
-        generate_statement(&mut w, &Statement::ExitProgram, &empty_cmap(), &[], &HashMap::new(), &HashMap::new(), &HashMap::new());
+        generate_statement(&mut w, &Statement::ExitProgram, &empty_cmap(), &[], &HashMap::new(), &HashMap::new(), &HashMap::new(), false);
         let output = w.finish();
         assert!(output.contains("ctx.exit_program = true;"), "missing exit_program flag: {output}");
         assert!(output.contains("return;"), "missing return after exit_program: {output}");
@@ -4224,7 +4584,7 @@ mod tests {
             loop_type: PerformLoopType::Once,
             body: vec![],
         };
-        generate_perform(&mut w, &perf, &empty_cmap(), &ptable, &HashMap::new(), &HashMap::new(), &HashMap::new());
+        generate_perform(&mut w, &perf, &empty_cmap(), &ptable, &HashMap::new(), &HashMap::new(), &HashMap::new(), false);
         let output = w.finish();
         assert!(output.contains("let mut _perf_pc: usize = 0;"), "missing _perf_pc: {output}");
         assert!(output.contains("while _perf_pc <= 2"), "missing while loop: {output}");
@@ -4288,7 +4648,7 @@ mod tests {
             invalid_key: vec![],
             not_invalid_key: vec![],
         };
-        generate_start(&mut w, &start, &empty_cmap(), &[], &HashMap::new(), &HashMap::new(), &HashMap::new());
+        generate_start(&mut w, &start, &empty_cmap(), &[], &HashMap::new(), &HashMap::new(), &HashMap::new(), false);
         let output = w.finish();
         assert!(
             output.contains("ws.input_file.start(&[], std::cmp::Ordering::Equal)"),
@@ -4308,7 +4668,7 @@ mod tests {
             invalid_key: vec![],
             not_invalid_key: vec![],
         };
-        generate_start(&mut w, &start, &empty_cmap(), &[], &HashMap::new(), &HashMap::new(), &HashMap::new());
+        generate_start(&mut w, &start, &empty_cmap(), &[], &HashMap::new(), &HashMap::new(), &HashMap::new(), false);
         let output = w.finish();
         assert!(
             output.contains("ws.master_file.start(ws.ws_key.as_bytes(), std::cmp::Ordering::Equal)"),
@@ -4328,7 +4688,7 @@ mod tests {
             invalid_key: vec![],
             not_invalid_key: vec![],
         };
-        generate_start(&mut w, &start, &empty_cmap(), &[], &HashMap::new(), &HashMap::new(), &HashMap::new());
+        generate_start(&mut w, &start, &empty_cmap(), &[], &HashMap::new(), &HashMap::new(), &HashMap::new(), false);
         let output = w.finish();
         assert!(
             output.contains("std::cmp::Ordering::Greater"),
@@ -4352,7 +4712,7 @@ mod tests {
             })],
             not_invalid_key: vec![],
         };
-        generate_start(&mut w, &start, &empty_cmap(), &[], &HashMap::new(), &HashMap::new(), &HashMap::new());
+        generate_start(&mut w, &start, &empty_cmap(), &[], &HashMap::new(), &HashMap::new(), &HashMap::new(), false);
         let output = w.finish();
         assert!(output.contains("ws.master_file.start("), "missing start call: {output}");
         assert!(output.contains("_status.is_success()"), "missing is_success: {output}");
@@ -4633,7 +4993,7 @@ mod tests {
             }],
             when_other: Vec::new(),
         };
-        generate_evaluate(&mut w, &eval, &cmap, &[], &HashMap::new(), &HashMap::new(), &HashMap::new());
+        generate_evaluate(&mut w, &eval, &cmap, &[], &HashMap::new(), &HashMap::new(), &HashMap::new(), false);
         let output = w.finish();
         // Should expand the condition name, not reference it as a data field
         assert!(output.contains("ws_status") && output.contains("AC"),

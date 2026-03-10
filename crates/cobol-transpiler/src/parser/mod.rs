@@ -18,7 +18,7 @@ pub mod preprocess;
 pub(crate) mod proc_listener;
 pub mod sql_extract;
 
-use crate::ast::{CobolProgram, DataDivision, DataEntry, ExecSqlStatement, FileDescription, ProcedureDivision};
+use crate::ast::{CobolProgram, DataDivision, DataEntry, ExecSqlStatement, FileDescription, ProcedureDivision, SqlStatementType, Statement};
 use crate::diagnostics::TranspileDiagnostic;
 use crate::error::{Result, TranspileError};
 use crate::generated::cobol85lexer::Cobol85Lexer;
@@ -62,13 +62,24 @@ pub fn parse_cobol(source: &str) -> Result<CobolProgram> {
     let file_section = parse_file_section(&input)?;
 
     // Parse PROCEDURE DIVISION
-    let procedure_division = parse_procedure_division(&input)?;
+    let mut procedure_division = parse_procedure_division(&input)?;
 
     // Extract PROGRAM-ID
     let program_id = extract_program_id(&input);
 
     // Convert extracted EXEC blocks to AST nodes
     let exec_sql_statements = build_exec_sql_ast(&exec_blocks);
+
+    // Inject ExecSql statements into the procedure division, replacing
+    // the CONTINUE placeholders that the preprocessor inserted.
+    // Only procedure-division blocks are CONTINUE; data-division blocks
+    // were removed entirely by the preprocessor.
+    if let Some(ref mut proc_div) = procedure_division {
+        let mut block_iter = exec_sql_statements.iter()
+            .filter(|s| !matches!(s.sql_type, SqlStatementType::IncludeSqlca))
+            .peekable();
+        inject_exec_sql_into_proc_div(proc_div, &mut block_iter);
+    }
 
     Ok(CobolProgram {
         program_id,
@@ -134,11 +145,19 @@ pub fn parse_cobol_with_diagnostics(source: &str) -> Result<(CobolProgram, Vec<T
     let working_storage = parse_data_division(&input)?;
     let file_section = parse_file_section(&input)?;
 
-    let (procedure_division, diagnostics) = parse_procedure_division_with_diagnostics(&input)?;
+    let (mut procedure_division, diagnostics) = parse_procedure_division_with_diagnostics(&input)?;
 
     let program_id = extract_program_id(&input);
 
     let exec_sql_statements = build_exec_sql_ast(&exec_blocks);
+
+    // Inject ExecSql statements into the procedure division
+    if let Some(ref mut proc_div) = procedure_division {
+        let mut block_iter = exec_sql_statements.iter()
+            .filter(|s| !matches!(s.sql_type, SqlStatementType::IncludeSqlca))
+            .peekable();
+        inject_exec_sql_into_proc_div(proc_div, &mut block_iter);
+    }
 
     let program = CobolProgram {
         program_id,
@@ -425,6 +444,62 @@ pub fn extract_copy_targets(source: &str) -> Vec<String> {
         }
     }
     targets
+}
+
+/// Replace `Statement::Continue` placeholders with `Statement::ExecSql` nodes.
+///
+/// The preprocessor replaces each `EXEC SQL ... END-EXEC` in the PROCEDURE
+/// DIVISION with `CONTINUE`. The extracted blocks are stored in order.
+/// This function walks the procedure division statement tree and replaces
+/// each `Continue` with the next available `ExecSqlStatement`, restoring
+/// the 1:1 correspondence.
+fn inject_exec_sql_into_proc_div<'a>(
+    proc_div: &mut ProcedureDivision,
+    blocks: &mut std::iter::Peekable<impl Iterator<Item = &'a ExecSqlStatement>>,
+) {
+    for para in &mut proc_div.paragraphs {
+        for sentence in &mut para.sentences {
+            inject_exec_sql_into_stmts(&mut sentence.statements, blocks);
+        }
+    }
+    for section in &mut proc_div.sections {
+        for para in &mut section.paragraphs {
+            for sentence in &mut para.sentences {
+                inject_exec_sql_into_stmts(&mut sentence.statements, blocks);
+            }
+        }
+    }
+}
+
+/// Recursively replace `Continue` with `ExecSql` in a statement list.
+fn inject_exec_sql_into_stmts<'a>(
+    stmts: &mut Vec<Statement>,
+    blocks: &mut std::iter::Peekable<impl Iterator<Item = &'a ExecSqlStatement>>,
+) {
+    for stmt in stmts.iter_mut() {
+        match stmt {
+            Statement::Continue => {
+                if blocks.peek().is_some() {
+                    let exec = blocks.next().unwrap().clone();
+                    *stmt = Statement::ExecSql(exec);
+                }
+            }
+            Statement::If(if_stmt) => {
+                inject_exec_sql_into_stmts(&mut if_stmt.then_body, blocks);
+                inject_exec_sql_into_stmts(&mut if_stmt.else_body, blocks);
+            }
+            Statement::Evaluate(eval) => {
+                for branch in &mut eval.when_branches {
+                    inject_exec_sql_into_stmts(&mut branch.body, blocks);
+                }
+                inject_exec_sql_into_stmts(&mut eval.when_other, blocks);
+            }
+            Statement::Perform(perf) => {
+                inject_exec_sql_into_stmts(&mut perf.body, blocks);
+            }
+            _ => {}
+        }
+    }
 }
 
 #[cfg(test)]

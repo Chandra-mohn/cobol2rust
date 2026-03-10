@@ -15,6 +15,7 @@ pub fn generate_working_storage(
     w: &mut RustWriter,
     records: &[DataEntry],
     file_section: &[FileDescription],
+    has_sql: bool,
 ) {
     // Pre-pass: collect all leaf field names to detect duplicates
     let mut name_counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
@@ -55,6 +56,12 @@ pub fn generate_working_storage(
     // WORKING-STORAGE SECTION fields
     for record in records {
         generate_ws_record(w, record, &duplicates, &mut filler_counter);
+    }
+
+    // Auto-inject SQLCA when EXEC SQL is present
+    if has_sql {
+        w.line("/// SQL Communication Area (auto-injected).");
+        w.line("pub sqlca: Sqlca,");
     }
 
     // Second pass: generate level-66 RENAMES fields
@@ -98,6 +105,11 @@ pub fn generate_working_storage(
     // WORKING-STORAGE SECTION inits
     for record in records {
         generate_ws_record_init(w, record, &duplicates, &mut filler_counter);
+    }
+
+    // Auto-inject SQLCA init
+    if has_sql {
+        w.line("sqlca: Sqlca::default(),");
     }
 
     // Second pass: initialize level-66 RENAMES fields
@@ -1105,7 +1117,7 @@ mod tests {
     fn generate_simple_struct() {
         let records = vec![make_entry("WS-COUNT", 77)];
         let mut w = RustWriter::new();
-        generate_working_storage(&mut w, &records, &[]);
+        generate_working_storage(&mut w, &records, &[], false);
         let output = w.finish();
         assert!(output.contains("pub struct WorkingStorage"));
         assert!(output.contains("ws_count"));
@@ -1120,7 +1132,7 @@ mod tests {
 
         let records = vec![entry];
         let mut w = RustWriter::new();
-        generate_working_storage(&mut w, &records, &[]);
+        generate_working_storage(&mut w, &records, &[], false);
         let output = w.finish();
 
         assert!(output.contains("CobolArray<PicX"), "should wrap in CobolArray: {output}");
@@ -1139,7 +1151,7 @@ mod tests {
 
         let records = vec![entry];
         let mut w = RustWriter::new();
-        generate_working_storage(&mut w, &records, &[]);
+        generate_working_storage(&mut w, &records, &[], false);
         let output = w.finish();
 
         assert!(
@@ -1174,7 +1186,7 @@ mod tests {
         ];
 
         let mut w = RustWriter::new();
-        generate_working_storage(&mut w, &records, &[]);
+        generate_working_storage(&mut w, &records, &[], false);
         let output = w.finish();
 
         assert!(
@@ -1216,7 +1228,7 @@ mod tests {
         ];
 
         let mut w = RustWriter::new();
-        generate_working_storage(&mut w, &records, &[]);
+        generate_working_storage(&mut w, &records, &[], false);
         let output = w.finish();
 
         // Should have WS-DATE as PicX and WS-DATE-PARTS as RedefinesGroup
@@ -1254,7 +1266,7 @@ mod tests {
         };
 
         let mut w = RustWriter::new();
-        generate_working_storage(&mut w, &[record], &[]);
+        generate_working_storage(&mut w, &[record], &[], false);
         let output = w.finish();
 
         // RENAMES field should appear in the struct
@@ -1285,7 +1297,7 @@ mod tests {
         };
 
         let mut w = RustWriter::new();
-        generate_working_storage(&mut w, &[record], &[]);
+        generate_working_storage(&mut w, &[record], &[], false);
         let output = w.finish();
 
         // RENAMES THRU should create a PicX spanning both fields
@@ -1314,7 +1326,7 @@ mod tests {
         };
 
         let mut w = RustWriter::new();
-        generate_working_storage(&mut w, &[record], &[]);
+        generate_working_storage(&mut w, &[record], &[], false);
         let output = w.finish();
 
         // Single RENAMES of numeric should copy the numeric type
@@ -1340,7 +1352,7 @@ mod tests {
         };
 
         let mut w = RustWriter::new();
-        generate_working_storage(&mut w, &[record], &[]);
+        generate_working_storage(&mut w, &[record], &[], false);
         let output = w.finish();
 
         // Should still compile and produce valid output without level-66
@@ -1356,7 +1368,7 @@ mod tests {
 
         let records = vec![entry];
         let mut w = RustWriter::new();
-        generate_working_storage(&mut w, &records, &[]);
+        generate_working_storage(&mut w, &records, &[], false);
         let output = w.finish();
 
         assert!(
@@ -1391,7 +1403,7 @@ mod tests {
         let entry = make_alpha_edited_entry("WS-FORMATTED", 77, "X(3)BX(3)", 7);
         let records = vec![entry];
         let mut w = RustWriter::new();
-        generate_working_storage(&mut w, &records, &[]);
+        generate_working_storage(&mut w, &records, &[], false);
         let output = w.finish();
 
         assert!(
@@ -1410,7 +1422,7 @@ mod tests {
         let entry = make_alpha_edited_entry("WS-DATE-FMT", 77, "X(2)/X(2)", 5);
         let records = vec![entry];
         let mut w = RustWriter::new();
-        generate_working_storage(&mut w, &records, &[]);
+        generate_working_storage(&mut w, &records, &[], false);
         let output = w.finish();
 
         assert!(
@@ -1435,7 +1447,7 @@ mod tests {
             ..make_entry("WS-RECORD", 1)
         };
         let mut w = RustWriter::new();
-        generate_working_storage(&mut w, &[record], &[]);
+        generate_working_storage(&mut w, &[record], &[], false);
         let output = w.finish();
         assert!(
             output.contains("Comp1Float"),
@@ -1451,7 +1463,7 @@ mod tests {
             ..make_entry("WS-RECORD", 1)
         };
         let mut w = RustWriter::new();
-        generate_working_storage(&mut w, &[record], &[]);
+        generate_working_storage(&mut w, &[record], &[], false);
         let output = w.finish();
         assert!(
             output.contains("Comp2Float"),
@@ -1468,7 +1480,7 @@ mod tests {
             ..make_entry("WS-RECORD", 1)
         };
         let mut w = RustWriter::new();
-        generate_working_storage(&mut w, &[record], &[]);
+        generate_working_storage(&mut w, &[record], &[], false);
         let output = w.finish();
         assert!(
             output.contains("Comp1Float::from_f32(3.14f32)"),
@@ -1497,7 +1509,7 @@ mod tests {
         };
 
         let mut w = RustWriter::new();
-        generate_working_storage(&mut w, &[parent], &[]);
+        generate_working_storage(&mut w, &[parent], &[], false);
         let output = w.finish();
 
         // Both WS-FLAG and WS-FLAG-V should be in the struct
@@ -1517,7 +1529,7 @@ mod tests {
         };
 
         let mut w = RustWriter::new();
-        generate_working_storage(&mut w, &[parent], &[]);
+        generate_working_storage(&mut w, &[parent], &[], false);
         let output = w.finish();
 
         // Both should be initialized in new()
@@ -1558,7 +1570,7 @@ mod tests {
         };
 
         let mut w = RustWriter::new();
-        generate_working_storage(&mut w, &[parent], &[]);
+        generate_working_storage(&mut w, &[parent], &[], false);
         let output = w.finish();
 
         assert!(output.contains("pub ws_ix: PackedDecimal"), "should generate INDEXED BY field: {output}");
@@ -1577,7 +1589,7 @@ mod tests {
         };
 
         let mut w = RustWriter::new();
-        generate_working_storage(&mut w, &[parent], &[]);
+        generate_working_storage(&mut w, &[parent], &[], false);
         let output = w.finish();
 
         let new_section = output.split("fn new()").nth(1).unwrap_or("");
@@ -1596,7 +1608,7 @@ mod tests {
         };
 
         let mut w = RustWriter::new();
-        generate_working_storage(&mut w, &[parent], &[]);
+        generate_working_storage(&mut w, &[parent], &[], false);
         let output = w.finish();
 
         assert!(output.contains("pub ws_ix1: PackedDecimal"), "should generate first index: {output}");
@@ -1628,7 +1640,7 @@ mod tests {
         };
 
         let mut w = RustWriter::new();
-        generate_working_storage(&mut w, &[record], &[]);
+        generate_working_storage(&mut w, &[record], &[], false);
         let output = w.finish();
 
         assert!(output.contains("ws_rec:"), "should have group overlay: {output}");
@@ -1658,7 +1670,7 @@ mod tests {
         };
 
         let mut w = RustWriter::new();
-        generate_working_storage(&mut w, &[record], &[]);
+        generate_working_storage(&mut w, &[record], &[], false);
         let output = w.finish();
 
         // Both should be in the struct with parent-prefixed names

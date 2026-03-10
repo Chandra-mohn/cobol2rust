@@ -167,11 +167,16 @@ fn generate_rust(program: &crate::ast::CobolProgram) -> Result<String> {
     w.line("#![allow(unused_imports, unused_variables, non_snake_case)]");
     w.blank_line();
     w.line("use cobol_runtime::prelude::*;");
+
+    let has_sql = !program.exec_sql_statements.is_empty();
+    if has_sql {
+        w.line("use cobol_sql::DuckDbRuntime;");
+    }
     w.blank_line();
 
     // Generate WorkingStorage struct
     if let Some(ref data_div) = program.data_division {
-        generate_working_storage(&mut w, &data_div.working_storage, &data_div.file_section);
+        generate_working_storage(&mut w, &data_div.working_storage, &data_div.file_section, has_sql);
         w.blank_line();
 
         // Generate LinkageSection struct if present
@@ -286,7 +291,17 @@ fn generate_rust(program: &crate::ast::CobolProgram) -> Result<String> {
         } else {
             (&[][..], Vec::new())
         };
-        generate_procedure_division(&mut w, proc_div, &cmap, &record_file_map, &sort_field_map, ws_records, &file_records);
+        generate_procedure_division(&mut w, proc_div, &cmap, &record_file_map, &sort_field_map, ws_records, &file_records, has_sql);
+        w.blank_line();
+    }
+
+    // Generate SQL runtime factory (when program uses EXEC SQL)
+    if has_sql {
+        w.line("/// Create the SQL runtime backend for this program.");
+        w.line("/// Default: in-memory DuckDB. Replace with PostgresRuntime etc. for production.");
+        w.open_block("fn create_sql_runtime() -> DuckDbRuntime {");
+        w.line("DuckDbRuntime::in_memory().expect(\"failed to create SQL runtime\")");
+        w.close_block("}");
         w.blank_line();
     }
 
@@ -294,7 +309,12 @@ fn generate_rust(program: &crate::ast::CobolProgram) -> Result<String> {
     w.open_block("fn main() {");
     w.line("let mut ws = WorkingStorage::new();");
     w.line("let mut ctx = ProgramContext::new();");
-    w.line("run(&mut ws, &mut ctx);");
+    if has_sql {
+        w.line("let mut sql = create_sql_runtime();");
+        w.line("run(&mut ws, &mut ctx, &mut sql);");
+    } else {
+        w.line("run(&mut ws, &mut ctx);");
+    }
     w.line("std::process::exit(ctx.return_code);");
     w.close_block("}");
 
