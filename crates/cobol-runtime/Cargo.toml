@@ -12,9 +12,10 @@ workspace = true
 
 [features]
 default = ["full"]
-full = ["io", "sort"]
+full = ["io", "sort", "sql"]
 io = ["dep:cobol-io"]
 sort = ["dep:cobol-sort"]
+sql = ["dep:cobol-sql"]
 
 [dependencies]
 cobol-core = { workspace = true }
@@ -23,6 +24,7 @@ cobol-move = { workspace = true }
 cobol-arithmetic = { workspace = true }
 cobol-io = { workspace = true, optional = true }
 cobol-sort = { workspace = true, optional = true }
+cobol-sql = { workspace = true, optional = true }
 rust_decimal = { workspace = true }
 rust_decimal_macros = { workspace = true }
 serde = { workspace = true }

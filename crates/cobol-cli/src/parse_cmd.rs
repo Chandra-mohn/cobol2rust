@@ -487,6 +487,9 @@ fn summarize_statement(stmt: &Statement) -> String {
             let targets: Vec<String> = init.targets.iter().map(format_data_ref).collect();
             format!("INITIALIZE {}", targets.join(" "))
         }
+        Statement::ExecSql(sql) => {
+            format!("EXEC SQL {:?}: {}", sql.sql_type, sql.raw_sql)
+        }
     }
 }
 

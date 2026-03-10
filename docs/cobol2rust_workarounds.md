@@ -40,7 +40,37 @@ data name in real COBOL programs).
 
 ---
 
-## W-002: (Template for future workarounds)
+## W-002: DuckDB Does Not Support SAVEPOINT
+
+**Affected**: `CobolSqlRuntime::savepoint()` and `CobolSqlRuntime::rollback_to_savepoint()`
+methods when using the `DuckDbRuntime` backend.
+
+**Root cause**: DuckDB does not implement the SQL `SAVEPOINT` or
+`ROLLBACK TO SAVEPOINT` syntax. These are standard SQL features supported by
+PostgreSQL, Oracle, DB2, and SQLite, but DuckDB's transaction model only
+supports flat `BEGIN`/`COMMIT`/`ROLLBACK`.
+
+**Symptom**: Calling `savepoint()` or `rollback_to_savepoint()` on `DuckDbRuntime`
+sets `SQLCODE = -1` with a parser error message. COBOL programs using
+`EXEC SQL SAVEPOINT` will fail at runtime with DuckDB.
+
+**Workaround**: SAVEPOINT/ROLLBACK TO SAVEPOINT is not tested with DuckDB.
+The `DuckDbRuntime` implementation passes the SQL through to DuckDB which
+rejects it. Programs that use savepoints must use an enterprise backend
+(PostgreSQL, DB2, Oracle) that supports the syntax.
+
+**Applied to**: `crates/cobol-sql/tests/duckdb_integration.rs` -- savepoint
+test case removed (documented as DuckDB limitation in test file comment).
+
+**Proper fix**: Implement `PostgresRuntime` (or other enterprise backend) that
+supports `SAVEPOINT`. The `CobolSqlRuntime` trait is backend-agnostic by design,
+so savepoint support works correctly once a supporting backend is used.
+Alternatively, DuckDB savepoints could be emulated using nested transactions
+if DuckDB adds support in the future.
+
+---
+
+## W-003: (Template for future workarounds)
 
 **Affected**:
 
@@ -61,3 +91,4 @@ data name in real COBOL programs).
 | File | Workaround | Date |
 |------|-----------|------|
 | cobol/language/statements/arithmetic_verbs.cbl | W-001: WS-ROUNDED -> WS-RNDVAL | 2026-03-08 |
+| crates/cobol-sql/tests/duckdb_integration.rs | W-002: SAVEPOINT test removed (DuckDB limitation) | 2026-03-09 |

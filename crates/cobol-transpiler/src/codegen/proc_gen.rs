@@ -422,6 +422,9 @@ fn generate_statement(w: &mut RustWriter, stmt: &Statement, cmap: &ConditionMap,
         Statement::Alter(_) => {
             w.line(&format!("// TODO: unsupported statement: {stmt:?}"));
         }
+        Statement::ExecSql(sql) => {
+            w.line(&format!("// EXEC SQL: {} (codegen not yet implemented)", sql.raw_sql));
+        }
     }
 }
 

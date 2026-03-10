@@ -22,6 +22,10 @@ pub struct CobolProgram {
     pub procedure_division: Option<ProcedureDivision>,
     /// Source file path (for diagnostics).
     pub source_path: Option<String>,
+    /// EXEC SQL statements extracted from the source (Phase 1: not yet
+    /// positionally mapped into paragraphs).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub exec_sql_statements: Vec<ExecSqlStatement>,
 }
 
 // ---------------------------------------------------------------------------
@@ -390,6 +394,9 @@ pub enum Statement {
     // -- Misc --
     Set(SetStatement),
     Alter(AlterStatement),
+
+    // -- Embedded SQL --
+    ExecSql(ExecSqlStatement),
 }
 
 // ---------------------------------------------------------------------------
@@ -1193,4 +1200,56 @@ impl fmt::Display for ArithOp {
             Self::Power => write!(f, "**"),
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// EXEC SQL
+// ---------------------------------------------------------------------------
+
+/// EXEC SQL ... END-EXEC statement.
+#[derive(Debug, Clone, Serialize)]
+pub struct ExecSqlStatement {
+    /// Type of SQL statement (SELECT, INSERT, etc.).
+    pub sql_type: SqlStatementType,
+    /// Raw SQL text between EXEC SQL and END-EXEC (with :host-var intact).
+    pub raw_sql: String,
+    /// Host variables used as input parameters (read direction).
+    pub input_vars: Vec<HostVarRef>,
+    /// Host variables used as output targets (write direction, SELECT INTO).
+    pub output_vars: Vec<HostVarRef>,
+    /// Cursor name (for DECLARE/OPEN/FETCH/CLOSE CURSOR).
+    pub cursor_name: Option<String>,
+    /// Prepared statement name (for PREPARE/EXECUTE).
+    pub prepared_name: Option<String>,
+}
+
+/// Reference to a host variable inside an EXEC SQL block.
+#[derive(Debug, Clone, Serialize)]
+pub struct HostVarRef {
+    /// COBOL field name (without the : prefix).
+    pub field_name: String,
+    /// Optional null indicator field name.
+    pub indicator: Option<String>,
+}
+
+/// Type of SQL statement, detected by keyword matching.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub enum SqlStatementType {
+    SelectInto,
+    Insert,
+    Update,
+    Delete,
+    DeclareCursor,
+    OpenCursor,
+    FetchCursor,
+    CloseCursor,
+    Commit,
+    Rollback,
+    Prepare,
+    Execute,
+    ExecuteImmediate,
+    Savepoint,
+    IncludeSqlca,
+    /// Catch-all for unrecognized SQL statements.
+    Other(String),
 }

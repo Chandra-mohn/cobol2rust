@@ -84,6 +84,7 @@ struct ProgramInfo {
     paragraphs: usize,
     calls: usize,
     file_ops: usize,
+    sql_statements: usize,
     is_subprogram: bool,
 }
 
@@ -179,6 +180,7 @@ fn check_file(cli: &Cli, path: &PathBuf, with_coverage: bool) -> Result<FileResu
         paragraphs: 0,
         calls: 0,
         file_ops: 0,
+        sql_statements: 0,
         is_subprogram: false,
     };
     let program_id;
@@ -304,10 +306,14 @@ fn collect_stats(program: &CobolProgram) -> ProgramInfo {
         }
     }
 
+    // Count EXEC SQL statements (extracted at program level).
+    let sql_statements = program.exec_sql_statements.len();
+
     ProgramInfo {
         paragraphs,
         calls,
         file_ops,
+        sql_statements,
         is_subprogram,
     }
 }
@@ -369,6 +375,9 @@ fn count_in_statement(stmt: &Statement, calls: &mut usize, file_ops: &mut usize)
             for s in &perf.body {
                 count_in_statement(s, calls, file_ops);
             }
+        }
+        Statement::ExecSql(_) => {
+            // SQL statements are counted at program level, not here
         }
         _ => {}
     }
@@ -457,8 +466,8 @@ fn print_text_result(r: &FileResult) {
     }
 
     eprintln!(
-        "  [INFO] {} paragraph(s), {} CALL statement(s), {} file operation(s)",
-        r.info.paragraphs, r.info.calls, r.info.file_ops,
+        "  [INFO] {} paragraph(s), {} CALL statement(s), {} file operation(s), {} SQL statement(s)",
+        r.info.paragraphs, r.info.calls, r.info.file_ops, r.info.sql_statements,
     );
 
     // Coverage report

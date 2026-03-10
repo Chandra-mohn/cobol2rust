@@ -65,6 +65,10 @@ pub use cobol_sort::{
     sort_with_procedures,
 };
 
+// SQL runtime
+#[cfg(feature = "sql")]
+pub use cobol_sql::{CobolSqlRuntime, HostVar, HostVarMut, Sqlca, SqlErrm, SqlWarnings};
+
 // Decimal type, macro, and conversion traits
 pub use rust_decimal::Decimal;
 pub use rust_decimal::prelude::ToPrimitive;

@@ -4,6 +4,8 @@
 //! Strips sequence numbers, indicator areas, and comments.
 //! Handles continuation lines (indicator `-`).
 
+use std::cell::RefCell;
+
 use crate::error::{Result, TranspileError};
 
 /// Source format detection.
@@ -224,13 +226,170 @@ fn strip_id_division_metadata(source: &str) -> String {
 }
 
 /// Auto-detect format and preprocess accordingly.
+///
+/// Returns the preprocessed source with EXEC SQL/CICS blocks replaced by
+/// CONTINUE placeholders. The extracted blocks are stored in a thread-local
+/// for the proc_listener to consume during AST construction.
 pub fn preprocess(source: &str) -> Result<String> {
     // Strip IDENTIFICATION DIVISION metadata paragraphs first
     let cleaned = strip_id_division_metadata(source);
-    match detect_source_format(&cleaned) {
-        SourceFormat::Fixed => preprocess_fixed_format(&cleaned),
-        SourceFormat::Free => Ok(preprocess_free_format(&cleaned)),
+    let format_result = match detect_source_format(&cleaned) {
+        SourceFormat::Fixed => preprocess_fixed_format(&cleaned)?,
+        SourceFormat::Free => preprocess_free_format(&cleaned),
+    };
+    // Extract EXEC SQL/CICS blocks and replace with CONTINUE
+    let extraction = extract_exec_blocks(&format_result);
+    // Store extracted blocks for the proc_listener to consume
+    set_exec_blocks(extraction.sql_blocks);
+    Ok(extraction.cleaned_source)
+}
+
+// Thread-local storage for extracted EXEC blocks.
+// Set by preprocess(), consumed by the proc_listener.
+thread_local! {
+    static EXEC_BLOCKS: RefCell<Vec<ExtractedExecBlock>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Store extracted EXEC blocks for later consumption.
+fn set_exec_blocks(blocks: Vec<ExtractedExecBlock>) {
+    EXEC_BLOCKS.with(|eb| {
+        *eb.borrow_mut() = blocks;
+    });
+}
+
+/// Take the next extracted EXEC block (FIFO order).
+/// Called by the proc_listener when it encounters a CONTINUE placeholder.
+pub fn take_next_exec_block() -> Option<ExtractedExecBlock> {
+    EXEC_BLOCKS.with(|eb| {
+        let mut blocks = eb.borrow_mut();
+        if blocks.is_empty() {
+            None
+        } else {
+            Some(blocks.remove(0))
+        }
+    })
+}
+
+/// Check if there are pending EXEC blocks (used to detect SQL programs).
+pub fn has_pending_exec_blocks() -> bool {
+    EXEC_BLOCKS.with(|eb| !eb.borrow().is_empty())
+}
+
+/// Get the count of remaining EXEC blocks.
+pub fn pending_exec_block_count() -> usize {
+    EXEC_BLOCKS.with(|eb| eb.borrow().len())
+}
+
+/// Result of extracting EXEC SQL/CICS blocks from source.
+#[derive(Debug, Clone)]
+pub struct ExecExtraction {
+    /// The source with EXEC blocks replaced by `CONTINUE` placeholders.
+    pub cleaned_source: String,
+    /// Extracted SQL blocks in order of appearance.
+    pub sql_blocks: Vec<ExtractedExecBlock>,
+}
+
+/// A single extracted EXEC SQL or EXEC CICS block.
+#[derive(Debug, Clone)]
+pub struct ExtractedExecBlock {
+    /// "SQL" or "CICS".
+    pub exec_type: String,
+    /// Normalized SQL/CICS text (whitespace collapsed, trimmed).
+    pub text: String,
+}
+
+/// Extract EXEC SQL/CICS blocks from preprocessed source.
+///
+/// Replaces each `EXEC SQL ... END-EXEC` (and `EXEC CICS ... END-EXEC`)
+/// with a COBOL `CONTINUE` statement so ANTLR can parse the rest normally.
+/// The extracted blocks are returned separately for AST injection.
+pub fn extract_exec_blocks(source: &str) -> ExecExtraction {
+    let mut result = String::with_capacity(source.len());
+    let mut blocks = Vec::new();
+    let upper = source.to_uppercase();
+    let bytes = source.as_bytes();
+    let upper_bytes = upper.as_bytes();
+    let len = bytes.len();
+    let mut i = 0;
+
+    while i < len {
+        // Look for "EXEC SQL" (case-insensitive)
+        if i + 8 <= len && &upper_bytes[i..i + 8] == b"EXEC SQL" {
+            let before_ok = i == 0 || !upper_bytes[i - 1].is_ascii_alphanumeric();
+            let after_ok = i + 8 >= len || !upper_bytes[i + 8].is_ascii_alphanumeric();
+
+            if before_ok && after_ok {
+                let sql_start = i + 8;
+                if let Some(end_pos) = find_end_exec(&upper, sql_start) {
+                    let sql_text = &source[sql_start..end_pos];
+                    let normalized = sql_text
+                        .split_whitespace()
+                        .collect::<Vec<&str>>()
+                        .join(" ");
+                    blocks.push(ExtractedExecBlock {
+                        exec_type: "SQL".to_string(),
+                        text: normalized,
+                    });
+                    // Replace with CONTINUE so ANTLR sees a valid statement
+                    result.push_str("CONTINUE");
+                    i = end_pos + 8; // skip past END-EXEC
+                    // Skip optional trailing period
+                    while i < len && (bytes[i] == b' ' || bytes[i] == b'\t') {
+                        i += 1;
+                    }
+                    if i < len && bytes[i] == b'.' {
+                        result.push('.');
+                        i += 1;
+                    }
+                    continue;
+                }
+            }
+        }
+
+        // Look for "EXEC CICS"
+        if i + 9 <= len && &upper_bytes[i..i + 9] == b"EXEC CICS" {
+            let before_ok = i == 0 || !upper_bytes[i - 1].is_ascii_alphanumeric();
+            let after_ok = i + 9 >= len || !upper_bytes[i + 9].is_ascii_alphanumeric();
+
+            if before_ok && after_ok {
+                let cics_start = i + 9;
+                if let Some(end_pos) = find_end_exec(&upper, cics_start) {
+                    let cics_text = &source[cics_start..end_pos];
+                    let normalized = cics_text
+                        .split_whitespace()
+                        .collect::<Vec<&str>>()
+                        .join(" ");
+                    blocks.push(ExtractedExecBlock {
+                        exec_type: "CICS".to_string(),
+                        text: normalized,
+                    });
+                    result.push_str("CONTINUE");
+                    i = end_pos + 8;
+                    while i < len && (bytes[i] == b' ' || bytes[i] == b'\t') {
+                        i += 1;
+                    }
+                    if i < len && bytes[i] == b'.' {
+                        result.push('.');
+                        i += 1;
+                    }
+                    continue;
+                }
+            }
+        }
+
+        result.push(bytes[i] as char);
+        i += 1;
     }
+
+    ExecExtraction {
+        cleaned_source: result,
+        sql_blocks: blocks,
+    }
+}
+
+/// Find the position of "END-EXEC" in the uppercased source starting from `from`.
+fn find_end_exec(upper: &str, from: usize) -> Option<usize> {
+    upper[from..].find("END-EXEC").map(|p| from + p)
 }
 
 /// Handle continuation of quoted strings.
@@ -346,5 +505,140 @@ WORKING-STORAGE SECTION.";
         let result = preprocess_fixed_format(source).unwrap();
         // Should not panic, just produce blank lines
         assert!(!result.is_empty() || result.is_empty()); // always passes, testing no panic
+    }
+
+    // -----------------------------------------------------------------------
+    // EXEC SQL/CICS extraction tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn extract_single_exec_sql() {
+        let source = "MOVE 1 TO WS-X.\nEXEC SQL SELECT A INTO :H FROM T END-EXEC.\nSTOP RUN.";
+        let ext = extract_exec_blocks(source);
+        assert_eq!(ext.sql_blocks.len(), 1);
+        assert_eq!(ext.sql_blocks[0].exec_type, "SQL");
+        assert_eq!(ext.sql_blocks[0].text, "SELECT A INTO :H FROM T");
+        // EXEC SQL replaced with CONTINUE
+        assert!(ext.cleaned_source.contains("CONTINUE"));
+        assert!(!ext.cleaned_source.contains("EXEC SQL"));
+        // Surrounding code preserved
+        assert!(ext.cleaned_source.contains("MOVE 1 TO WS-X."));
+        assert!(ext.cleaned_source.contains("STOP RUN."));
+    }
+
+    #[test]
+    fn extract_multiple_exec_sql() {
+        let source = concat!(
+            "EXEC SQL INSERT INTO T VALUES (:H1) END-EXEC.\n",
+            "DISPLAY 'OK'.\n",
+            "EXEC SQL COMMIT END-EXEC.\n",
+        );
+        let ext = extract_exec_blocks(source);
+        assert_eq!(ext.sql_blocks.len(), 2);
+        assert_eq!(ext.sql_blocks[0].text, "INSERT INTO T VALUES (:H1)");
+        assert_eq!(ext.sql_blocks[1].text, "COMMIT");
+    }
+
+    #[test]
+    fn extract_multiline_exec_sql() {
+        let source = concat!(
+            "    EXEC SQL\n",
+            "        SELECT ENAME, SAL\n",
+            "        INTO :WS-ENAME, :WS-SAL\n",
+            "        FROM EMP\n",
+            "        WHERE EMPNO = :WS-EMPNO\n",
+            "    END-EXEC.\n",
+        );
+        let ext = extract_exec_blocks(source);
+        assert_eq!(ext.sql_blocks.len(), 1);
+        // Whitespace should be collapsed
+        assert!(ext.sql_blocks[0].text.contains("SELECT ENAME, SAL INTO :WS-ENAME, :WS-SAL FROM EMP WHERE EMPNO = :WS-EMPNO"));
+        assert!(!ext.sql_blocks[0].text.contains('\n'));
+    }
+
+    #[test]
+    fn extract_exec_cics() {
+        let source = "EXEC CICS RETURN TRANSID('TXN1') COMMAREA(WS-COMM) END-EXEC.";
+        let ext = extract_exec_blocks(source);
+        assert_eq!(ext.sql_blocks.len(), 1);
+        assert_eq!(ext.sql_blocks[0].exec_type, "CICS");
+        assert!(ext.sql_blocks[0].text.contains("RETURN TRANSID"));
+    }
+
+    #[test]
+    fn extract_mixed_sql_and_cics() {
+        let source = concat!(
+            "EXEC SQL SELECT A INTO :H FROM T END-EXEC.\n",
+            "EXEC CICS RETURN END-EXEC.\n",
+        );
+        let ext = extract_exec_blocks(source);
+        assert_eq!(ext.sql_blocks.len(), 2);
+        assert_eq!(ext.sql_blocks[0].exec_type, "SQL");
+        assert_eq!(ext.sql_blocks[1].exec_type, "CICS");
+    }
+
+    #[test]
+    fn extract_no_exec_blocks() {
+        let source = "MOVE 1 TO WS-X.\nDISPLAY 'HELLO'.\nSTOP RUN.";
+        let ext = extract_exec_blocks(source);
+        assert!(ext.sql_blocks.is_empty());
+        assert_eq!(ext.cleaned_source, source);
+    }
+
+    #[test]
+    fn extract_preserves_period_after_end_exec() {
+        let source = "EXEC SQL COMMIT END-EXEC.\nSTOP RUN.";
+        let ext = extract_exec_blocks(source);
+        // The period after END-EXEC should be preserved (attached to CONTINUE)
+        assert!(ext.cleaned_source.contains("CONTINUE."));
+    }
+
+    #[test]
+    fn extract_case_insensitive() {
+        let source = "exec sql commit end-exec.";
+        let ext = extract_exec_blocks(source);
+        assert_eq!(ext.sql_blocks.len(), 1);
+        assert_eq!(ext.sql_blocks[0].text, "commit");
+    }
+
+    #[test]
+    fn extract_exec_sql_include_sqlca() {
+        let source = "EXEC SQL INCLUDE SQLCA END-EXEC.";
+        let ext = extract_exec_blocks(source);
+        assert_eq!(ext.sql_blocks.len(), 1);
+        assert_eq!(ext.sql_blocks[0].text, "INCLUDE SQLCA");
+    }
+
+    #[test]
+    fn extract_does_not_match_partial_exec() {
+        // "EXECUTE" should not trigger EXEC SQL extraction
+        let source = "EXECUTE SECTION-A.\n";
+        let ext = extract_exec_blocks(source);
+        assert!(ext.sql_blocks.is_empty());
+        assert_eq!(ext.cleaned_source, source);
+    }
+
+    #[test]
+    fn extract_exec_sql_no_end_exec() {
+        // Unterminated EXEC SQL -- should pass through as-is
+        let source = "EXEC SQL SELECT A FROM T\nSTOP RUN.";
+        let ext = extract_exec_blocks(source);
+        // No END-EXEC found, so no extraction
+        assert!(ext.sql_blocks.is_empty());
+    }
+
+    #[test]
+    fn preprocess_strips_exec_sql_from_full_program() {
+        let source = concat!(
+            "IDENTIFICATION DIVISION.\n",
+            "PROGRAM-ID. TEST1.\n",
+            "PROCEDURE DIVISION.\n",
+            "    EXEC SQL COMMIT END-EXEC.\n",
+            "    STOP RUN.\n",
+        );
+        let result = preprocess(source).unwrap();
+        assert!(!result.contains("EXEC SQL"));
+        assert!(result.contains("CONTINUE"));
+        assert!(result.contains("STOP RUN"));
     }
 }

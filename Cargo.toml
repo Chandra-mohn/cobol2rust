@@ -58,6 +58,7 @@ clap = { version = "4", features = ["derive"] }
 
 # Storage backends
 rusqlite = { version = "0.32", features = ["bundled"] }
+duckdb = { version = "1.4", features = ["bundled"] }
 tempfile = "3"
 
 # Parser
@@ -73,5 +74,6 @@ cobol-move = { path = "crates/cobol-move" }
 cobol-arithmetic = { path = "crates/cobol-arithmetic" }
 cobol-io = { path = "crates/cobol-io" }
 cobol-sort = { path = "crates/cobol-sort" }
+cobol-sql = { path = "crates/cobol-sql" }
 cobol-runtime = { path = "crates/cobol-runtime" }
 cobol-transpiler = { path = "crates/cobol-transpiler" }

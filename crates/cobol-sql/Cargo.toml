@@ -1,0 +1,27 @@
+[package]
+name = "cobol-sql"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "COBOL EXEC SQL runtime: trait-based DB abstraction, SQLCA, host variable binding"
+
+[lints]
+workspace = true
+
+[features]
+default = []
+duckdb = ["dep:duckdb"]
+
+[dependencies]
+cobol-core = { workspace = true }
+rust_decimal = { workspace = true }
+thiserror = { workspace = true }
+duckdb = { workspace = true, optional = true }
+
+[dev-dependencies]
+duckdb = { workspace = true }
+cobol-core = { workspace = true }
+cobol-types = { workspace = true }
+rust_decimal_macros = { workspace = true }

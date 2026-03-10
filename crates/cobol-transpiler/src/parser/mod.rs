@@ -16,8 +16,9 @@ pub mod hierarchy;
 pub mod pic_parser;
 pub mod preprocess;
 pub(crate) mod proc_listener;
+pub mod sql_extract;
 
-use crate::ast::{CobolProgram, DataDivision, DataEntry, FileDescription, ProcedureDivision};
+use crate::ast::{CobolProgram, DataDivision, DataEntry, ExecSqlStatement, FileDescription, ProcedureDivision};
 use crate::diagnostics::TranspileDiagnostic;
 use crate::error::{Result, TranspileError};
 use crate::generated::cobol85lexer::Cobol85Lexer;
@@ -31,8 +32,9 @@ use antlr_rust::tree::ParseTreeListener;
 use data_listener::DataDivisionListener;
 use file_listener::FileListener;
 use hierarchy::{build_hierarchy, compute_layout};
-use preprocess::preprocess;
+use preprocess::{preprocess, ExtractedExecBlock};
 use proc_listener::ProcedureDivisionListener;
+use sql_extract::analyze_exec_sql;
 
 /// Parse COBOL source into a typed AST.
 ///
@@ -44,8 +46,11 @@ use proc_listener::ProcedureDivisionListener;
 /// Returns `TranspileError::AntlrError` if the ANTLR4 parser fails,
 /// or `TranspileError::Preprocess` if preprocessing fails.
 pub fn parse_cobol(source: &str) -> Result<CobolProgram> {
-    // Preprocess (strip columns, comments, handle continuations)
+    // Preprocess (strip columns, comments, handle continuations, extract EXEC SQL)
     let preprocessed = preprocess(source)?;
+
+    // Collect any extracted EXEC SQL blocks from preprocessing
+    let exec_blocks = drain_exec_blocks();
 
     // Wrap standalone copybooks in a minimal program skeleton
     let input = wrap_if_copybook(&preprocessed);
@@ -62,6 +67,9 @@ pub fn parse_cobol(source: &str) -> Result<CobolProgram> {
     // Extract PROGRAM-ID
     let program_id = extract_program_id(&input);
 
+    // Convert extracted EXEC blocks to AST nodes
+    let exec_sql_statements = build_exec_sql_ast(&exec_blocks);
+
     Ok(CobolProgram {
         program_id,
         data_division: Some(DataDivision {
@@ -72,6 +80,7 @@ pub fn parse_cobol(source: &str) -> Result<CobolProgram> {
         }),
         procedure_division,
         source_path: None,
+        exec_sql_statements,
     })
 }
 
@@ -109,6 +118,7 @@ pub fn parse_cobol_from_source(source: &str) -> Result<CobolProgram> {
         }),
         procedure_division,
         source_path: None,
+        exec_sql_statements: Vec::new(),
     })
 }
 
@@ -118,6 +128,7 @@ pub fn parse_cobol_from_source(source: &str) -> Result<CobolProgram> {
 /// unhandled statements, parse errors, and coverage gaps.
 pub fn parse_cobol_with_diagnostics(source: &str) -> Result<(CobolProgram, Vec<TranspileDiagnostic>)> {
     let preprocessed = preprocess(source)?;
+    let exec_blocks = drain_exec_blocks();
     let input = wrap_if_copybook(&preprocessed);
 
     let working_storage = parse_data_division(&input)?;
@@ -126,6 +137,8 @@ pub fn parse_cobol_with_diagnostics(source: &str) -> Result<(CobolProgram, Vec<T
     let (procedure_division, diagnostics) = parse_procedure_division_with_diagnostics(&input)?;
 
     let program_id = extract_program_id(&input);
+
+    let exec_sql_statements = build_exec_sql_ast(&exec_blocks);
 
     let program = CobolProgram {
         program_id,
@@ -137,9 +150,28 @@ pub fn parse_cobol_with_diagnostics(source: &str) -> Result<(CobolProgram, Vec<T
         }),
         procedure_division,
         source_path: None,
+        exec_sql_statements,
     };
 
     Ok((program, diagnostics))
+}
+
+/// Drain all extracted EXEC blocks from the thread-local storage.
+fn drain_exec_blocks() -> Vec<ExtractedExecBlock> {
+    let mut blocks = Vec::new();
+    while let Some(block) = preprocess::take_next_exec_block() {
+        blocks.push(block);
+    }
+    blocks
+}
+
+/// Convert extracted EXEC blocks into AST nodes.
+fn build_exec_sql_ast(blocks: &[ExtractedExecBlock]) -> Vec<ExecSqlStatement> {
+    blocks
+        .iter()
+        .filter(|b| b.exec_type == "SQL")
+        .map(|b| analyze_exec_sql(&b.text))
+        .collect()
 }
 
 /// Parse PROCEDURE DIVISION, returning both the AST and diagnostics.
@@ -685,5 +717,100 @@ mod tests {
             !pd.paragraphs.is_empty(),
             "Expected at least 1 paragraph but got 0"
         );
+    }
+
+    #[test]
+    fn parse_exec_sql_select_into() {
+        let source = concat!(
+            "IDENTIFICATION DIVISION.\n",
+            "PROGRAM-ID. SQLTEST.\n",
+            "DATA DIVISION.\n",
+            "WORKING-STORAGE SECTION.\n",
+            "01  WS-EMPNO  PIC 9(6).\n",
+            "01  WS-ENAME  PIC X(20).\n",
+            "01  WS-SAL    PIC 9(7)V99.\n",
+            "PROCEDURE DIVISION.\n",
+            "MAIN-PARA.\n",
+            "    MOVE 100 TO WS-EMPNO.\n",
+            "    EXEC SQL\n",
+            "        SELECT ENAME, SAL\n",
+            "        INTO :WS-ENAME, :WS-SAL\n",
+            "        FROM EMP\n",
+            "        WHERE EMPNO = :WS-EMPNO\n",
+            "    END-EXEC.\n",
+            "    STOP RUN.\n",
+        );
+
+        let result = parse_cobol(source);
+        assert!(result.is_ok(), "parse failed: {result:?}");
+        let program = result.unwrap();
+        assert_eq!(program.program_id, "SQLTEST");
+
+        // Should have extracted 1 EXEC SQL statement
+        assert_eq!(program.exec_sql_statements.len(), 1);
+        let sql = &program.exec_sql_statements[0];
+        assert_eq!(sql.sql_type, crate::ast::SqlStatementType::SelectInto);
+        assert_eq!(sql.output_vars.len(), 2);
+        assert_eq!(sql.output_vars[0].field_name, "WS-ENAME");
+        assert_eq!(sql.output_vars[1].field_name, "WS-SAL");
+        assert_eq!(sql.input_vars.len(), 1);
+        assert_eq!(sql.input_vars[0].field_name, "WS-EMPNO");
+
+        // Procedure division should still parse (EXEC SQL replaced with CONTINUE)
+        assert!(program.procedure_division.is_some());
+    }
+
+    #[test]
+    fn parse_exec_sql_multiple() {
+        let source = concat!(
+            "IDENTIFICATION DIVISION.\n",
+            "PROGRAM-ID. MULTISQL.\n",
+            "DATA DIVISION.\n",
+            "WORKING-STORAGE SECTION.\n",
+            "01  WS-EMPNO  PIC 9(6).\n",
+            "01  WS-ENAME  PIC X(20).\n",
+            "PROCEDURE DIVISION.\n",
+            "MAIN-PARA.\n",
+            "    EXEC SQL\n",
+            "        INSERT INTO EMP (EMPNO, ENAME)\n",
+            "        VALUES (:WS-EMPNO, :WS-ENAME)\n",
+            "    END-EXEC.\n",
+            "    EXEC SQL COMMIT END-EXEC.\n",
+            "    STOP RUN.\n",
+        );
+
+        let result = parse_cobol(source);
+        assert!(result.is_ok(), "parse failed: {result:?}");
+        let program = result.unwrap();
+
+        assert_eq!(program.exec_sql_statements.len(), 2);
+        assert_eq!(
+            program.exec_sql_statements[0].sql_type,
+            crate::ast::SqlStatementType::Insert,
+        );
+        assert_eq!(
+            program.exec_sql_statements[1].sql_type,
+            crate::ast::SqlStatementType::Commit,
+        );
+    }
+
+    #[test]
+    fn parse_no_exec_sql() {
+        let source = concat!(
+            "IDENTIFICATION DIVISION.\n",
+            "PROGRAM-ID. NOSQL.\n",
+            "DATA DIVISION.\n",
+            "WORKING-STORAGE SECTION.\n",
+            "01  WS-X PIC 9(3).\n",
+            "PROCEDURE DIVISION.\n",
+            "MAIN-PARA.\n",
+            "    DISPLAY 'HELLO'.\n",
+            "    STOP RUN.\n",
+        );
+
+        let result = parse_cobol(source);
+        assert!(result.is_ok());
+        let program = result.unwrap();
+        assert!(program.exec_sql_statements.is_empty());
     }
 }
