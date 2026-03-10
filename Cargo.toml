@@ -55,6 +55,9 @@ toml = "0.8"
 
 # CLI
 clap = { version = "4", features = ["derive"] }
+similar = "2"
+indicatif = "0.17"
+rayon = "1"
 
 # Storage backends
 rusqlite = { version = "0.32", features = ["bundled"] }

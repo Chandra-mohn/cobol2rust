@@ -1,6 +1,8 @@
 //! cobol2rust CLI: transpile COBOL to Rust, validate, preprocess.
 
 mod check;
+mod compile_cmd;
+mod diff_cmd;
 mod init_cmd;
 mod parse_cmd;
 mod preprocess;
@@ -74,6 +76,10 @@ pub enum Command {
     Parse(parse_cmd::ParseArgs),
     /// Scaffold a Cargo workspace from COBOL sources.
     Init(init_cmd::InitArgs),
+    /// Transpile and build in one step.
+    Compile(compile_cmd::CompileArgs),
+    /// Compare transpilation outputs between two COBOL files.
+    Diff(diff_cmd::DiffArgs),
 }
 
 fn main() -> ExitCode {
@@ -110,6 +116,8 @@ fn main() -> ExitCode {
         Command::Preprocess(ref args) => preprocess::run(&cli, args),
         Command::Parse(ref args) => parse_cmd::run(&cli, args),
         Command::Init(ref args) => init_cmd::run(&cli, args),
+        Command::Compile(ref args) => compile_cmd::run(&cli, args),
+        Command::Diff(ref args) => diff_cmd::run(&cli, args),
     };
 
     match result {

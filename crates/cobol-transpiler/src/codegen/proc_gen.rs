@@ -528,6 +528,17 @@ fn generate_exec_sql(w: &mut RustWriter, exec: &ExecSqlStatement) {
             ));
         }
     }
+
+    // Sync SQLCODE mirror field after any SQL call that touches sqlca
+    let needs_sync = !matches!(
+        exec.sql_type,
+        SqlStatementType::IncludeSqlca
+            | SqlStatementType::DeclareCursor
+            | SqlStatementType::Other(_)
+    );
+    if needs_sync {
+        w.line("ws.sqlcode.pack(Decimal::from(ws.sqlca.sqlcode));");
+    }
 }
 
 /// Generate `sql.exec_query(...)` for SELECT INTO.
@@ -1375,7 +1386,11 @@ fn generate_perform_until_before(w: &mut RustWriter, cond: &str, p: &PerformStat
             generate_perform_thru_inline(w, &target.name, thru_name, ptable, has_sql);
         } else {
             let fn_name = cobol_to_rust_name(&target.name, "");
-            w.line(&format!("{fn_name}(ws, ctx);"));
+            if has_sql {
+                w.line(&format!("{fn_name}(ws, ctx, sql);"));
+            } else {
+                w.line(&format!("{fn_name}(ws, ctx);"));
+            }
         }
     } else {
         for stmt in &p.body {
@@ -1392,7 +1407,11 @@ fn generate_perform_until_after(w: &mut RustWriter, cond: &str, p: &PerformState
             generate_perform_thru_inline(w, &target.name, thru_name, ptable, has_sql);
         } else {
             let fn_name = cobol_to_rust_name(&target.name, "");
-            w.line(&format!("{fn_name}(ws, ctx);"));
+            if has_sql {
+                w.line(&format!("{fn_name}(ws, ctx, sql);"));
+            } else {
+                w.line(&format!("{fn_name}(ws, ctx);"));
+            }
         }
     } else {
         for stmt in &p.body {

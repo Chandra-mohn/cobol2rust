@@ -4,11 +4,14 @@ use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::fs;
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 use clap::Args;
+use indicatif::{ProgressBar, ProgressStyle};
 use miette::{miette, Context, IntoDiagnostic, Result};
+use rayon::prelude::*;
 
 use cobol_transpiler::transpile::{transpile_with_config, TranspileConfig};
 
@@ -57,6 +60,19 @@ pub struct TranspileArgs {
     /// If not specified, the workspace Cargo.toml uses a crates.io version spec.
     #[arg(long)]
     pub runtime_path: Option<PathBuf>,
+
+    /// Transpile files in parallel (workspace mode only).
+    #[arg(long)]
+    pub parallel: bool,
+
+    /// Number of parallel jobs (default: number of CPUs, implies --parallel).
+    #[arg(short = 'j', long)]
+    pub jobs: Option<usize>,
+
+    /// Skip unchanged files (workspace mode only).
+    /// Compares source mtime against output mtime.
+    #[arg(long)]
+    pub incremental: bool,
 }
 
 /// Run the transpile subcommand.
@@ -104,13 +120,28 @@ pub fn run(cli: &Cli, args: &TranspileArgs) -> Result<ExitCode> {
     Ok(ExitCode::SUCCESS)
 }
 
+/// A single program ready for transpilation.
+struct TranspileJob {
+    crate_name: String,
+    source_path: PathBuf,
+    crate_dir: PathBuf,
+    entry_file: &'static str,
+    cargo_toml_content: String,
+}
+
+/// Result of transpiling one program.
+enum TranspileOutcome {
+    Success { crate_name: String },
+    Skipped { crate_name: String },
+    Failed { crate_name: String, error: String },
+}
+
 /// Run workspace mode: transpile a directory of COBOL files into a Cargo workspace.
 fn run_workspace(cli: &Cli, args: &TranspileArgs) -> Result<ExitCode> {
     let output_dir = args.output.as_ref().ok_or_else(|| {
         miette!("--output is required for workspace mode")
     })?;
 
-    // Load overrides from existing manifest
     let overrides = load_manifest_overrides(args.manifest.as_deref())?;
 
     if !cli.quiet {
@@ -120,7 +151,6 @@ fn run_workspace(cli: &Cli, args: &TranspileArgs) -> Result<ExitCode> {
         );
     }
 
-    // Analyze workspace
     let analysis =
         analyze_workspace(&args.input, &overrides, args.continue_on_error)?;
 
@@ -157,7 +187,6 @@ fn run_workspace(cli: &Cli, args: &TranspileArgs) -> Result<ExitCode> {
 
     // Write workspace Cargo.toml
     let runtime_path_str = args.runtime_path.as_ref().map(|p| {
-        // Canonicalize to absolute path so it works regardless of output location
         let canonical = p.canonicalize().unwrap_or_else(|_| p.clone());
         canonical.to_string_lossy().to_string()
     });
@@ -172,14 +201,13 @@ fn run_workspace(cli: &Cli, args: &TranspileArgs) -> Result<ExitCode> {
         create_copybooks_crate(output_dir, &analysis)?;
     }
 
-    // Transpile each program
+    // Prepare transpilation jobs
     let programs_dir = output_dir.join("programs");
     fs::create_dir_all(&programs_dir)
         .into_diagnostic()
         .wrap_err("failed to create programs/")?;
 
-    let mut success_count = 0u32;
-    let mut fail_count = 0u32;
+    let mut jobs: Vec<TranspileJob> = Vec::new();
 
     for (crate_name, info) in &analysis.programs {
         if info.program_type == ProgramType::Skip {
@@ -188,15 +216,8 @@ fn run_workspace(cli: &Cli, args: &TranspileArgs) -> Result<ExitCode> {
 
         let source_path = args.input.join(&info.source);
         let crate_dir = programs_dir.join(crate_name);
-        let src_dir = crate_dir.join("src");
 
-        fs::create_dir_all(&src_dir)
-            .into_diagnostic()
-            .wrap_err_with(|| {
-                format!("failed to create programs/{crate_name}/src")
-            })?;
-
-        // Generate program Cargo.toml
+        // Build dependencies list
         let mut deps: Vec<String> = Vec::new();
         if has_copybooks {
             deps.push("copybooks".to_string());
@@ -208,49 +229,178 @@ fn run_workspace(cli: &Cli, args: &TranspileArgs) -> Result<ExitCode> {
             }
         }
 
-        let prog_cargo =
+        let cargo_toml_content =
             generate_program_cargo_toml(crate_name, info.program_type, &deps);
-        fs::write(crate_dir.join("Cargo.toml"), &prog_cargo)
-            .into_diagnostic()
-            .wrap_err_with(|| {
-                format!("failed to write programs/{crate_name}/Cargo.toml")
-            })?;
 
-        // Transpile the source file
         let entry_file = if info.program_type == ProgramType::Main {
             "main.rs"
         } else {
             "lib.rs"
         };
 
-        match transpile_single(&source_path, &config) {
+        jobs.push(TranspileJob {
+            crate_name: crate_name.clone(),
+            source_path,
+            crate_dir,
+            entry_file,
+            cargo_toml_content,
+        });
+    }
+
+    let total = jobs.len();
+    let use_parallel = args.parallel || args.jobs.is_some();
+
+    // Configure rayon thread pool if --jobs is specified
+    if let Some(num_jobs) = args.jobs {
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(num_jobs)
+            .build_global()
+            .ok(); // Ignore error if already initialized
+    }
+
+    // Create progress bar
+    let pb = if !cli.quiet && total > 1 {
+        let bar = ProgressBar::new(total as u64);
+        bar.set_style(
+            ProgressStyle::default_bar()
+                .template("[{elapsed_precise}] [{bar:40}] {pos}/{len} {msg}")
+                .expect("valid template")
+                .progress_chars("=> "),
+        );
+        Some(bar)
+    } else {
+        None
+    };
+
+    let success_count = AtomicU32::new(0);
+    let fail_count = AtomicU32::new(0);
+    let skip_count = AtomicU32::new(0);
+
+    // Transpile function for one job
+    let transpile_one = |job: &TranspileJob| -> TranspileOutcome {
+        let src_dir = job.crate_dir.join("src");
+
+        // Create directories (sequential I/O, but fast)
+        if fs::create_dir_all(&src_dir).is_err() {
+            return TranspileOutcome::Failed {
+                crate_name: job.crate_name.clone(),
+                error: format!("failed to create {}/src", job.crate_dir.display()),
+            };
+        }
+
+        // Write Cargo.toml
+        if fs::write(job.crate_dir.join("Cargo.toml"), &job.cargo_toml_content).is_err() {
+            return TranspileOutcome::Failed {
+                crate_name: job.crate_name.clone(),
+                error: format!(
+                    "failed to write {}/Cargo.toml",
+                    job.crate_dir.display()
+                ),
+            };
+        }
+
+        let output_path = src_dir.join(job.entry_file);
+
+        // Incremental: skip if output is newer than source
+        if args.incremental && is_up_to_date(&job.source_path, &output_path) {
+            return TranspileOutcome::Skipped {
+                crate_name: job.crate_name.clone(),
+            };
+        }
+
+        // Transpile
+        match transpile_single(&job.source_path, &config) {
             Ok(rust_source) => {
-                fs::write(src_dir.join(entry_file), &rust_source)
-                    .into_diagnostic()
-                    .wrap_err_with(|| {
-                        format!(
-                            "failed to write programs/{crate_name}/src/{entry_file}"
-                        )
-                    })?;
-                success_count += 1;
-                if cli.verbose > 0 && !cli.quiet {
-                    eprintln!(
-                        "  Transpiled {} -> programs/{crate_name}/src/{entry_file}",
-                        info.source.display(),
-                    );
+                if fs::write(&output_path, &rust_source).is_err() {
+                    return TranspileOutcome::Failed {
+                        crate_name: job.crate_name.clone(),
+                        error: format!(
+                            "failed to write {}",
+                            output_path.display()
+                        ),
+                    };
+                }
+                TranspileOutcome::Success {
+                    crate_name: job.crate_name.clone(),
                 }
             }
-            Err(e) => {
+            Err(e) => TranspileOutcome::Failed {
+                crate_name: job.crate_name.clone(),
+                error: format!("{e}"),
+            },
+        }
+    };
+
+    // Execute transpilation (parallel or sequential)
+    let outcomes: Vec<TranspileOutcome> = if use_parallel {
+        jobs.par_iter()
+            .map(|job| {
+                let outcome = transpile_one(job);
+                if let Some(ref bar) = pb {
+                    bar.inc(1);
+                    match &outcome {
+                        TranspileOutcome::Success { crate_name } => {
+                            bar.set_message(crate_name.clone());
+                        }
+                        TranspileOutcome::Skipped { crate_name } => {
+                            bar.set_message(format!("{crate_name} (skipped)"));
+                        }
+                        TranspileOutcome::Failed { crate_name, .. } => {
+                            bar.set_message(format!("{crate_name} (FAILED)"));
+                        }
+                    }
+                }
+                outcome
+            })
+            .collect()
+    } else {
+        jobs.iter()
+            .map(|job| {
+                let outcome = transpile_one(job);
+                if let Some(ref bar) = pb {
+                    bar.inc(1);
+                    match &outcome {
+                        TranspileOutcome::Success { crate_name } => {
+                            bar.set_message(crate_name.clone());
+                        }
+                        TranspileOutcome::Skipped { crate_name } => {
+                            bar.set_message(format!("{crate_name} (skipped)"));
+                        }
+                        TranspileOutcome::Failed { crate_name, .. } => {
+                            bar.set_message(format!("{crate_name} (FAILED)"));
+                        }
+                    }
+                }
+                outcome
+            })
+            .collect()
+    };
+
+    if let Some(ref bar) = pb {
+        bar.finish_and_clear();
+    }
+
+    // Process outcomes
+    for outcome in &outcomes {
+        match outcome {
+            TranspileOutcome::Success { crate_name } => {
+                success_count.fetch_add(1, Ordering::Relaxed);
+                if cli.verbose > 0 && !cli.quiet {
+                    eprintln!("  Transpiled {crate_name}");
+                }
+            }
+            TranspileOutcome::Skipped { crate_name } => {
+                skip_count.fetch_add(1, Ordering::Relaxed);
+                if cli.verbose > 0 && !cli.quiet {
+                    eprintln!("  Skipped {crate_name} (up-to-date)");
+                }
+            }
+            TranspileOutcome::Failed { crate_name, error } => {
+                fail_count.fetch_add(1, Ordering::Relaxed);
                 if args.continue_on_error {
-                    fail_count += 1;
-                    eprintln!(
-                        "  error: failed to transpile {}: {e}",
-                        info.source.display(),
-                    );
+                    eprintln!("  error: failed to transpile {crate_name}: {error}");
                 } else {
-                    return Err(e).wrap_err_with(|| {
-                        format!("failed to transpile {}", info.source.display())
-                    });
+                    return Err(miette!("failed to transpile {crate_name}: {error}"));
                 }
             }
         }
@@ -269,23 +419,46 @@ fn run_workspace(cli: &Cli, args: &TranspileArgs) -> Result<ExitCode> {
             format!("failed to write manifest {}", manifest_path.display())
         })?;
 
+    let s = success_count.load(Ordering::Relaxed);
+    let f = fail_count.load(Ordering::Relaxed);
+    let k = skip_count.load(Ordering::Relaxed);
+
     if !cli.quiet {
-        eprintln!(
-            "Workspace transpiled: {success_count} succeeded, {fail_count} failed"
-        );
+        let mut summary = format!("Workspace transpiled: {s} succeeded, {f} failed");
+        if k > 0 {
+            let _ = write!(summary, ", {k} skipped (up-to-date)");
+        }
+        eprintln!("{summary}");
         eprintln!("Output: {}", output_dir.display());
     }
 
-    if fail_count > 0 {
+    if f > 0 {
         Ok(ExitCode::from(1))
     } else {
         Ok(ExitCode::SUCCESS)
     }
 }
 
+/// Check if `output` is newer than `source` (for incremental mode).
+fn is_up_to_date(source: &Path, output: &Path) -> bool {
+    let Ok(src_meta) = fs::metadata(source) else {
+        return false;
+    };
+    let Ok(out_meta) = fs::metadata(output) else {
+        return false;
+    };
+    let Ok(src_mtime) = src_meta.modified() else {
+        return false;
+    };
+    let Ok(out_mtime) = out_meta.modified() else {
+        return false;
+    };
+    out_mtime >= src_mtime
+}
+
 /// Transpile a single source file and return the Rust source.
 fn transpile_single(
-    source_path: &std::path::Path,
+    source_path: &Path,
     config: &TranspileConfig,
 ) -> Result<String> {
     let source = fs::read_to_string(source_path)
@@ -367,7 +540,7 @@ fn generate_program_cargo_toml(
 
 /// Create the copybooks crate with placeholder lib.rs.
 fn create_copybooks_crate(
-    output_dir: &std::path::Path,
+    output_dir: &Path,
     analysis: &crate::workspace::WorkspaceAnalysis,
 ) -> Result<()> {
     let cb_dir = output_dir.join("copybooks").join("src");

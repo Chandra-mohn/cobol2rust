@@ -1,3 +1,4 @@
+#![cfg(feature = "duckdb")]
 //! Integration tests for DuckDbRuntime against the CobolSqlRuntime trait.
 //!
 //! Uses in-memory DuckDB -- no external database needed.

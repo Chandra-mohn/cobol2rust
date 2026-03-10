@@ -62,6 +62,8 @@ pub fn generate_working_storage(
     if has_sql {
         w.line("/// SQL Communication Area (auto-injected).");
         w.line("pub sqlca: Sqlca,");
+        w.line("/// SQLCODE mirror field (synced after each SQL call).");
+        w.line("pub sqlcode: PackedDecimal /* Display P9 S0 signed */,");
     }
 
     // Second pass: generate level-66 RENAMES fields
@@ -110,6 +112,7 @@ pub fn generate_working_storage(
     // Auto-inject SQLCA init
     if has_sql {
         w.line("sqlca: Sqlca::default(),");
+        w.line("sqlcode: PackedDecimal::new(9, 0, true),");
     }
 
     // Second pass: initialize level-66 RENAMES fields
