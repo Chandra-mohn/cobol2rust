@@ -1,11 +1,13 @@
 //! cobol2rust CLI: transpile COBOL to Rust, validate, preprocess.
 
+mod analyze;
 mod check;
 mod compile_cmd;
 mod diff_cmd;
 mod init_cmd;
 mod parse_cmd;
 mod preprocess;
+mod scan;
 mod transpile_cmd;
 mod workspace;
 
@@ -80,6 +82,8 @@ pub enum Command {
     Compile(compile_cmd::CompileArgs),
     /// Compare transpilation outputs between two COBOL files.
     Diff(diff_cmd::DiffArgs),
+    /// Scan an enterprise COBOL codebase with DuckDB persistence.
+    Scan(scan::args::ScanArgs),
 }
 
 fn main() -> ExitCode {
@@ -118,6 +122,7 @@ fn main() -> ExitCode {
         Command::Init(ref args) => init_cmd::run(&cli, args),
         Command::Compile(ref args) => compile_cmd::run(&cli, args),
         Command::Diff(ref args) => diff_cmd::run(&cli, args),
+        Command::Scan(ref args) => scan::run(&cli, args),
     };
 
     match result {

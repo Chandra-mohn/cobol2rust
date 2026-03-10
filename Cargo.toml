@@ -58,6 +58,10 @@ clap = { version = "4", features = ["derive"] }
 similar = "2"
 indicatif = "0.17"
 rayon = "1"
+crossbeam-channel = "0.5"
+num_cpus = "1"
+ctrlc = { version = "3", features = ["termination"] }
+glob = "0.3"
 
 # Storage backends
 rusqlite = { version = "0.32", features = ["bundled"] }

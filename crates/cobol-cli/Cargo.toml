@@ -23,3 +23,8 @@ serde_json = { workspace = true }
 similar = { workspace = true }
 indicatif = { workspace = true }
 rayon = { workspace = true }
+duckdb = { workspace = true }
+crossbeam-channel = { workspace = true }
+num_cpus = { workspace = true }
+ctrlc = { workspace = true }
+glob = { workspace = true }

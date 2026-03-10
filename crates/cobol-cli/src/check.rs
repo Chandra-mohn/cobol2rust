@@ -8,12 +8,9 @@ use clap::{Args, ValueEnum};
 use miette::{Context, IntoDiagnostic, Result};
 use serde::Serialize;
 
-use cobol_transpiler::ast::{CobolProgram, ProcedureDivision, Statement};
-use cobol_transpiler::diagnostics::Severity;
-use cobol_transpiler::parser::preprocess::{detect_source_format, SourceFormat};
-use cobol_transpiler::parser::{extract_copy_targets, parse_cobol};
-use cobol_transpiler::transpile::transpile_with_diagnostics;
+use cobol_transpiler::parser::extract_copy_targets;
 
+use crate::analyze::{self, AnalysisResult, CoverageResult, DiagnosticEntry};
 use crate::Cli;
 
 /// Arguments for `cobol2rust check`.
@@ -160,279 +157,60 @@ pub fn run(cli: &Cli, args: &CheckArgs) -> Result<ExitCode> {
     }
 }
 
-/// Check a single COBOL file.
+/// Check a single COBOL file using the shared analysis pipeline.
 fn check_file(cli: &Cli, path: &PathBuf, with_coverage: bool) -> Result<FileResult> {
     let source = fs::read_to_string(path)
         .into_diagnostic()
         .wrap_err_with(|| format!("failed to read {}", path.display()))?;
 
-    // Detect format.
-    let format = detect_source_format(&source);
-    let format_str = match format {
-        SourceFormat::Fixed => "fixed",
-        SourceFormat::Free => "free",
-    };
-
-    // Try parsing.
-    let mut errors = Vec::new();
-    let mut warnings = Vec::new();
-    let mut info = ProgramInfo {
-        paragraphs: 0,
-        calls: 0,
-        file_ops: 0,
-        sql_statements: 0,
-        is_subprogram: false,
-    };
-    let program_id;
-    let mut coverage = None;
-
-    match parse_cobol(&source) {
-        Ok(program) => {
-            program_id = program.program_id.clone();
-            info = collect_stats(&program);
-
-            // Check for unsupported features (text-level scan).
-            scan_warnings(&source, &mut warnings);
-        }
-        Err(e) => {
-            errors.push(Diagnostic {
-                line: extract_error_line(&e),
-                message: e.to_string(),
-                code: String::from("E001"),
-            });
-
-            // Even on parse error, try to extract program-id from raw text.
-            program_id = extract_program_id_text(&source);
-        }
-    }
-
-    // Run coverage analysis if requested.
-    if with_coverage && errors.is_empty() {
-        coverage = Some(run_coverage(&source));
-    }
+    let analysis = analyze::analyze_source(&source, with_coverage);
 
     if cli.verbose > 0 {
-        // Extract COPY targets for verbose output.
         let copies = extract_copy_targets(&source);
         if !copies.is_empty() && !cli.quiet {
             eprintln!("  COPY targets: {}", copies.join(", "));
         }
     }
 
-    Ok(FileResult {
+    Ok(analysis_to_file_result(path, &analysis))
+}
+
+/// Convert an `AnalysisResult` to the check-specific `FileResult`.
+fn analysis_to_file_result(path: &PathBuf, a: &AnalysisResult) -> FileResult {
+    FileResult {
         path: path.display().to_string(),
-        program_id,
-        format: format_str.to_string(),
-        valid: errors.is_empty(),
-        errors,
-        warnings,
-        info,
-        coverage,
-    })
-}
-
-/// Run transpilation and collect coverage diagnostics.
-fn run_coverage(source: &str) -> CoverageInfo {
-    match transpile_with_diagnostics(source) {
-        Ok(result) => {
-            let unhandled: Vec<Diagnostic> = result
-                .diagnostics
-                .iter()
-                .map(|d| Diagnostic {
-                    line: if d.line > 0 { Some(d.line) } else { None },
-                    message: format!("{}: {}", d.category, d.message),
-                    code: format!(
-                        "{}",
-                        match d.severity {
-                            Severity::Error => "C-ERR",
-                            Severity::Warning => "C-WARN",
-                            Severity::Info => "C-INFO",
-                        }
-                    ),
-                })
-                .collect();
-
-            CoverageInfo {
-                total_statements: result.stats.total_statements,
-                mapped_statements: result.stats.mapped_statements,
-                coverage_pct: result.statement_coverage(),
-                total_data_entries: result.stats.total_data_entries,
-                unhandled,
-            }
-        }
-        Err(e) => {
-            // Transpilation itself failed -- report 0% coverage
-            CoverageInfo {
-                total_statements: 0,
-                mapped_statements: 0,
-                coverage_pct: 0.0,
-                total_data_entries: 0,
-                unhandled: vec![Diagnostic {
-                    line: None,
-                    message: format!("Transpilation failed: {e}"),
-                    code: String::from("C-FATAL"),
-                }],
-            }
-        }
+        program_id: a.program_id.clone(),
+        format: a.source_format.clone(),
+        valid: a.valid,
+        errors: a.errors.iter().map(entry_to_diagnostic).collect(),
+        warnings: a.warnings.iter().map(entry_to_diagnostic).collect(),
+        info: ProgramInfo {
+            paragraphs: a.info.paragraphs,
+            calls: a.info.calls,
+            file_ops: a.info.file_ops,
+            sql_statements: a.info.sql_statements,
+            is_subprogram: a.info.is_subprogram,
+        },
+        coverage: a.coverage.as_ref().map(coverage_to_info),
     }
 }
 
-/// Collect statistics from a parsed program.
-fn collect_stats(program: &CobolProgram) -> ProgramInfo {
-    let mut paragraphs = 0usize;
-    let mut calls = 0usize;
-    let mut file_ops = 0usize;
-    let mut is_subprogram = false;
-
-    // Check for subprogram indicators.
-    if let Some(ref pd) = program.procedure_division {
-        if !pd.using_params.is_empty() {
-            is_subprogram = true;
-        }
-
-        // Count paragraphs and walk statements.
-        paragraphs += pd.paragraphs.len();
-        for section in &pd.sections {
-            paragraphs += section.paragraphs.len();
-        }
-
-        count_statements(pd, &mut calls, &mut file_ops);
-    }
-
-    // Also check for LINKAGE SECTION items as subprogram indicator.
-    if let Some(ref dd) = program.data_division {
-        if !dd.linkage.is_empty() {
-            is_subprogram = true;
-        }
-    }
-
-    // Count EXEC SQL statements (extracted at program level).
-    let sql_statements = program.exec_sql_statements.len();
-
-    ProgramInfo {
-        paragraphs,
-        calls,
-        file_ops,
-        sql_statements,
-        is_subprogram,
+fn entry_to_diagnostic(e: &DiagnosticEntry) -> Diagnostic {
+    Diagnostic {
+        line: e.line,
+        message: e.message.clone(),
+        code: e.code.clone(),
     }
 }
 
-/// Walk all statements in the procedure division to count calls and file ops.
-fn count_statements(pd: &ProcedureDivision, calls: &mut usize, file_ops: &mut usize) {
-    // Walk standalone paragraphs.
-    for para in &pd.paragraphs {
-        for sentence in &para.sentences {
-            for stmt in &sentence.statements {
-                count_in_statement(stmt, calls, file_ops);
-            }
-        }
+fn coverage_to_info(c: &CoverageResult) -> CoverageInfo {
+    CoverageInfo {
+        total_statements: c.total_statements,
+        mapped_statements: c.mapped_statements,
+        coverage_pct: c.coverage_pct,
+        total_data_entries: c.total_data_entries,
+        unhandled: c.unhandled.iter().map(entry_to_diagnostic).collect(),
     }
-
-    // Walk sections.
-    for section in &pd.sections {
-        for para in &section.paragraphs {
-            for sentence in &para.sentences {
-                for stmt in &sentence.statements {
-                    count_in_statement(stmt, calls, file_ops);
-                }
-            }
-        }
-    }
-}
-
-/// Count calls and file operations in a single statement (recursive for nested).
-fn count_in_statement(stmt: &Statement, calls: &mut usize, file_ops: &mut usize) {
-    match stmt {
-        Statement::Call(_) => *calls += 1,
-        Statement::Open(_)
-        | Statement::Close(_)
-        | Statement::Read(_)
-        | Statement::Write(_)
-        | Statement::Rewrite(_)
-        | Statement::Delete(_)
-        | Statement::Start(_) => *file_ops += 1,
-        // Recurse into nested statements (IF/EVALUATE/PERFORM INLINE).
-        Statement::If(if_stmt) => {
-            for s in &if_stmt.then_body {
-                count_in_statement(s, calls, file_ops);
-            }
-            for s in &if_stmt.else_body {
-                count_in_statement(s, calls, file_ops);
-            }
-        }
-        Statement::Evaluate(eval) => {
-            for branch in &eval.when_branches {
-                for s in &branch.body {
-                    count_in_statement(s, calls, file_ops);
-                }
-            }
-            for s in &eval.when_other {
-                count_in_statement(s, calls, file_ops);
-            }
-        }
-        Statement::Perform(perf) => {
-            for s in &perf.body {
-                count_in_statement(s, calls, file_ops);
-            }
-        }
-        Statement::ExecSql(_) => {
-            // SQL statements are counted at program level, not here
-        }
-        _ => {}
-    }
-}
-
-/// Scan raw source for common warnings.
-fn scan_warnings(source: &str, warnings: &mut Vec<Diagnostic>) {
-    for (i, line) in source.lines().enumerate() {
-        let trimmed = line.trim().to_uppercase();
-
-        if trimmed.contains("EXEC SQL") || trimmed.contains("EXEC CICS") {
-            warnings.push(Diagnostic {
-                line: Some(i + 1),
-                message: String::from("EXEC SQL/CICS not supported (will be skipped)"),
-                code: String::from("W001"),
-            });
-        }
-
-        if trimmed.starts_with("ALTER ") || trimmed.contains(" ALTER ") {
-            warnings.push(Diagnostic {
-                line: Some(i + 1),
-                message: String::from("ALTER verb detected (consider refactoring)"),
-                code: String::from("W002"),
-            });
-        }
-    }
-}
-
-/// Extract error line number from `TranspileError` (best-effort).
-fn extract_error_line(e: &cobol_transpiler::error::TranspileError) -> Option<usize> {
-    use cobol_transpiler::error::TranspileError;
-    match e {
-        TranspileError::Preprocess { line, .. } | TranspileError::Parse { line, .. } => {
-            Some(*line)
-        }
-        _ => None,
-    }
-}
-
-/// Extract PROGRAM-ID from raw text (fallback when parsing fails).
-fn extract_program_id_text(source: &str) -> String {
-    for line in source.lines() {
-        let trimmed = line.trim().to_uppercase();
-        if trimmed.starts_with("PROGRAM-ID") {
-            let rest = trimmed
-                .trim_start_matches("PROGRAM-ID")
-                .trim_start_matches('.')
-                .trim_start();
-            let name = rest.trim_end_matches('.').trim();
-            if !name.is_empty() {
-                return name.to_string();
-            }
-        }
-    }
-    String::from("UNKNOWN")
 }
 
 /// Print a text-format check result.
