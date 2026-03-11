@@ -2,6 +2,8 @@
 /target/
 /Volumes/RustBuild/
 bad/
+*.duckdb
+*.log
 
 # ANTLR4 tool JAR (download with scripts/generate_parser.sh --check)
 tools/*.jar
