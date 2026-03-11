@@ -27,6 +27,19 @@ pub enum SourceFormat {
 ///   - ` ` = normal code line.
 /// - Strips columns 73+ (identification area).
 /// - Preserves Area A/B indentation (columns 8-72 become the code).
+/// Snap a byte index to the nearest valid char boundary (searching forward).
+/// If `pos` is already on a boundary, returns it unchanged.
+fn snap_to_char_boundary(s: &str, pos: usize) -> usize {
+    if pos >= s.len() {
+        return s.len();
+    }
+    let mut i = pos;
+    while i < s.len() && !s.is_char_boundary(i) {
+        i += 1;
+    }
+    i
+}
+
 pub fn preprocess_fixed_format(source: &str) -> Result<String> {
     let mut output_lines: Vec<String> = Vec::new();
 
@@ -44,8 +57,11 @@ pub fn preprocess_fixed_format(source: &str) -> Result<String> {
         let indicator = line.as_bytes()[6] as char;
 
         // Extract code area: columns 8-72 (0-indexed 7..72)
+        // Use char boundary-safe slicing to handle non-ASCII (e.g., EBCDIC remnants).
         let code_end = line.len().min(72);
-        let code_area = &line[7..code_end];
+        let safe_start = snap_to_char_boundary(line, 7);
+        let safe_end = snap_to_char_boundary(line, code_end);
+        let code_area = &line[safe_start..safe_end];
 
         match indicator {
             // Comment lines and debugging lines -- skip entirely
@@ -124,7 +140,7 @@ pub fn detect_source_format(source: &str) -> SourceFormat {
     let mut total_checked = 0;
 
     for line in source.lines().take(50) {
-        if line.len() < 7 {
+        if line.len() < 7 || !line.is_char_boundary(6) {
             continue;
         }
 
@@ -237,11 +253,152 @@ pub fn preprocess(source: &str) -> Result<String> {
         SourceFormat::Fixed => preprocess_fixed_format(&cleaned)?,
         SourceFormat::Free => preprocess_free_format(&cleaned),
     };
+    // Flatten long ELSE IF chains to prevent ANTLR exponential backtracking
+    let flattened = flatten_else_if_chains(&format_result);
     // Extract EXEC SQL/CICS blocks and replace with CONTINUE
-    let extraction = extract_exec_blocks(&format_result);
+    let extraction = extract_exec_blocks(&flattened);
     // Store extracted blocks for the proc_listener to consume
     set_exec_blocks(extraction.sql_blocks);
     Ok(extraction.cleaned_source)
+}
+
+/// Flatten long chains of `ELSE IF` without `END-IF` by injecting `END-IF`
+/// before each `ELSE IF` in the chain.
+///
+/// COBOL allows `IF ... ELSE IF ... ELSE IF ...` without explicit `END-IF`
+/// scope terminators. The ANTLR grammar treats each `ELSE IF` as a nested
+/// `ELSE (IF ...)`, creating exponential backtracking with O(2^N) parse
+/// time for N levels of nesting.
+///
+/// This function detects such chains in the PROCEDURE DIVISION and rewrites
+/// them by inserting `END-IF` before each `ELSE IF`, converting the grammar
+/// from deeply nested to flat. The ANTLR parser then handles each IF/END-IF
+/// pair independently in linear time.
+///
+/// Only chains of 3+ consecutive `ELSE IF` without intervening `END-IF` are
+/// rewritten. Shorter chains parse quickly and don't need intervention.
+///
+/// The rewrite preserves semantics: `ELSE IF B` is equivalent to
+/// `END-IF ELSE IF B` when the preceding IF has no explicit END-IF.
+fn flatten_else_if_chains(source: &str) -> String {
+    // Only operate on PROCEDURE DIVISION content
+    let upper = source.to_uppercase();
+    let proc_pos = match upper.find("PROCEDURE DIVISION") {
+        Some(pos) => pos,
+        None => return source.to_string(),
+    };
+
+    // Find the start of the line containing PROCEDURE DIVISION
+    let proc_line_start = source[..proc_pos].rfind('\n').map_or(0, |p| p + 1);
+
+    // Work on lines from PROCEDURE DIVISION onward
+    let prefix = &source[..proc_line_start];
+    let proc_source = &source[proc_line_start..];
+    let proc_lines: Vec<&str> = proc_source.lines().collect();
+
+    // First pass: identify lines that are ELSE IF or END-IF
+    // Build a map of line classifications
+    let mut line_types: Vec<LineType> = Vec::with_capacity(proc_lines.len());
+    for line in &proc_lines {
+        let trimmed = line.trim().to_uppercase();
+        if trimmed.starts_with("ELSE IF ") || trimmed == "ELSE IF" {
+            line_types.push(LineType::ElseIf);
+        } else if trimmed.starts_with("END-IF") || trimmed.starts_with("END IF") {
+            line_types.push(LineType::EndIf);
+        } else if trimmed.starts_with("IF ") || trimmed == "IF" {
+            line_types.push(LineType::If);
+        } else {
+            line_types.push(LineType::Other);
+        }
+    }
+
+    // Second pass: find chains of ELSE IF without END-IF
+    // A chain is: IF ... body ... ELSE IF ... body ... ELSE IF ... body ...
+    // We need to find sequences of ElseIf lines with no EndIf between them
+    // that form chains of 3+ ELSE IFs
+    let chains = find_else_if_chains(&line_types);
+
+    if chains.is_empty() {
+        return source.to_string();
+    }
+
+    // Third pass: rebuild source with END-IF injected before each ELSE IF in chains
+    let mut result = String::with_capacity(source.len() + chains.len() * 20);
+    result.push_str(prefix);
+
+    // Collect the line indices that need END-IF injection
+    let mut inject_before: std::collections::HashSet<usize> = std::collections::HashSet::new();
+    for chain in &chains {
+        // Inject END-IF before each ELSE IF in the chain (not the first IF)
+        for &line_idx in chain {
+            inject_before.insert(line_idx);
+        }
+    }
+
+    for (i, line) in proc_lines.iter().enumerate() {
+        if inject_before.contains(&i) {
+            // Inject END-IF on its own line, matching indentation of the ELSE IF
+            let indent = line.len() - line.trim_start().len();
+            let indent_str: String = line[..indent].to_string();
+            result.push_str(&indent_str);
+            result.push_str("END-IF\n");
+        }
+        result.push_str(line);
+        if i < proc_lines.len() - 1 {
+            result.push('\n');
+        }
+    }
+
+    result
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum LineType {
+    If,
+    ElseIf,
+    EndIf,
+    Other,
+}
+
+/// Find chains of 3+ consecutive ELSE IF lines without intervening END-IF.
+///
+/// Returns a list of chains, where each chain is a list of line indices
+/// (of the ELSE IF lines that need END-IF injected before them).
+fn find_else_if_chains(line_types: &[LineType]) -> Vec<Vec<usize>> {
+    let mut chains: Vec<Vec<usize>> = Vec::new();
+    let mut current_chain: Vec<usize> = Vec::new();
+
+    for (i, lt) in line_types.iter().enumerate() {
+        match lt {
+            LineType::ElseIf => {
+                current_chain.push(i);
+            }
+            LineType::EndIf => {
+                // END-IF breaks the chain -- this code uses explicit scoping
+                if current_chain.len() >= 3 {
+                    chains.push(current_chain.clone());
+                }
+                current_chain.clear();
+            }
+            LineType::If => {
+                // New IF: save any existing chain and start fresh
+                if current_chain.len() >= 3 {
+                    chains.push(current_chain.clone());
+                }
+                current_chain.clear();
+            }
+            LineType::Other => {
+                // Other lines don't break the chain (they're the body between ELSE IFs)
+            }
+        }
+    }
+
+    // Don't forget the last chain
+    if current_chain.len() >= 3 {
+        chains.push(current_chain);
+    }
+
+    chains
 }
 
 // Thread-local storage for extracted EXEC blocks.
@@ -654,6 +811,103 @@ WORKING-STORAGE SECTION.";
         let ext = extract_exec_blocks(source);
         // No END-EXEC found, so no extraction
         assert!(ext.sql_blocks.is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // ELSE IF chain flattening tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn flatten_short_chain_untouched() {
+        // 2 ELSE IFs -- below threshold of 3, should not be modified
+        let source = concat!(
+            "IDENTIFICATION DIVISION.\n",
+            "PROGRAM-ID. TEST1.\n",
+            "PROCEDURE DIVISION.\n",
+            "    IF A = 1\n",
+            "        MOVE 1 TO X\n",
+            "    ELSE IF A = 2\n",
+            "        MOVE 2 TO X\n",
+            "    ELSE\n",
+            "        MOVE 0 TO X.\n",
+        );
+        let result = flatten_else_if_chains(source);
+        assert_eq!(result, source, "Short chains should not be modified");
+    }
+
+    #[test]
+    fn flatten_long_chain() {
+        // 3 ELSE IFs -- meets threshold of 3, should inject END-IF before each
+        let source = concat!(
+            "PROCEDURE DIVISION.\n",
+            "    IF A = 1\n",
+            "        MOVE 1 TO X\n",
+            "    ELSE IF A = 2\n",
+            "        MOVE 2 TO X\n",
+            "    ELSE IF A = 3\n",
+            "        MOVE 3 TO X\n",
+            "    ELSE IF A = 4\n",
+            "        MOVE 4 TO X\n",
+            "    ELSE\n",
+            "        MOVE 0 TO X.\n",
+        );
+        let result = flatten_else_if_chains(source);
+        // Should have 3 END-IF injected (one before each ELSE IF)
+        let end_if_count = result.matches("END-IF").count();
+        assert_eq!(end_if_count, 3, "Should inject 3 END-IF markers, got {end_if_count}");
+        // Original ELSE IFs should still be present
+        assert!(result.contains("ELSE IF A = 2"));
+        assert!(result.contains("ELSE IF A = 3"));
+        assert!(result.contains("ELSE IF A = 4"));
+    }
+
+    #[test]
+    fn flatten_preserves_code_with_end_if() {
+        // Code that already uses END-IF should not be modified
+        let source = concat!(
+            "PROCEDURE DIVISION.\n",
+            "    IF A = 1\n",
+            "        MOVE 1 TO X\n",
+            "    ELSE IF A = 2\n",
+            "        MOVE 2 TO X\n",
+            "    END-IF\n",
+            "    ELSE IF A = 3\n",
+            "        MOVE 3 TO X\n",
+            "    END-IF\n",
+            "    ELSE IF A = 4\n",
+            "        MOVE 4 TO X\n",
+            "    END-IF\n",
+            "    END-IF.\n",
+        );
+        let result = flatten_else_if_chains(source);
+        // END-IF breaks chains, so no chain reaches 3. Should be unchanged.
+        assert_eq!(result, source, "Code with END-IF should not be modified");
+    }
+
+    #[test]
+    fn flatten_no_procedure_division() {
+        // No PROCEDURE DIVISION -- should return unchanged
+        let source = "DATA DIVISION.\nWORKING-STORAGE SECTION.\n01 WS-X PIC 9.\n";
+        let result = flatten_else_if_chains(source);
+        assert_eq!(result, source);
+    }
+
+    #[test]
+    fn flatten_encascii_pattern() {
+        // Simulate the ENCASCII.COB pattern: many ELSE IFs
+        let mut source = String::from("PROCEDURE DIVISION.\n");
+        source.push_str("       IF ASCII-NUL THEN\n");
+        source.push_str("           MOVE 0 TO CHAR-CODE\n");
+        for i in 1..20 {
+            source.push_str(&format!("       ELSE IF ASCII-{i} THEN\n"));
+            source.push_str(&format!("           MOVE {i} TO CHAR-CODE\n"));
+        }
+        source.push_str("       ELSE MOVE COBOL-STRING TO CHAR-CODE.\n");
+
+        let result = flatten_else_if_chains(&source);
+        // Should inject END-IF before each of the 19 ELSE IFs
+        let end_if_count = result.matches("END-IF").count();
+        assert_eq!(end_if_count, 19, "Should inject 19 END-IF markers, got {end_if_count}");
     }
 
     #[test]

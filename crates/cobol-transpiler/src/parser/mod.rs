@@ -206,13 +206,6 @@ fn parse_procedure_division_with_diagnostics(
     let diagnostics = listener.diagnostics;
 
     if listener.sections.is_empty() && listener.paragraphs.is_empty() {
-        eprintln!(
-            "WARNING: PROCEDURE DIVISION text found in source but parser extracted \
-             0 paragraphs and 0 sections. This may indicate a parse error in the \
-             DATA DIVISION or IDENTIFICATION DIVISION that caused ANTLR to \
-             misinterpret the program structure. Check for unsupported syntax \
-             (AUTHOR, DATE-WRITTEN, etc.) or non-ASCII characters."
-        );
         return Ok((None, diagnostics));
     }
 
@@ -260,15 +253,9 @@ pub fn parse_procedure_division(source: &str) -> Result<Option<ProcedureDivision
 
     let listener = run_proc_listener(source)?;
 
-    // If we got nothing but PROCEDURE DIVISION was in the source, warn
+    // If we got nothing but PROCEDURE DIVISION was in the source, return None.
+    // The caller (analyze_source) captures this as a warning in the diagnostics DB.
     if listener.sections.is_empty() && listener.paragraphs.is_empty() {
-        eprintln!(
-            "WARNING: PROCEDURE DIVISION text found in source but parser extracted \
-             0 paragraphs and 0 sections. This may indicate a parse error in the \
-             DATA DIVISION or IDENTIFICATION DIVISION that caused ANTLR to \
-             misinterpret the program structure. Check for unsupported syntax \
-             (AUTHOR, DATE-WRITTEN, etc.) or non-ASCII characters."
-        );
         return Ok(None);
     }
 

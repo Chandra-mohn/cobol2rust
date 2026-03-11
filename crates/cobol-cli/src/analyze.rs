@@ -62,11 +62,31 @@ pub struct CoverageResult {
     pub coverage_time_ms: u64,
 }
 
+/// Sanitize source by replacing non-ASCII bytes with spaces.
+/// COBOL source should be pure ASCII; non-ASCII characters indicate
+/// EBCDIC remnants or encoding issues that cause parser panics.
+fn sanitize_source(source: &str) -> Option<String> {
+    if source.is_ascii() {
+        return None; // No sanitization needed.
+    }
+    Some(
+        source
+            .chars()
+            .map(|c| if c.is_ascii() { c } else { ' ' })
+            .collect(),
+    )
+}
+
 /// Analyze a single COBOL source string (parse + stats + optional coverage).
 ///
 /// This is the core analysis function shared by `check` and `scan`.
 pub fn analyze_source(source: &str, with_coverage: bool) -> AnalysisResult {
     let start = Instant::now();
+
+    // Sanitize non-ASCII input to prevent parser panics on EBCDIC/encoding issues.
+    let sanitized = sanitize_source(source);
+    let source = sanitized.as_deref().unwrap_or(source);
+
     let line_count = source.lines().count();
 
     // Detect format.
@@ -99,6 +119,21 @@ pub fn analyze_source(source: &str, with_coverage: bool) -> AnalysisResult {
         Ok(program) => {
             program_id = program.program_id.clone();
             info = collect_stats(&program);
+
+            // Detect empty procedure division (parser could not extract structure).
+            let has_proc_text = source.to_uppercase().contains("PROCEDURE DIVISION");
+            if has_proc_text && program.procedure_division.is_none() {
+                warnings.push(DiagnosticEntry {
+                    line: None,
+                    message: String::from(
+                        "PROCEDURE DIVISION text found but parser extracted 0 paragraphs \
+                         and 0 sections. Possible parse error in earlier divisions or \
+                         unsupported syntax."
+                    ),
+                    code: String::from("W003"),
+                    category: String::from("parse"),
+                });
+            }
 
             // Scan for common warnings.
             scan_warnings(source, &mut warnings);
