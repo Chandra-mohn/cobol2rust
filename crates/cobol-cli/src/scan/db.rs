@@ -105,27 +105,56 @@ pub fn bulk_register_files(
         }
     }
 
-    // Step 2: Batch-insert new files using a prepared statement.
-    let mut insert_stmt = conn
-        .prepare(
-            "INSERT INTO files (path, absolute_path, extension, file_size, mtime,
-             first_seen_run, last_scan_run, file_type, status)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending') RETURNING file_id",
-        )
-        .into_diagnostic()?;
-
-    // Step 3: Prepare update statement for existing files.
-    let mut update_stmt = conn
-        .prepare(
-            "UPDATE files SET file_size = ?, mtime = ?, last_scan_run = ? WHERE file_id = ?",
-        )
-        .into_diagnostic()?;
-
-    let mut result_map: HashMap<String, i64> = HashMap::with_capacity(files.len());
+    // Step 2: Separate files into new vs existing.
+    let mut new_files: Vec<&DiscoveredFile> = Vec::new();
+    let mut existing_files: Vec<(&DiscoveredFile, i64)> = Vec::new();
 
     for file in files {
         if let Some(&file_id) = existing.get(&file.relative_path) {
-            // Existing file: update metadata.
+            existing_files.push((file, file_id));
+        } else {
+            new_files.push(file);
+        }
+    }
+
+    // Step 3: Batch-insert new files WITHOUT RETURNING (fast path).
+    conn.execute("BEGIN TRANSACTION", [])
+        .map_err(|e| miette::miette!("failed to begin transaction: {e}"))?;
+
+    if !new_files.is_empty() {
+        let mut insert_stmt = conn
+            .prepare(
+                "INSERT INTO files (path, absolute_path, extension, file_size, mtime,
+                 first_seen_run, last_scan_run, file_type, status)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending')",
+            )
+            .into_diagnostic()?;
+
+        for file in &new_files {
+            insert_stmt
+                .execute(params![
+                    file.relative_path,
+                    file.absolute_path,
+                    file.extension,
+                    file.file_size as i64,
+                    file.mtime_epoch,
+                    run_id,
+                    run_id,
+                    file.file_type.as_str(),
+                ])
+                .into_diagnostic()?;
+        }
+    }
+
+    // Step 4: Batch-update existing files.
+    if !existing_files.is_empty() {
+        let mut update_stmt = conn
+            .prepare(
+                "UPDATE files SET file_size = ?, mtime = ?, last_scan_run = ? WHERE file_id = ?",
+            )
+            .into_diagnostic()?;
+
+        for (file, file_id) in &existing_files {
             update_stmt
                 .execute(params![
                     file.file_size as i64,
@@ -134,25 +163,25 @@ pub fn bulk_register_files(
                     file_id
                 ])
                 .into_diagnostic()?;
-            result_map.insert(file.relative_path.clone(), file_id);
-        } else {
-            // New file: insert and get file_id.
-            let file_id: i64 = insert_stmt
-                .query_row(
-                    params![
-                        file.relative_path,
-                        file.absolute_path,
-                        file.extension,
-                        file.file_size as i64,
-                        file.mtime_epoch,
-                        run_id,
-                        run_id,
-                        file.file_type.as_str(),
-                    ],
-                    |row| row.get(0),
-                )
-                .into_diagnostic()?;
-            result_map.insert(file.relative_path.clone(), file_id);
+        }
+    }
+
+    conn.execute("COMMIT", [])
+        .map_err(|e| miette::miette!("failed to commit transaction: {e}"))?;
+
+    // Step 5: Fetch ALL path -> file_id mappings in one query.
+    let mut result_map: HashMap<String, i64> = HashMap::with_capacity(files.len());
+    {
+        let mut stmt = conn
+            .prepare("SELECT path, file_id FROM files")
+            .into_diagnostic()?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+            })
+            .into_diagnostic()?;
+        for row in rows.flatten() {
+            result_map.insert(row.0, row.1);
         }
     }
 

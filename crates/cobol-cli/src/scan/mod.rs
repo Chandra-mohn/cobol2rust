@@ -20,12 +20,32 @@ use std::sync::Arc;
 use duckdb::Connection;
 use miette::Result;
 
-use args::{ReportType, ScanArgs, ScanPhase};
+use args::{ReportArgs, ReportType, ScanArgs, ScanPhase, StatusArgs};
 use discover::FileType;
 
 use crate::Cli;
 
-/// Run the scan subcommand.
+/// Run the `cobol2rust status` subcommand.
+pub fn run_status(status_args: &StatusArgs) -> Result<ExitCode> {
+    let db_path = status_args.db.to_string_lossy().to_string();
+    let conn = Connection::open(&db_path)
+        .map_err(|e| miette::miette!("failed to open database {db_path}: {e}"))?;
+    db::create_schema(&conn)?;
+    status::print_status(&conn).map(|()| ExitCode::SUCCESS)
+}
+
+/// Run the `cobol2rust report` subcommand.
+pub fn run_report(report_args: &ReportArgs) -> Result<ExitCode> {
+    let db_path = report_args.db.to_string_lossy().to_string();
+    let conn = Connection::open(&db_path)
+        .map_err(|e| miette::miette!("failed to open database {db_path}: {e}"))?;
+    db::create_schema(&conn)?;
+    let run_id = determine_report_run_id(&conn)?;
+    phase3::run_phase3(&conn, run_id, report_args.r#type, report_args.format)
+        .map(|()| ExitCode::SUCCESS)
+}
+
+/// Run the `cobol2rust scan` subcommand.
 pub fn run(cli: &Cli, scan_args: &ScanArgs) -> Result<ExitCode> {
     // Validate root dir exists.
     if !scan_args.root_dir.exists() {
@@ -41,18 +61,6 @@ pub fn run(cli: &Cli, scan_args: &ScanArgs) -> Result<ExitCode> {
         .map_err(|e| miette::miette!("failed to open database {db_path}: {e}"))?;
 
     db::create_schema(&conn)?;
-
-    // Handle --status: just print and exit.
-    if scan_args.status {
-        return status::print_status(&conn).map(|()| ExitCode::SUCCESS);
-    }
-
-    // Handle report-only mode.
-    if let Some(report_type) = scan_args.report {
-        let run_id = determine_report_run_id(&conn)?;
-        return phase3::run_phase3(&conn, run_id, report_type, scan_args.format)
-            .map(|()| ExitCode::SUCCESS);
-    }
 
     // Set up signal handler for graceful shutdown.
     let shutdown = Arc::new(AtomicBool::new(false));
@@ -200,13 +208,12 @@ pub fn run(cli: &Cli, scan_args: &ScanArgs) -> Result<ExitCode> {
     db::update_scan_run_counts(&conn, run_id, files.len(), total_processed, 0, total_failed)?;
     db::complete_scan_run(&conn, run_id)?;
 
-    // Phase 3: Reporting.
+    // Phase 3: Reporting (auto-show summary after scan completes).
     if matches!(scan_args.phase, ScanPhase::Report | ScanPhase::All) {
         if !had_error {
             eprintln!();
             eprintln!("=== Phase 3: Report ===");
-            let report_type = scan_args.report.unwrap_or(ReportType::Summary);
-            phase3::run_phase3(&conn, run_id, report_type, scan_args.format)?;
+            phase3::run_phase3(&conn, run_id, ReportType::Summary, args::ReportFormat::Text)?;
         }
     }
 

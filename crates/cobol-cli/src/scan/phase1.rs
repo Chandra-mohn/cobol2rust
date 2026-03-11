@@ -172,7 +172,10 @@ pub fn run_phase1(
             })
             .collect();
 
-        // Write batch to DB on main thread (single connection).
+        // Write entire batch in a single transaction (avoids per-row auto-commit).
+        conn.execute("BEGIN TRANSACTION", [])
+            .map_err(|e| miette::miette!("failed to begin transaction: {e}"))?;
+
         for entry in &results {
             match write_phase1_entry(conn, run_id, entry) {
                 Ok(()) => {
@@ -184,6 +187,9 @@ pub fn run_phase1(
                 }
             }
         }
+
+        conn.execute("COMMIT", [])
+            .map_err(|e| miette::miette!("failed to commit transaction: {e}"))?;
     }
 
     pb.finish_with_message("done");

@@ -34,18 +34,6 @@ pub struct ScanArgs {
     #[arg(long)]
     pub resume: bool,
 
-    /// Show current scan progress and exit.
-    #[arg(long)]
-    pub status: bool,
-
-    /// Report type to generate.
-    #[arg(long)]
-    pub report: Option<ReportType>,
-
-    /// Report output format.
-    #[arg(long, default_value = "text")]
-    pub format: ReportFormat,
-
     /// Files per DuckDB transaction.
     #[arg(long, default_value_t = 100)]
     pub batch_size: usize,
@@ -57,6 +45,30 @@ pub struct ScanArgs {
     /// Override file extensions to scan (comma-separated).
     #[arg(long, value_delimiter = ',')]
     pub extensions: Vec<String>,
+}
+
+/// Arguments for `cobol2rust status`.
+#[derive(Debug, Args)]
+pub struct StatusArgs {
+    /// DuckDB database file path.
+    #[arg(long, default_value = "./cobol_scan.duckdb")]
+    pub db: PathBuf,
+}
+
+/// Arguments for `cobol2rust report`.
+#[derive(Debug, Args)]
+pub struct ReportArgs {
+    /// DuckDB database file path.
+    #[arg(long, default_value = "./cobol_scan.duckdb")]
+    pub db: PathBuf,
+
+    /// Report type to generate.
+    #[arg(long, default_value = "summary")]
+    pub r#type: ReportType,
+
+    /// Report output format.
+    #[arg(long, default_value = "text")]
+    pub format: ReportFormat,
 }
 
 impl ScanArgs {

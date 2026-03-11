@@ -84,6 +84,10 @@ pub enum Command {
     Diff(diff_cmd::DiffArgs),
     /// Scan an enterprise COBOL codebase with DuckDB persistence.
     Scan(scan::args::ScanArgs),
+    /// Show scan progress and history from DuckDB.
+    Status(scan::args::StatusArgs),
+    /// Generate reports from a completed scan.
+    Report(scan::args::ReportArgs),
 }
 
 fn main() -> ExitCode {
@@ -123,6 +127,8 @@ fn main() -> ExitCode {
         Command::Compile(ref args) => compile_cmd::run(&cli, args),
         Command::Diff(ref args) => diff_cmd::run(&cli, args),
         Command::Scan(ref args) => scan::run(&cli, args),
+        Command::Status(ref args) => scan::run_status(args),
+        Command::Report(ref args) => scan::run_report(args),
     };
 
     match result {
