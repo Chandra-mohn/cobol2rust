@@ -14,9 +14,14 @@ pub struct ScanArgs {
     #[arg(long, default_value = "all")]
     pub phase: ScanPhase,
 
-    /// DuckDB database file path.
+    /// DuckDB database file path (default write mode).
     #[arg(long, default_value = "./cobol_scan.duckdb")]
     pub db: PathBuf,
+
+    /// Scan results directory for NDJSON output (fast mode).
+    /// When set, writes NDJSON files instead of DuckDB for 10-100x faster scans.
+    #[arg(long)]
+    pub scan_dir: Option<PathBuf>,
 
     /// Copybook search directory (repeatable).
     #[arg(long = "copy-path")]
@@ -34,7 +39,7 @@ pub struct ScanArgs {
     #[arg(long)]
     pub resume: bool,
 
-    /// Files per DuckDB transaction.
+    /// Files per transaction/write batch.
     #[arg(long, default_value_t = 100)]
     pub batch_size: usize,
 
@@ -53,6 +58,10 @@ pub struct StatusArgs {
     /// DuckDB database file path.
     #[arg(long, default_value = "./cobol_scan.duckdb")]
     pub db: PathBuf,
+
+    /// Scan results directory (NDJSON mode).
+    #[arg(long)]
+    pub scan_dir: Option<PathBuf>,
 }
 
 /// Arguments for `cobol2rust report`.
@@ -61,6 +70,10 @@ pub struct ReportArgs {
     /// DuckDB database file path.
     #[arg(long, default_value = "./cobol_scan.duckdb")]
     pub db: PathBuf,
+
+    /// Scan results directory (NDJSON mode).
+    #[arg(long)]
+    pub scan_dir: Option<PathBuf>,
 
     /// Report type to generate.
     #[arg(long, default_value = "summary")]
@@ -75,6 +88,11 @@ impl ScanArgs {
     /// Effective number of worker threads.
     pub fn effective_jobs(&self) -> usize {
         self.jobs.unwrap_or_else(num_cpus::get)
+    }
+
+    /// Whether to use NDJSON mode (--scan-dir was specified).
+    pub fn use_ndjson(&self) -> bool {
+        self.scan_dir.is_some()
     }
 }
 

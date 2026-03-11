@@ -14,6 +14,10 @@ path = "src/main.rs"
 [lints]
 workspace = true
 
+[features]
+default = ["duckdb"]
+duckdb = ["dep:duckdb"]
+
 [dependencies]
 cobol-transpiler = { workspace = true }
 clap = { workspace = true }
@@ -23,7 +27,7 @@ serde_json = { workspace = true }
 similar = { workspace = true }
 indicatif = { workspace = true }
 rayon = { workspace = true }
-duckdb = { workspace = true }
+duckdb = { workspace = true, optional = true }
 crossbeam-channel = { workspace = true }
 num_cpus = { workspace = true }
 ctrlc = { workspace = true }
