@@ -1,9 +1,12 @@
 //! DuckDB schema creation and insert helpers for the scan database.
 
+use std::collections::HashMap;
+
 use duckdb::{params, Connection};
 use miette::{IntoDiagnostic, Result};
 
 use crate::analyze::{AnalysisResult, CoverageResult, DiagnosticEntry};
+use crate::scan::discover::DiscoveredFile;
 
 /// Create all tables if they do not exist.
 pub fn create_schema(conn: &Connection) -> Result<()> {
@@ -79,54 +82,81 @@ pub fn interrupt_scan_run(conn: &Connection, run_id: i64) -> Result<()> {
     Ok(())
 }
 
-/// Insert or update a file entry. Returns the file_id.
-pub fn upsert_file(
+/// Bulk-register all discovered files using batch prepared statements.
+/// Returns a map of relative_path -> file_id for all files.
+pub fn bulk_register_files(
     conn: &Connection,
-    path: &str,
-    absolute_path: &str,
-    extension: &str,
-    file_size: u64,
-    mtime_epoch: i64,
-    file_type: &str,
+    files: &[DiscoveredFile],
     run_id: i64,
-) -> Result<i64> {
-    // Try to find existing file first.
-    let existing: Option<i64> = conn
-        .query_row(
-            "SELECT file_id FROM files WHERE path = ?",
-            params![path],
-            |row| row.get(0),
-        )
-        .ok();
+) -> Result<HashMap<String, i64>> {
+    // Step 1: Get all existing paths in one query.
+    let mut existing: HashMap<String, i64> = HashMap::new();
+    {
+        let mut stmt = conn
+            .prepare("SELECT path, file_id FROM files")
+            .into_diagnostic()?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+            })
+            .into_diagnostic()?;
+        for row in rows.flatten() {
+            existing.insert(row.0, row.1);
+        }
+    }
 
-    if let Some(file_id) = existing {
-        conn.execute(
-            "UPDATE files SET file_size = ?, mtime = ?, last_scan_run = ? WHERE file_id = ?",
-            params![file_size as i64, mtime_epoch, run_id, file_id],
+    // Step 2: Batch-insert new files using a prepared statement.
+    let mut insert_stmt = conn
+        .prepare(
+            "INSERT INTO files (path, absolute_path, extension, file_size, mtime,
+             first_seen_run, last_scan_run, file_type, status)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending') RETURNING file_id",
         )
         .into_diagnostic()?;
-        Ok(file_id)
-    } else {
-        let file_id: i64 = conn
-            .query_row(
-                "INSERT INTO files (path, absolute_path, extension, file_size, mtime,
-                 first_seen_run, last_scan_run, file_type, status)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending') RETURNING file_id",
-                params![
-                    path,
-                    absolute_path,
-                    extension,
-                    file_size as i64,
-                    mtime_epoch,
+
+    // Step 3: Prepare update statement for existing files.
+    let mut update_stmt = conn
+        .prepare(
+            "UPDATE files SET file_size = ?, mtime = ?, last_scan_run = ? WHERE file_id = ?",
+        )
+        .into_diagnostic()?;
+
+    let mut result_map: HashMap<String, i64> = HashMap::with_capacity(files.len());
+
+    for file in files {
+        if let Some(&file_id) = existing.get(&file.relative_path) {
+            // Existing file: update metadata.
+            update_stmt
+                .execute(params![
+                    file.file_size as i64,
+                    file.mtime_epoch,
                     run_id,
-                    run_id,
-                    file_type
-                ],
-                |row| row.get(0),
-            )
-            .into_diagnostic()?;
-        Ok(file_id)
+                    file_id
+                ])
+                .into_diagnostic()?;
+            result_map.insert(file.relative_path.clone(), file_id);
+        } else {
+            // New file: insert and get file_id.
+            let file_id: i64 = insert_stmt
+                .query_row(
+                    params![
+                        file.relative_path,
+                        file.absolute_path,
+                        file.extension,
+                        file.file_size as i64,
+                        file.mtime_epoch,
+                        run_id,
+                        run_id,
+                        file.file_type.as_str(),
+                    ],
+                    |row| row.get(0),
+                )
+                .into_diagnostic()?;
+            result_map.insert(file.relative_path.clone(), file_id);
+        }
     }
+
+    Ok(result_map)
 }
 
 /// Insert Phase 1 parse results for a file.

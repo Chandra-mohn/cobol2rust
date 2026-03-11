@@ -40,8 +40,11 @@ pub fn run_phase1(
     incremental: bool,
     resume: bool,
 ) -> Result<()> {
-    // Register all files in the DB and build work queue.
+    // Bulk-register all files in the DB using DuckDB Appender (fast path).
     eprintln!("  Registering {} files in database...", files.len());
+    let file_id_map = db::bulk_register_files(conn, files, run_id)?;
+    eprintln!("  Registration complete ({} files indexed)", file_id_map.len());
+
     let mut work_items = Vec::new();
     let mut skipped = 0usize;
 
@@ -57,29 +60,16 @@ pub fn run_phase1(
     for file in files {
         // Only process source files in Phase 1.
         if file.file_type != crate::scan::discover::FileType::Source {
-            db::upsert_file(
-                conn,
-                &file.relative_path,
-                &file.absolute_path,
-                &file.extension,
-                file.file_size,
-                file.mtime_epoch,
-                file.file_type.as_str(),
-                run_id,
-            )?;
             continue;
         }
 
-        let file_id = db::upsert_file(
-            conn,
-            &file.relative_path,
-            &file.absolute_path,
-            &file.extension,
-            file.file_size,
-            file.mtime_epoch,
-            file.file_type.as_str(),
-            run_id,
-        )?;
+        let file_id = match file_id_map.get(&file.relative_path) {
+            Some(&id) => id,
+            None => {
+                eprintln!("  [WARN] No file_id for: {}", file.relative_path);
+                continue;
+            }
+        };
 
         // Skip if already processed (resume mode).
         if resume && processed_ids.contains(&file_id) {
