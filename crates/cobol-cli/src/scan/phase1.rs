@@ -255,12 +255,11 @@ use crossbeam_channel::bounded;
 
 use crate::scan::ndjson::{self, NdjsonWriter};
 
-/// Job sent from feeder -> rayon parse pool.
+/// Job sent from feeder -> rayon parse pool (path only -- rayon workers read from disk).
 struct ParseJob {
     file_id: i64,
     absolute_path: String,
     relative_path: String,
-    source: String,
 }
 
 /// Result sent from rayon parse pool -> writer.
@@ -370,10 +369,11 @@ pub fn run_phase1_ndjson(
     // Streaming pipeline: feeder -> rayon pool -> writer (this thread)
     // -----------------------------------------------------------------------
 
-    // Channel capacities: job_cap = 2x cores to keep rayon fed; result_cap = 256 for burst absorption.
+    // Channel capacities: jobs are lightweight (paths only), so larger buffer keeps rayon fed.
+    // Result channel at 512 absorbs parse bursts while writer flushes.
     let num_threads = rayon::current_num_threads();
-    let job_cap = num_threads * 2;
-    let result_cap = 256;
+    let job_cap = num_threads * 4;
+    let result_cap = 512;
 
     let (job_tx, job_rx) = bounded::<ParseJob>(job_cap);
     let (result_tx, result_rx) = bounded::<ParseResult>(result_cap);
@@ -381,8 +381,7 @@ pub fn run_phase1_ndjson(
     let shutdown_feeder = shutdown.clone();
     let shutdown_parser = shutdown.clone();
 
-    // Stage 1: Feeder thread -- reads files from disk, sends source text to parse pool.
-    let feeder_result_tx = result_tx.clone();
+    // Stage 1: Feeder thread -- sends file paths to parse pool (no I/O here).
     let feeder = thread::Builder::new()
         .name("scan-feeder".into())
         .spawn(move || {
@@ -391,24 +390,14 @@ pub fn run_phase1_ndjson(
                     break;
                 }
 
-                match fs::read_to_string(&absolute_path) {
-                    Ok(source) => {
-                        let job = ParseJob {
-                            file_id,
-                            absolute_path,
-                            relative_path,
-                            source,
-                        };
-                        // Blocks if channel is full -- backpressure limits RAM.
-                        if job_tx.send(job).is_err() {
-                            break; // Receiver dropped, pipeline shutting down.
-                        }
-                    }
-                    Err(_) => {
-                        let _ = feeder_result_tx.send(ParseResult::ReadError {
-                            absolute_path,
-                        });
-                    }
+                let job = ParseJob {
+                    file_id,
+                    absolute_path,
+                    relative_path,
+                };
+                // Blocks if channel is full -- backpressure limits RAM.
+                if job_tx.send(job).is_err() {
+                    break; // Receiver dropped, pipeline shutting down.
                 }
             }
             // Dropping job_tx signals the dispatcher that no more jobs are coming.
@@ -428,8 +417,19 @@ pub fn run_phase1_ndjson(
 
                     let tx = result_tx.clone();
                     s.spawn(move |_| {
+                        // Read file on rayon thread -- parallelizes I/O across all cores.
+                        let source = match fs::read_to_string(&job.absolute_path) {
+                            Ok(s) => s,
+                            Err(_) => {
+                                let _ = tx.send(ParseResult::ReadError {
+                                    absolute_path: job.absolute_path,
+                                });
+                                return;
+                            }
+                        };
+
                         let outcome = std::panic::catch_unwind(|| {
-                            analyze::analyze_source(&job.source, false)
+                            analyze::analyze_source(&source, false)
                         });
 
                         let result = match outcome {
@@ -444,7 +444,6 @@ pub fn run_phase1_ndjson(
                         };
 
                         let _ = tx.send(result);
-                        // job.source dropped here -- frees RAM immediately.
                     });
                 }
             });

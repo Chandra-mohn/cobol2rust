@@ -170,11 +170,10 @@ use crossbeam_channel::bounded;
 
 use crate::scan::ndjson::{self, NdjsonWriter};
 
-/// Job sent from feeder -> rayon parse pool (Phase 2).
+/// Job sent from feeder -> rayon parse pool (Phase 2, path only).
 struct CoverageJob {
     file_id: i64,
     absolute_path: String,
-    source: String,
 }
 
 /// Result sent from rayon -> writer (Phase 2).
@@ -219,8 +218,8 @@ pub fn run_phase2_ndjson(
 
     // Streaming pipeline: feeder -> rayon pool -> writer (this thread).
     let num_threads = rayon::current_num_threads();
-    let job_cap = num_threads * 2;
-    let result_cap = 256;
+    let job_cap = num_threads * 4;
+    let result_cap = 512;
 
     let (job_tx, job_rx) = bounded::<CoverageJob>(job_cap);
     let (result_tx, result_rx) = bounded::<CoverageResult>(result_cap);
@@ -228,8 +227,7 @@ pub fn run_phase2_ndjson(
     let shutdown_feeder = shutdown.clone();
     let shutdown_parser = shutdown.clone();
 
-    // Stage 1: Feeder thread.
-    let feeder_result_tx = result_tx.clone();
+    // Stage 1: Feeder thread -- sends paths only (no I/O here).
     let feeder = thread::Builder::new()
         .name("cov-feeder".into())
         .spawn(move || {
@@ -238,22 +236,12 @@ pub fn run_phase2_ndjson(
                     break;
                 }
 
-                match fs::read_to_string(&abs_path) {
-                    Ok(source) => {
-                        let job = CoverageJob {
-                            file_id,
-                            absolute_path: abs_path,
-                            source,
-                        };
-                        if job_tx.send(job).is_err() {
-                            break;
-                        }
-                    }
-                    Err(_) => {
-                        let _ = feeder_result_tx.send(CoverageResult::ReadError {
-                            absolute_path: abs_path,
-                        });
-                    }
+                let job = CoverageJob {
+                    file_id,
+                    absolute_path: abs_path,
+                };
+                if job_tx.send(job).is_err() {
+                    break;
                 }
             }
         })
@@ -271,8 +259,19 @@ pub fn run_phase2_ndjson(
 
                     let tx = result_tx.clone();
                     s.spawn(move |_| {
+                        // Read file on rayon thread -- parallelizes I/O across all cores.
+                        let source = match fs::read_to_string(&job.absolute_path) {
+                            Ok(s) => s,
+                            Err(_) => {
+                                let _ = tx.send(CoverageResult::ReadError {
+                                    absolute_path: job.absolute_path,
+                                });
+                                return;
+                            }
+                        };
+
                         let outcome = std::panic::catch_unwind(|| {
-                            analyze::analyze_source(&job.source, true)
+                            analyze::analyze_source(&source, true)
                         });
 
                         let result = match outcome {
