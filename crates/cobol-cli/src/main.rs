@@ -88,6 +88,9 @@ pub enum Command {
     Status(scan::args::StatusArgs),
     /// Generate reports from a completed scan.
     Report(scan::args::ReportArgs),
+    /// Internal: worker process for parallel scanning (do not call directly).
+    #[command(hide = true)]
+    ScanWorker(scan::args::ScanWorkerArgs),
 }
 
 fn main() -> ExitCode {
@@ -129,6 +132,7 @@ fn main() -> ExitCode {
         Command::Scan(ref args) => scan::run(&cli, args),
         Command::Status(ref args) => scan::run_status(args),
         Command::Report(ref args) => scan::run_report(args),
+        Command::ScanWorker(ref args) => scan::run_scan_worker(args),
     };
 
     match result {

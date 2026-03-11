@@ -11,6 +11,7 @@ use std::path::{Path, PathBuf};
 use miette::{IntoDiagnostic, Result};
 use serde::{Deserialize, Serialize};
 
+#[cfg(feature = "duckdb")]
 use crate::analyze::{AnalysisResult, CoverageResult, DiagnosticEntry};
 use crate::scan::discover::DiscoveredFile;
 
@@ -199,7 +200,9 @@ impl NdjsonWriter {
         Ok(map)
     }
 
-    /// Write a parse result record.
+    /// Write a parse result record (typed API, currently unused -- raw variant preferred).
+    #[cfg(feature = "duckdb")]
+    #[allow(dead_code)]
     pub fn write_parse_result(
         &mut self,
         file_id: i64,
@@ -234,7 +237,9 @@ impl NdjsonWriter {
         Ok(())
     }
 
-    /// Write diagnostic records.
+    /// Write diagnostic records (typed API, currently unused -- raw variant preferred).
+    #[cfg(feature = "duckdb")]
+    #[allow(dead_code)]
     pub fn write_diagnostics(
         &mut self,
         file_id: i64,
@@ -260,7 +265,9 @@ impl NdjsonWriter {
         Ok(())
     }
 
-    /// Write copybook reference records.
+    /// Write copybook reference records (typed API, currently unused -- raw variant preferred).
+    #[cfg(feature = "duckdb")]
+    #[allow(dead_code)]
     pub fn write_copybooks(
         &mut self,
         run_id: i64,
@@ -280,7 +287,9 @@ impl NdjsonWriter {
         Ok(())
     }
 
-    /// Write a coverage result record.
+    /// Write a coverage result record (typed API, currently unused -- raw variant preferred).
+    #[cfg(feature = "duckdb")]
+    #[allow(dead_code)]
     pub fn write_coverage(
         &mut self,
         file_id: i64,
@@ -296,6 +305,84 @@ impl NdjsonWriter {
             total_data_entries: coverage.total_data_entries as i32,
             unhandled_count: coverage.unhandled.len() as i32,
             coverage_time_ms: coverage.coverage_time_ms as i32,
+        };
+        let line = serde_json::to_string(&record).into_diagnostic()?;
+        writeln!(self.coverage_writer, "{}", line).into_diagnostic()?;
+        Ok(())
+    }
+
+    /// Write a pre-serialized parse result from a worker process.
+    ///
+    /// The worker emits JSON with a `type` field; we strip it and remap fields
+    /// to match the NDJSON schema expected by DuckDB loading.
+    pub fn write_raw_parse_result(&mut self, val: &serde_json::Value) -> Result<()> {
+        let record = ParseResultRecord {
+            file_id: val.get("file_id").and_then(|v| v.as_i64()).unwrap_or(0),
+            run_id: val.get("run_id").and_then(|v| v.as_i64()).unwrap_or(0),
+            path: val.get("relative_path").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+            program_id: val.get("program_id").and_then(|v| v.as_str()).unwrap_or("UNKNOWN").to_string(),
+            source_format: val.get("source_format").and_then(|v| v.as_str()).unwrap_or("fixed").to_string(),
+            valid: val.get("valid").and_then(|v| v.as_bool()).unwrap_or(false),
+            line_count: val.get("line_count").and_then(|v| v.as_i64()).unwrap_or(0) as i32,
+            paragraphs: val.get("paragraphs").and_then(|v| v.as_i64()).unwrap_or(0) as i32,
+            sections: val.get("sections").and_then(|v| v.as_i64()).unwrap_or(0) as i32,
+            calls: val.get("calls").and_then(|v| v.as_i64()).unwrap_or(0) as i32,
+            file_ops: val.get("file_ops").and_then(|v| v.as_i64()).unwrap_or(0) as i32,
+            sql_statements: val.get("sql_stmts").and_then(|v| v.as_i64()).unwrap_or(0) as i32,
+            is_subprogram: val.get("is_subprogram").and_then(|v| v.as_bool()).unwrap_or(false),
+            has_linkage: val.get("has_linkage").and_then(|v| v.as_bool()).unwrap_or(false),
+            has_using: val.get("has_using").and_then(|v| v.as_bool()).unwrap_or(false),
+            data_items: val.get("data_items").and_then(|v| v.as_i64()).unwrap_or(0) as i32,
+            error_count: val.get("error_count").and_then(|v| v.as_i64()).unwrap_or(0) as i32,
+            warning_count: val.get("warning_count").and_then(|v| v.as_i64()).unwrap_or(0) as i32,
+            parse_time_ms: val.get("parse_time_ms").and_then(|v| v.as_i64()).unwrap_or(0) as i32,
+        };
+        let line = serde_json::to_string(&record).into_diagnostic()?;
+        writeln!(self.parse_results_writer, "{}", line).into_diagnostic()?;
+        Ok(())
+    }
+
+    /// Write a pre-serialized diagnostic from a worker process.
+    pub fn write_raw_diagnostic(&mut self, val: &serde_json::Value) -> Result<()> {
+        let record = DiagnosticRecord {
+            file_id: val.get("file_id").and_then(|v| v.as_i64()).unwrap_or(0),
+            run_id: val.get("run_id").and_then(|v| v.as_i64()).unwrap_or(0),
+            phase: val.get("phase").and_then(|v| v.as_i64()).unwrap_or(1) as i32,
+            severity: val.get("severity").and_then(|v| v.as_str()).unwrap_or("error").to_string(),
+            line: val.get("line").and_then(|v| v.as_i64()).map(|l| l as i32),
+            code: val.get("code").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+            message: val.get("message").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+            category: val.get("category").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+        };
+        let line = serde_json::to_string(&record).into_diagnostic()?;
+        writeln!(self.diagnostics_writer, "{}", line).into_diagnostic()?;
+        Ok(())
+    }
+
+    /// Write a pre-serialized copybook reference from a worker process.
+    pub fn write_raw_copybook(&mut self, val: &serde_json::Value) -> Result<()> {
+        let record = CopybookRecord {
+            run_id: val.get("run_id").and_then(|v| v.as_i64()).unwrap_or(0),
+            name: val.get("target").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+            referenced_by: val.get("file_id").and_then(|v| v.as_i64()).unwrap_or(0),
+            resolved: false,
+        };
+        let line = serde_json::to_string(&record).into_diagnostic()?;
+        writeln!(self.copybooks_writer, "{}", line).into_diagnostic()?;
+        Ok(())
+    }
+
+    /// Write a pre-serialized coverage result from a worker process.
+    pub fn write_raw_coverage(&mut self, val: &serde_json::Value) -> Result<()> {
+        let record = CoverageRecord {
+            file_id: val.get("file_id").and_then(|v| v.as_i64()).unwrap_or(0),
+            run_id: val.get("run_id").and_then(|v| v.as_i64()).unwrap_or(0),
+            total_statements: val.get("total_statements").and_then(|v| v.as_i64()).unwrap_or(0) as i32,
+            mapped_statements: val.get("mapped_statements").and_then(|v| v.as_i64()).unwrap_or(0) as i32,
+            coverage_pct: val.get("coverage_pct").and_then(|v| v.as_f64()).unwrap_or(0.0),
+            total_data_entries: val.get("total_data_entries").and_then(|v| v.as_i64()).unwrap_or(0) as i32,
+            unhandled_count: val.get("unhandled_count").and_then(|v| v.as_i64()).unwrap_or(0) as i32,
+            coverage_time_ms: val.get("coverage_time_ms").and_then(|v| v.as_i64()).unwrap_or(0) as i32,
         };
         let line = serde_json::to_string(&record).into_diagnostic()?;
         writeln!(self.coverage_writer, "{}", line).into_diagnostic()?;

@@ -1,6 +1,7 @@
 //! Phase 1: Inventory -- parse all COBOL files and collect stats.
 
 use std::collections::HashSet;
+#[cfg(feature = "duckdb")]
 use std::fs;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -11,7 +12,9 @@ use miette::Result;
 #[cfg(feature = "duckdb")]
 use rayon::prelude::*;
 
+#[cfg(feature = "duckdb")]
 use crate::analyze;
+#[cfg(feature = "duckdb")]
 use crate::analyze::AnalysisResult;
 use crate::scan::discover::DiscoveredFile;
 
@@ -245,44 +248,27 @@ mod duckdb_phase1 {
 pub use duckdb_phase1::run_phase1;
 
 // ---------------------------------------------------------------------------
-// NDJSON mode: Streaming pipeline (no batch barrier)
+// NDJSON mode: Multi-process pipeline (avoids ANTLR RwLock<DFA> contention)
 // ---------------------------------------------------------------------------
 
+use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::Path;
+use std::process::{Command, Stdio};
 use std::thread;
 
 use crossbeam_channel::bounded;
 
 use crate::scan::ndjson::{self, NdjsonWriter};
 
-/// Job sent from feeder -> rayon parse pool (path only -- rayon workers read from disk).
-struct ParseJob {
-    file_id: i64,
-    absolute_path: String,
-    relative_path: String,
-}
-
-/// Result sent from rayon parse pool -> writer.
-enum ParseResult {
-    Success {
-        file_id: i64,
-        relative_path: String,
-        analysis: AnalysisResult,
-    },
-    ParsePanic {
-        absolute_path: String,
-    },
-    ReadError {
-        absolute_path: String,
-    },
-}
-
-/// Run Phase 1 in NDJSON mode: streaming pipeline, no batch barrier.
+/// Run Phase 1 in NDJSON mode using worker child processes.
 ///
 /// Architecture:
-///   [Feeder thread] --bounded(job_cap)--> [Rayon pool] --bounded(256)--> [Writer on caller thread]
-///
-/// Each file flows independently. A slow 28MB file ties up 1 core; the other N-1 keep working.
+///   Main process spawns N `cobol2rust scan-worker` child processes.
+///   Files are distributed round-robin to workers via stdin pipes.
+///   Each worker reads files, parses them (with its own ANTLR DFA caches),
+///   and writes NDJSON results to stdout.
+///   Reader threads collect results into a channel; writer loop on this
+///   thread drains the channel and writes NDJSON output files.
 #[allow(clippy::too_many_arguments)]
 pub fn run_phase1_ndjson(
     writer: &mut NdjsonWriter,
@@ -366,128 +352,121 @@ pub fn run_phase1_ndjson(
     );
 
     // -----------------------------------------------------------------------
-    // Streaming pipeline: feeder -> rayon pool -> writer (this thread)
+    // Multi-process pipeline: N worker processes, each with own ANTLR DFA
     // -----------------------------------------------------------------------
 
-    // Channel capacities: jobs are lightweight (paths only), so larger buffer keeps rayon fed.
-    // Result channel at 512 absorbs parse bursts while writer flushes.
-    let num_threads = rayon::current_num_threads();
-    let job_cap = num_threads * 4;
-    let result_cap = 512;
+    let num_workers = rayon::current_num_threads();
+    let result_cap = 1024;
+    let (result_tx, result_rx) = bounded::<serde_json::Value>(result_cap);
 
-    let (job_tx, job_rx) = bounded::<ParseJob>(job_cap);
-    let (result_tx, result_rx) = bounded::<ParseResult>(result_cap);
+    // Find the path to our own executable.
+    let exe_path = std::env::current_exe()
+        .map_err(|e| miette::miette!("cannot find own executable: {e}"))?;
 
+    // Spawn N worker child processes.
+    let mut workers: Vec<(std::process::Child, BufWriter<std::process::ChildStdin>)> = Vec::new();
+    let mut reader_threads: Vec<thread::JoinHandle<()>> = Vec::new();
+
+    for i in 0..num_workers {
+        let mut child = Command::new(&exe_path)
+            .args(["scan-worker", "--run-id", &run_id.to_string()])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit()) // Worker errors go to parent stderr.
+            .spawn()
+            .map_err(|e| miette::miette!("failed to spawn worker {i}: {e}"))?;
+
+        let stdin = child.stdin.take().unwrap();
+        let stdout = child.stdout.take().unwrap();
+
+        // Reader thread: reads NDJSON lines from worker stdout, sends to result channel.
+        let tx = result_tx.clone();
+        let reader = thread::Builder::new()
+            .name(format!("reader-{i}"))
+            .spawn(move || {
+                let reader = BufReader::new(stdout);
+                for line in reader.lines() {
+                    let line = match line {
+                        Ok(l) => l,
+                        Err(_) => break,
+                    };
+                    if line.is_empty() {
+                        continue;
+                    }
+                    if let Ok(val) = serde_json::from_str::<serde_json::Value>(&line) {
+                        if tx.send(val).is_err() {
+                            break;
+                        }
+                    }
+                }
+            })
+            .map_err(|e| miette::miette!("failed to spawn reader thread {i}: {e}"))?;
+
+        reader_threads.push(reader);
+        workers.push((child, BufWriter::new(stdin)));
+    }
+
+    // Drop the original sender so channel closes when all reader threads finish.
+    drop(result_tx);
+
+    // Distribute files round-robin to workers via stdin pipes.
     let shutdown_feeder = shutdown.clone();
-    let shutdown_parser = shutdown.clone();
-
-    // Stage 1: Feeder thread -- sends file paths to parse pool (no I/O here).
     let feeder = thread::Builder::new()
         .name("scan-feeder".into())
         .spawn(move || {
-            for (file_id, absolute_path, relative_path) in work_items {
+            for (idx, (file_id, abs_path, rel_path)) in work_items.into_iter().enumerate() {
                 if shutdown_feeder.load(Ordering::Relaxed) {
                     break;
                 }
 
-                let job = ParseJob {
-                    file_id,
-                    absolute_path,
-                    relative_path,
-                };
-                // Blocks if channel is full -- backpressure limits RAM.
-                if job_tx.send(job).is_err() {
-                    break; // Receiver dropped, pipeline shutting down.
+                let worker_idx = idx % num_workers;
+                let line = format!("{}\t{}\t{}\n", file_id, rel_path, abs_path);
+                let (_, ref mut stdin) = workers[worker_idx];
+                if stdin.write_all(line.as_bytes()).is_err() {
+                    break;
                 }
             }
-            // Dropping job_tx signals the dispatcher that no more jobs are coming.
+
+            // Close all stdin pipes to signal workers to exit.
+            for (mut child, stdin) in workers {
+                drop(stdin);
+                let _ = child.wait();
+            }
         })
         .map_err(|e| miette::miette!("failed to spawn feeder thread: {e}"))?;
 
-    // Stage 2: Dispatcher thread -- pulls jobs from channel, spawns rayon tasks.
-    let dispatcher = thread::Builder::new()
-        .name("scan-dispatcher".into())
-        .spawn(move || {
-            // Use a scope to wait for all in-flight rayon tasks to complete.
-            rayon::scope(|s| {
-                while let Ok(job) = job_rx.recv() {
-                    if shutdown_parser.load(Ordering::Relaxed) {
-                        break;
-                    }
-
-                    let tx = result_tx.clone();
-                    s.spawn(move |_| {
-                        // Read file on rayon thread -- parallelizes I/O across all cores.
-                        let source = match fs::read_to_string(&job.absolute_path) {
-                            Ok(s) => s,
-                            Err(_) => {
-                                let _ = tx.send(ParseResult::ReadError {
-                                    absolute_path: job.absolute_path,
-                                });
-                                return;
-                            }
-                        };
-
-                        let outcome = std::panic::catch_unwind(|| {
-                            analyze::analyze_source(&source, false)
-                        });
-
-                        let result = match outcome {
-                            Ok(analysis) => ParseResult::Success {
-                                file_id: job.file_id,
-                                relative_path: job.relative_path,
-                                analysis,
-                            },
-                            Err(_) => ParseResult::ParsePanic {
-                                absolute_path: job.absolute_path,
-                            },
-                        };
-
-                        let _ = tx.send(result);
-                    });
-                }
-            });
-            // rayon::scope waits for all spawned tasks. Then result_tx is dropped,
-            // closing the result channel and signaling the writer.
-        })
-        .map_err(|e| miette::miette!("failed to spawn dispatcher thread: {e}"))?;
-
-    // Stage 3: Writer loop -- runs on THIS thread. Drains results as they arrive.
+    // Writer loop: drain results from all workers, write NDJSON output.
     let mut last_flush = Instant::now();
     let flush_interval = Duration::from_secs(5);
     let mut results_since_flush = 0u64;
 
-    while let Ok(result) = result_rx.recv() {
-        match result {
-            ParseResult::Success { file_id, relative_path, analysis } => {
-                writer.write_parse_result(file_id, run_id, &relative_path, &analysis)?;
+    while let Ok(val) = result_rx.recv() {
+        let entry_type = val.get("type").and_then(|v| v.as_str()).unwrap_or("");
 
-                if !analysis.errors.is_empty() {
-                    writer.write_diagnostics(file_id, run_id, 1, &analysis.errors, "error")?;
-                }
-                if !analysis.warnings.is_empty() {
-                    writer.write_diagnostics(file_id, run_id, 1, &analysis.warnings, "warning")?;
-                }
-                if !analysis.copy_targets.is_empty() {
-                    writer.write_copybooks(run_id, file_id, &analysis.copy_targets)?;
-                }
-
+        match entry_type {
+            "parse_result" => {
+                // Write parse result directly as JSON (worker already serialized it).
+                writer.write_raw_parse_result(&val)?;
                 processed_counter.fetch_add(1, Ordering::Relaxed);
                 results_since_flush += 1;
             }
-            ParseResult::ParsePanic { absolute_path } => {
-                eprintln!("  [ERR] Parser panicked on: {absolute_path}");
+            "diagnostic" => {
+                writer.write_raw_diagnostic(&val)?;
+            }
+            "copybook" => {
+                writer.write_raw_copybook(&val)?;
+            }
+            "error" => {
+                let path = val.get("absolute_path").and_then(|v| v.as_str()).unwrap_or("?");
+                let msg = val.get("error").and_then(|v| v.as_str()).unwrap_or("unknown");
+                eprintln!("  [ERR] {path}: {msg}");
                 failed_counter.fetch_add(1, Ordering::Relaxed);
             }
-            ParseResult::ReadError { absolute_path } => {
-                eprintln!("  [ERR] Cannot read: {absolute_path}");
-                failed_counter.fetch_add(1, Ordering::Relaxed);
-            }
+            _ => {}
         }
 
         pb.inc(1);
 
-        // Flush every 500 results or every 5 seconds for crash recovery.
         if results_since_flush >= 500 || last_flush.elapsed() >= flush_interval {
             writer.flush()?;
             results_since_flush = 0;
@@ -499,14 +478,13 @@ pub fn run_phase1_ndjson(
     writer.flush()?;
     pb.finish_with_message("done");
 
-    // Wait for pipeline threads to finish (they should already be done since
-    // result_rx.recv() returned Err, meaning all senders dropped).
     feeder
         .join()
         .map_err(|_| miette::miette!("feeder thread panicked"))?;
-    dispatcher
-        .join()
-        .map_err(|_| miette::miette!("dispatcher thread panicked"))?;
+
+    for reader in reader_threads {
+        let _ = reader.join();
+    }
 
     let total_processed = processed_counter.load(Ordering::Relaxed) as usize;
     let total_failed = failed_counter.load(Ordering::Relaxed) as usize;

@@ -20,6 +20,7 @@ mod phase2;
 mod phase3;
 #[cfg(feature = "duckdb")]
 mod status;
+mod worker;
 
 use std::process::ExitCode;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -31,6 +32,11 @@ use args::{ScanArgs, ScanPhase};
 use discover::FileType;
 
 use crate::Cli;
+
+/// Run the hidden `scan-worker` subcommand (called by main scan as child process).
+pub fn run_scan_worker(args: &args::ScanWorkerArgs) -> Result<ExitCode> {
+    worker::run(args)
+}
 
 /// Run the `cobol2rust status` subcommand.
 pub fn run_status(status_args: &args::StatusArgs) -> Result<ExitCode> {

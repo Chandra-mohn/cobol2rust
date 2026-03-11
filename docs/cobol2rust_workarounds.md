@@ -282,7 +282,77 @@ transpilation, a more nuanced approach could:
 
 ---
 
-## W-007: (Template for future workarounds)
+## W-007: ANTLR RwLock<DFA> Contention Limits Thread-Level Parallelism
+
+**Affected**: `cobol2rust scan` when using rayon thread-level parallelism for
+parsing 240K+ COBOL files on multi-core machines.
+
+**Root cause**: The `antlr-rust` runtime uses global `lazy_static` DFA caches
+protected by `RwLock` for all parser instances. These are auto-generated in
+every ANTLR-produced parser/lexer:
+
+```rust
+// Generated code (cannot be modified without forking antlr-rust)
+lazy_static! {
+    static ref _decision_to_DFA: Arc<Vec<antlr_rust::RwLock<DFA>>> = { ... };
+    static ref _shared_context_cache: Arc<PredictionContextCache> = { ... };
+}
+```
+
+Four globals exist (one per generated file):
+- `src/generated/cobol85lexer.rs` (line 1004)
+- `src/generated/cobol85parser.rs` (line 90360)
+- `src/generated/cobol85preprocessorlexer.rs` (line 587)
+- `src/generated/cobol85preprocessorparser.rs` (line 10906)
+
+The DFA tables grow dynamically as new parse states are encountered. Every
+parse operation requires at minimum a read lock; new states require exclusive
+write locks. With N threads, all N contend on the same locks, effectively
+serializing parsing to 2-3 concurrent threads regardless of core count.
+
+**Symptom**: On a 24-core Linux machine parsing 240K files, CPU utilization
+stays at 10-14% (load average 2-3) despite rayon being configured with 24
+threads. Individual cores spike to 100% while others sit idle, indicating
+lock contention rather than I/O bottleneck. Confirmed by moving file I/O
+into rayon workers (no improvement) and observing top output showing only
+2-3 active cores at any time.
+
+**Workaround**: Multi-process parallelism instead of multi-thread. The
+`scan` command spawns N worker child processes (`cobol2rust scan-worker`),
+each with its own address space and its own copy of the ANTLR DFA caches.
+Files are distributed to workers via stdin pipes (`file_id\trel_path\tabs_path`),
+results returned as NDJSON on stdout. Zero lock contention between processes.
+
+The hidden `scan-worker` subcommand handles the per-file parse loop:
+```
+cobol2rust scan-worker --run-id 1 [--with-coverage]
+```
+Reads file paths from stdin, writes NDJSON results to stdout.
+
+**Applied to**:
+- `crates/cobol-cli/src/scan/worker.rs` -- worker process implementation
+- `crates/cobol-cli/src/scan/phase1.rs` -- multi-process orchestrator
+- `crates/cobol-cli/src/scan/phase2.rs` -- multi-process orchestrator
+- `crates/cobol-cli/src/main.rs` -- hidden `ScanWorker` subcommand
+
+**Proper fix**: Two possible approaches (neither implemented):
+
+1. **Fork antlr-rust**: Modify the code generation templates to use
+   per-instance DFA tables instead of global shared statics. Each parser
+   instance would own its DFA, eliminating cross-thread contention. This
+   is a significant undertaking and would complicate ANTLR grammar upgrades.
+
+2. **Replace antlr-rust with a custom parser**: Write a hand-rolled COBOL
+   parser (recursive descent or PEG) that avoids shared mutable state
+   entirely. This is a major rewrite but would also fix W-004 (exponential
+   backtracking) and W-005 (qualified reference slowdown).
+
+The multi-process workaround is preferred as it requires no changes to the
+parser infrastructure and achieves near-linear scaling with core count.
+
+---
+
+## W-008: (Template for future workarounds)
 
 **Affected**:
 
@@ -309,3 +379,4 @@ transpilation, a more nuanced approach could:
 | bad/WOPO.COB | W-004: 28 nested ELSE IF, minutes to parse | 2026-03-11 |
 | bad/NC246A.CBL | W-005: 7-dim table qualified refs, slow parse | 2026-03-11 |
 | (97 files in 280K scan) | W-006: Non-ASCII bytes cause parser panics | 2026-03-11 |
+| crates/cobol-cli/src/scan/*.rs | W-007: ANTLR RwLock DFA contention, multi-process fix | 2026-03-11 |

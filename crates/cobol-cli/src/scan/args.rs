@@ -129,3 +129,18 @@ pub enum ReportFormat {
     Json,
     Csv,
 }
+
+/// Arguments for the hidden `scan-worker` subcommand.
+///
+/// Worker processes read `file_id\tpath` lines from stdin,
+/// parse each file, and write NDJSON results to stdout.
+#[derive(Debug, Args)]
+pub struct ScanWorkerArgs {
+    /// Run ID for this scan.
+    #[arg(long)]
+    pub run_id: i64,
+
+    /// Include coverage analysis (Phase 2).
+    #[arg(long)]
+    pub with_coverage: bool,
+}

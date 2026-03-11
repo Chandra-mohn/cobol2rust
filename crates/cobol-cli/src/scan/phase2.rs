@@ -1,5 +1,6 @@
 //! Phase 2: Coverage -- run transpilation analysis on parseable files.
 
+#[cfg(feature = "duckdb")]
 use std::fs;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -10,7 +11,9 @@ use miette::Result;
 #[cfg(feature = "duckdb")]
 use rayon::prelude::*;
 
+#[cfg(feature = "duckdb")]
 use crate::analyze;
+#[cfg(feature = "duckdb")]
 use crate::analyze::AnalysisResult;
 
 // ---------------------------------------------------------------------------
@@ -160,30 +163,19 @@ mod duckdb_phase2 {
 pub use duckdb_phase2::run_phase2;
 
 // ---------------------------------------------------------------------------
-// NDJSON mode: Phase 2 with streaming pipeline
+// NDJSON mode: Phase 2 with multi-process pipeline
 // ---------------------------------------------------------------------------
 
+use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::Path;
+use std::process::{Command, Stdio};
 use std::thread;
 
 use crossbeam_channel::bounded;
 
 use crate::scan::ndjson::{self, NdjsonWriter};
 
-/// Job sent from feeder -> rayon parse pool (Phase 2, path only).
-struct CoverageJob {
-    file_id: i64,
-    absolute_path: String,
-}
-
-/// Result sent from rayon -> writer (Phase 2).
-enum CoverageResult {
-    Success { file_id: i64, analysis: AnalysisResult },
-    Panic { absolute_path: String },
-    ReadError { absolute_path: String },
-}
-
-/// Run Phase 2 in NDJSON mode: streaming pipeline for coverage analysis.
+/// Run Phase 2 in NDJSON mode: multi-process pipeline for coverage analysis.
 pub fn run_phase2_ndjson(
     writer: &mut NdjsonWriter,
     output_dir: &Path,
@@ -216,109 +208,115 @@ pub fn run_phase2_ndjson(
         .progress_chars("=> "),
     );
 
-    // Streaming pipeline: feeder -> rayon pool -> writer (this thread).
-    let num_threads = rayon::current_num_threads();
-    let job_cap = num_threads * 4;
-    let result_cap = 512;
+    // Multi-process pipeline: N workers with --with-coverage.
+    let num_workers = rayon::current_num_threads();
+    let result_cap = 1024;
+    let (result_tx, result_rx) = bounded::<serde_json::Value>(result_cap);
 
-    let (job_tx, job_rx) = bounded::<CoverageJob>(job_cap);
-    let (result_tx, result_rx) = bounded::<CoverageResult>(result_cap);
+    let exe_path = std::env::current_exe()
+        .map_err(|e| miette::miette!("cannot find own executable: {e}"))?;
 
+    let mut workers: Vec<(std::process::Child, BufWriter<std::process::ChildStdin>)> = Vec::new();
+    let mut reader_threads: Vec<thread::JoinHandle<()>> = Vec::new();
+
+    for i in 0..num_workers {
+        let mut child = Command::new(&exe_path)
+            .args([
+                "scan-worker",
+                "--run-id", &run_id.to_string(),
+                "--with-coverage",
+            ])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .map_err(|e| miette::miette!("failed to spawn coverage worker {i}: {e}"))?;
+
+        let stdin = child.stdin.take().unwrap();
+        let stdout = child.stdout.take().unwrap();
+
+        let tx = result_tx.clone();
+        let reader = thread::Builder::new()
+            .name(format!("cov-reader-{i}"))
+            .spawn(move || {
+                let reader = BufReader::new(stdout);
+                for line in reader.lines() {
+                    let line = match line {
+                        Ok(l) => l,
+                        Err(_) => break,
+                    };
+                    if line.is_empty() {
+                        continue;
+                    }
+                    if let Ok(val) = serde_json::from_str::<serde_json::Value>(&line) {
+                        if tx.send(val).is_err() {
+                            break;
+                        }
+                    }
+                }
+            })
+            .map_err(|e| miette::miette!("failed to spawn reader thread {i}: {e}"))?;
+
+        reader_threads.push(reader);
+        workers.push((child, BufWriter::new(stdin)));
+    }
+
+    drop(result_tx);
+
+    // Distribute files round-robin to workers.
+    // work_items is Vec<(file_id, abs_path)>; we need rel_path too but Phase 2
+    // doesn't use it -- send abs_path as both.
     let shutdown_feeder = shutdown.clone();
-    let shutdown_parser = shutdown.clone();
-
-    // Stage 1: Feeder thread -- sends paths only (no I/O here).
     let feeder = thread::Builder::new()
         .name("cov-feeder".into())
         .spawn(move || {
-            for (file_id, abs_path) in work_items {
+            for (idx, (file_id, abs_path)) in work_items.into_iter().enumerate() {
                 if shutdown_feeder.load(Ordering::Relaxed) {
                     break;
                 }
 
-                let job = CoverageJob {
-                    file_id,
-                    absolute_path: abs_path,
-                };
-                if job_tx.send(job).is_err() {
+                let worker_idx = idx % num_workers;
+                let line = format!("{}\t{}\t{}\n", file_id, abs_path, abs_path);
+                let (_, ref mut stdin) = workers[worker_idx];
+                if stdin.write_all(line.as_bytes()).is_err() {
                     break;
                 }
+            }
+
+            for (mut child, stdin) in workers {
+                drop(stdin);
+                let _ = child.wait();
             }
         })
         .map_err(|e| miette::miette!("failed to spawn feeder thread: {e}"))?;
 
-    // Stage 2: Dispatcher thread -- spawns rayon tasks for coverage analysis.
-    let dispatcher = thread::Builder::new()
-        .name("cov-dispatcher".into())
-        .spawn(move || {
-            rayon::scope(|s| {
-                while let Ok(job) = job_rx.recv() {
-                    if shutdown_parser.load(Ordering::Relaxed) {
-                        break;
-                    }
-
-                    let tx = result_tx.clone();
-                    s.spawn(move |_| {
-                        // Read file on rayon thread -- parallelizes I/O across all cores.
-                        let source = match fs::read_to_string(&job.absolute_path) {
-                            Ok(s) => s,
-                            Err(_) => {
-                                let _ = tx.send(CoverageResult::ReadError {
-                                    absolute_path: job.absolute_path,
-                                });
-                                return;
-                            }
-                        };
-
-                        let outcome = std::panic::catch_unwind(|| {
-                            analyze::analyze_source(&source, true)
-                        });
-
-                        let result = match outcome {
-                            Ok(analysis) => CoverageResult::Success {
-                                file_id: job.file_id,
-                                analysis,
-                            },
-                            Err(_) => CoverageResult::Panic {
-                                absolute_path: job.absolute_path,
-                            },
-                        };
-
-                        let _ = tx.send(result);
-                    });
-                }
-            });
-        })
-        .map_err(|e| miette::miette!("failed to spawn dispatcher thread: {e}"))?;
-
-    // Stage 3: Writer loop on this thread.
+    // Writer loop: drain results from all workers.
     let mut last_flush = Instant::now();
     let flush_interval = Duration::from_secs(5);
     let mut results_since_flush = 0u64;
 
-    while let Ok(result) = result_rx.recv() {
-        match result {
-            CoverageResult::Success { file_id, analysis } => {
-                if let Some(ref coverage) = analysis.coverage {
-                    writer.write_coverage(file_id, run_id, coverage)?;
+    while let Ok(val) = result_rx.recv() {
+        let entry_type = val.get("type").and_then(|v| v.as_str()).unwrap_or("");
 
-                    if !coverage.unhandled.is_empty() {
-                        writer.write_diagnostics(
-                            file_id, run_id, 2, &coverage.unhandled, "warning",
-                        )?;
-                    }
-                }
+        match entry_type {
+            "coverage" => {
+                writer.write_raw_coverage(&val)?;
                 processed_counter.fetch_add(1, Ordering::Relaxed);
                 results_since_flush += 1;
             }
-            CoverageResult::Panic { absolute_path } => {
-                eprintln!("  [ERR] Transpiler panicked on: {absolute_path}");
+            "diagnostic" => {
+                writer.write_raw_diagnostic(&val)?;
+            }
+            "parse_result" | "copybook" => {
+                // Phase 2 workers also emit parse_results (ignored here).
+            }
+            "error" => {
+                let path = val.get("absolute_path").and_then(|v| v.as_str()).unwrap_or("?");
+                let msg = val.get("error").and_then(|v| v.as_str()).unwrap_or("unknown");
+                eprintln!("  [ERR] {path}: {msg}");
                 failed_counter.fetch_add(1, Ordering::Relaxed);
             }
-            CoverageResult::ReadError { absolute_path } => {
-                eprintln!("  [ERR] Cannot read: {absolute_path}");
-                failed_counter.fetch_add(1, Ordering::Relaxed);
-            }
+            _ => {}
         }
 
         pb.inc(1);
@@ -336,9 +334,10 @@ pub fn run_phase2_ndjson(
     feeder
         .join()
         .map_err(|_| miette::miette!("feeder thread panicked"))?;
-    dispatcher
-        .join()
-        .map_err(|_| miette::miette!("dispatcher thread panicked"))?;
+
+    for reader in reader_threads {
+        let _ = reader.join();
+    }
 
     let total_processed = processed_counter.load(Ordering::Relaxed) as usize;
     let total_failed = failed_counter.load(Ordering::Relaxed) as usize;
