@@ -6,8 +6,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 use miette::{miette, Context, IntoDiagnostic, Result};
+use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use cobol_transpiler::ast::{Literal, Operand, Statement};
@@ -111,30 +113,41 @@ pub fn analyze_workspace(
     // 2. Discover copybook directories (.cpy files)
     let copybook_dirs = discover_copybook_dirs(input_dir);
 
-    // 3. Parse each file and extract program info
-    let mut programs = BTreeMap::new();
-    let mut errors = Vec::new();
-    let mut all_copybooks = BTreeSet::new();
+    // 3. Parse each file and extract program info (parallel)
+    let programs_mutex: Mutex<BTreeMap<String, ProgramInfo>> = Mutex::new(BTreeMap::new());
+    let errors_mutex: Mutex<Vec<(PathBuf, String)>> = Mutex::new(Vec::new());
+    let all_copybooks_mutex: Mutex<BTreeSet<String>> = Mutex::new(BTreeSet::new());
 
-    for cbl_path in &cbl_files {
+    cbl_files.par_iter().for_each(|cbl_path| {
         match analyze_single_file(cbl_path, input_dir) {
             Ok(info) => {
-                for cb in &info.copybooks {
-                    all_copybooks.insert(cb.clone());
-                }
                 let crate_name = cobol_name_to_crate(&info.program_id);
-                programs.insert(crate_name, info);
+                {
+                    let mut cbs = all_copybooks_mutex.lock().unwrap();
+                    for cb in &info.copybooks {
+                        cbs.insert(cb.clone());
+                    }
+                }
+                programs_mutex.lock().unwrap().insert(crate_name, info);
             }
             Err(e) => {
                 if continue_on_error {
-                    errors.push((cbl_path.clone(), format!("{e}")));
-                } else {
-                    return Err(e).wrap_err_with(|| {
-                        format!("failed to analyze {}", cbl_path.display())
-                    });
+                    errors_mutex.lock().unwrap().push((cbl_path.clone(), format!("{e}")));
                 }
+                // When not continue_on_error, we skip the error here and check below.
+                // Parallel iteration can't return early, so we collect and check after.
             }
         }
+    });
+
+    let mut programs = programs_mutex.into_inner().unwrap();
+    let errors = errors_mutex.into_inner().unwrap();
+    let all_copybooks = all_copybooks_mutex.into_inner().unwrap();
+
+    // If not continue_on_error and we had errors, report the first one.
+    if !continue_on_error && !errors.is_empty() {
+        let (path, err) = &errors[0];
+        return Err(miette!("failed to analyze {}: {err}", path.display()));
     }
 
     // 4. Cross-reference: populate called_by from calls
