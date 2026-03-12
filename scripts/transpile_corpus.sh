@@ -107,14 +107,14 @@ for repo_dir in "${REPO_DIRS[@]}"; do
 
     TOTAL_FILES=$((TOTAL_FILES + file_count))
 
-    # Run transpile
+    # Run transpile (capture stderr for error reporting)
+    REPO_ERR=$(mktemp)
     if "$COBOL2RUST" transpile "$repo_dir" \
         --workspace \
         --output "$repo_output" \
         -j "$JOBS" \
         --continue-on-error \
-        --quiet \
-        >> "$LOG_FILE" 2>&1; then
+        2>"$REPO_ERR"; then
 
         SUCCEEDED_REPOS=$((SUCCEEDED_REPOS + 1))
 
@@ -145,8 +145,16 @@ for repo_dir in "${REPO_DIRS[@]}"; do
         fi
     else
         FAILED_REPOS=$((FAILED_REPOS + 1))
-        log "  FAILED (see log for details)"
+        log "  FAILED:"
+        if [ -s "$REPO_ERR" ]; then
+            # Show last 10 lines of error output
+            tail -10 "$REPO_ERR" | while IFS= read -r line; do
+                log "    $line"
+            done
+        fi
     fi
+
+    rm -f "$REPO_ERR"
 
     # Progress estimate
     ELAPSED=$(($(date +%s) - START_TIME))
