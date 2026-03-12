@@ -263,32 +263,43 @@ pub fn run_phase2_ndjson(
 
     drop(result_tx);
 
-    // Distribute files round-robin to workers.
-    // work_items is Vec<(file_id, abs_path)>; we need rel_path too but Phase 2
-    // doesn't use it -- send abs_path as both.
+    // Distribute files via shared work queue (demand-based, not round-robin).
+    let (work_tx, work_rx) = bounded::<(i64, String)>(256);
     let shutdown_feeder = shutdown.clone();
-    let feeder = thread::Builder::new()
-        .name("cov-feeder".into())
+
+    let producer = thread::Builder::new()
+        .name("cov-producer".into())
         .spawn(move || {
-            for (idx, (file_id, abs_path)) in work_items.into_iter().enumerate() {
+            for item in work_items {
                 if shutdown_feeder.load(Ordering::Relaxed) {
                     break;
                 }
-
-                let worker_idx = idx % num_workers;
-                let line = format!("{}\t{}\t{}\n", file_id, abs_path, abs_path);
-                let (_, ref mut stdin) = workers[worker_idx];
-                if stdin.write_all(line.as_bytes()).is_err() {
+                if work_tx.send(item).is_err() {
                     break;
                 }
             }
+        })
+        .map_err(|e| miette::miette!("failed to spawn producer thread: {e}"))?;
 
-            for (mut child, stdin) in workers {
+    let mut feeder_threads: Vec<thread::JoinHandle<()>> = Vec::new();
+    for (mut child, mut stdin) in workers {
+        let rx = work_rx.clone();
+        let t = thread::Builder::new()
+            .name("cov-feeder".into())
+            .spawn(move || {
+                while let Ok((file_id, abs_path)) = rx.recv() {
+                    let line = format!("{}\t{}\t{}\n", file_id, abs_path, abs_path);
+                    if stdin.write_all(line.as_bytes()).is_err() {
+                        break;
+                    }
+                }
                 drop(stdin);
                 let _ = child.wait();
-            }
-        })
-        .map_err(|e| miette::miette!("failed to spawn feeder thread: {e}"))?;
+            })
+            .expect("failed to spawn feeder thread");
+        feeder_threads.push(t);
+    }
+    drop(work_rx);
 
     // Writer loop: drain results from all workers.
     let mut last_flush = Instant::now();
@@ -331,9 +342,13 @@ pub fn run_phase2_ndjson(
     writer.flush()?;
     pb.finish_with_message("done");
 
-    feeder
+    producer
         .join()
-        .map_err(|_| miette::miette!("feeder thread panicked"))?;
+        .map_err(|_| miette::miette!("producer thread panicked"))?;
+
+    for t in feeder_threads {
+        let _ = t.join();
+    }
 
     for reader in reader_threads {
         let _ = reader.join();

@@ -409,31 +409,48 @@ pub fn run_phase1_ndjson(
     // Drop the original sender so channel closes when all reader threads finish.
     drop(result_tx);
 
-    // Distribute files round-robin to workers via stdin pipes.
+    // Distribute files via shared work queue (demand-based, not round-robin).
+    // Each worker gets a feeder thread that pulls from a shared channel.
+    // Fast workers pull more files; slow workers don't block others.
+    let (work_tx, work_rx) = bounded::<(i64, String, String)>(256);
     let shutdown_feeder = shutdown.clone();
-    let feeder = thread::Builder::new()
-        .name("scan-feeder".into())
+
+    // Producer: feeds all work items into the shared channel.
+    let producer = thread::Builder::new()
+        .name("scan-producer".into())
         .spawn(move || {
-            for (idx, (file_id, abs_path, rel_path)) in work_items.into_iter().enumerate() {
+            for item in work_items {
                 if shutdown_feeder.load(Ordering::Relaxed) {
                     break;
                 }
-
-                let worker_idx = idx % num_workers;
-                let line = format!("{}\t{}\t{}\n", file_id, rel_path, abs_path);
-                let (_, ref mut stdin) = workers[worker_idx];
-                if stdin.write_all(line.as_bytes()).is_err() {
+                if work_tx.send(item).is_err() {
                     break;
                 }
             }
+            // Channel closes when work_tx is dropped.
+        })
+        .map_err(|e| miette::miette!("failed to spawn producer thread: {e}"))?;
 
-            // Close all stdin pipes to signal workers to exit.
-            for (mut child, stdin) in workers {
+    // Per-worker feeder threads: each pulls from shared channel, writes to its worker's stdin.
+    let mut feeder_threads: Vec<thread::JoinHandle<()>> = Vec::new();
+    for (mut child, mut stdin) in workers {
+        let rx = work_rx.clone();
+        let t = thread::Builder::new()
+            .name("scan-feeder".into())
+            .spawn(move || {
+                while let Ok((file_id, abs_path, rel_path)) = rx.recv() {
+                    let line = format!("{}\t{}\t{}\n", file_id, rel_path, abs_path);
+                    if stdin.write_all(line.as_bytes()).is_err() {
+                        break;
+                    }
+                }
                 drop(stdin);
                 let _ = child.wait();
-            }
-        })
-        .map_err(|e| miette::miette!("failed to spawn feeder thread: {e}"))?;
+            })
+            .expect("failed to spawn feeder thread");
+        feeder_threads.push(t);
+    }
+    drop(work_rx);
 
     // Writer loop: drain results from all workers, write NDJSON output.
     let mut last_flush = Instant::now();
@@ -478,9 +495,13 @@ pub fn run_phase1_ndjson(
     writer.flush()?;
     pb.finish_with_message("done");
 
-    feeder
+    producer
         .join()
-        .map_err(|_| miette::miette!("feeder thread panicked"))?;
+        .map_err(|_| miette::miette!("producer thread panicked"))?;
+
+    for t in feeder_threads {
+        let _ = t.join();
+    }
 
     for reader in reader_threads {
         let _ = reader.join();
