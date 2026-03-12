@@ -119,6 +119,7 @@ pub enum ReportType {
     Coverage,
     Errors,
     Complexity,
+    Transpile,
     Full,
 }
 

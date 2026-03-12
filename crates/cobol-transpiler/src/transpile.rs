@@ -150,6 +150,42 @@ pub fn transpile_with_config(source: &str, config: &TranspileConfig) -> Result<S
     generate_rust(&program)
 }
 
+/// Transpile COBOL source with COPY expansion AND diagnostics/coverage stats.
+///
+/// Combines `transpile_with_config()` and `transpile_with_diagnostics()`:
+/// expands COPY statements, then returns a `TranspileResult` with the generated
+/// Rust code, diagnostics, and coverage statistics.
+pub fn transpile_with_config_and_diagnostics(
+    source: &str,
+    config: &TranspileConfig,
+) -> Result<TranspileResult> {
+    let resolver = FileSystemResolver::new(config.copybook_paths.clone())
+        .with_library_map(config.library_map.clone());
+    let copy_expander = CopyExpander::new(Box::new(resolver), config.max_copy_depth);
+    let expanded = copy_expander.expand(source)?;
+
+    let (program, diagnostics) = parse_cobol_with_diagnostics(&expanded)?;
+    let code = generate_rust(&program)?;
+
+    let total_statements = count_statements(&program);
+    let unhandled_count = diagnostics
+        .iter()
+        .filter(|d| d.category == crate::diagnostics::DiagCategory::UnhandledStatement)
+        .count();
+
+    let stats = TranspileStats {
+        total_statements,
+        mapped_statements: total_statements.saturating_sub(unhandled_count),
+        total_data_entries: program
+            .data_division
+            .as_ref()
+            .map_or(0, |dd| count_data_entries(&dd.working_storage)),
+        ..Default::default()
+    };
+
+    Ok(TranspileResult::success(code, diagnostics, stats))
+}
+
 /// Shared code generation from a parsed `CobolProgram` to Rust source.
 #[allow(clippy::unnecessary_wraps)]
 fn generate_rust(program: &crate::ast::CobolProgram) -> Result<String> {

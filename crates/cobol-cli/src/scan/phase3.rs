@@ -17,14 +17,27 @@ pub fn run_phase3(
         ReportType::Coverage => print_coverage(conn, run_id, format),
         ReportType::Errors => print_errors(conn, run_id, format),
         ReportType::Complexity => print_complexity(conn, run_id, format),
+        ReportType::Transpile => print_transpile(conn, run_id, format),
         ReportType::Full => {
-            print_summary(conn, run_id, format)?;
-            println!();
-            print_coverage(conn, run_id, format)?;
-            println!();
-            print_errors(conn, run_id, format)?;
-            println!();
-            print_complexity(conn, run_id, format)?;
+            let has_parse = has_parse_data(conn);
+            if has_parse {
+                print_summary(conn, run_id, format)?;
+                println!();
+                print_coverage(conn, run_id, format)?;
+                println!();
+                print_errors(conn, run_id, format)?;
+                println!();
+                print_complexity(conn, run_id, format)?;
+            }
+            if has_transpile_data(conn) {
+                if has_parse {
+                    println!();
+                }
+                print_transpile(conn, run_id, format)?;
+            }
+            if !has_parse && !has_transpile_data(conn) {
+                println!("No data found. Run a scan or transpile first.");
+            }
             Ok(())
         }
     }
@@ -478,6 +491,204 @@ fn print_complexity_text(conn: &Connection, run_id: i64) -> Result<()> {
 }
 
 // ---------------------------------------------------------------------------
+// Transpile report
+// ---------------------------------------------------------------------------
+
+fn print_transpile(conn: &Connection, _run_id: i64, format: ReportFormat) -> Result<()> {
+    match format {
+        ReportFormat::Text => print_transpile_text(conn),
+        ReportFormat::Json => print_query_json(conn, TRANSPILE_QUERIES, 0),
+        ReportFormat::Csv => print_query_csv(conn, TRANSPILE_QUERIES, 0),
+    }
+}
+
+/// Check if parse_results table has data.
+fn has_parse_data(conn: &Connection) -> bool {
+    conn.query_row(
+        "SELECT COUNT(*) FROM parse_results",
+        [],
+        |row| row.get::<_, i64>(0),
+    )
+    .unwrap_or(0)
+        > 0
+}
+
+/// Check if transpile_results table has data.
+fn has_transpile_data(conn: &Connection) -> bool {
+    conn.query_row(
+        "SELECT COUNT(*) FROM transpile_results",
+        [],
+        |row| row.get::<_, i64>(0),
+    )
+    .unwrap_or(0)
+        > 0
+}
+
+fn print_transpile_text(conn: &Connection) -> Result<()> {
+    println!("=== TRANSPILE REPORT ===");
+    println!();
+
+    // Success rate
+    println!("--- Transpile Results ---");
+    if let Ok((total, succeeded, failed, pct)) = conn.query_row(
+        "SELECT COUNT(*),
+                SUM(CASE WHEN success THEN 1 ELSE 0 END),
+                SUM(CASE WHEN NOT success THEN 1 ELSE 0 END),
+                ROUND(100.0 * SUM(CASE WHEN success THEN 1 ELSE 0 END) / NULLIF(COUNT(*), 0), 1)
+         FROM transpile_results",
+        [],
+        |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, f64>(3)?,
+            ))
+        },
+    ) {
+        println!("Total files:   {total}");
+        println!("Succeeded:     {succeeded} ({pct:.1}%)");
+        println!("Failed:        {failed}");
+    }
+    println!();
+
+    // Generated Rust line counts
+    println!("--- Generated Code ---");
+    if let Ok((min_l, max_l, avg_l, total_l)) = conn.query_row(
+        "SELECT MIN(rust_lines), MAX(rust_lines),
+                ROUND(AVG(rust_lines), 0), SUM(rust_lines)
+         FROM transpile_results WHERE success",
+        [],
+        |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, f64>(2)?,
+                row.get::<_, i64>(3)?,
+            ))
+        },
+    ) {
+        println!("Total Rust lines:   {total_l}");
+        println!("Avg per file:       {avg_l:.0}");
+        println!("Min / Max:          {min_l} / {max_l}");
+    }
+    println!();
+
+    // Timing distribution
+    println!("--- Timing Distribution ---");
+    let mut stmt = conn
+        .prepare(
+            "SELECT
+                CASE
+                    WHEN duration_ms < 100 THEN '<100ms'
+                    WHEN duration_ms < 500 THEN '100-500ms'
+                    WHEN duration_ms < 1000 THEN '500ms-1s'
+                    WHEN duration_ms < 5000 THEN '1-5s'
+                    ELSE '>5s'
+                END as bucket,
+                COUNT(*) as cnt
+             FROM transpile_results
+             GROUP BY bucket ORDER BY MIN(duration_ms)",
+        )
+        .into_diagnostic()?;
+
+    println!("{:<15} {:>10}", "Time", "Files");
+    println!("{}", "-".repeat(28));
+    let rows = stmt
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+        })
+        .into_diagnostic()?;
+    for row in rows.flatten() {
+        let (bucket, cnt) = row;
+        println!("{:<15} {:>10}", bucket, cnt);
+    }
+    println!();
+
+    // Coverage distribution for successful transpilations
+    println!("--- Coverage Distribution (successful) ---");
+    let mut stmt = conn
+        .prepare(
+            "SELECT
+                CASE
+                    WHEN coverage_pct = 100 THEN '100%'
+                    WHEN coverage_pct >= 90 THEN '90-99%'
+                    WHEN coverage_pct >= 75 THEN '75-89%'
+                    WHEN coverage_pct >= 50 THEN '50-74%'
+                    ELSE '<50%'
+                END as bucket,
+                COUNT(*) as cnt
+             FROM transpile_results WHERE success
+             GROUP BY bucket ORDER BY MIN(coverage_pct) DESC",
+        )
+        .into_diagnostic()?;
+
+    println!("{:<10} {:>10}", "Coverage", "Files");
+    println!("{}", "-".repeat(23));
+    let rows = stmt
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+        })
+        .into_diagnostic()?;
+    for row in rows.flatten() {
+        let (bucket, cnt) = row;
+        println!("{:<10} {:>10}", bucket, cnt);
+    }
+    println!();
+
+    // Top errors
+    println!("--- Top Transpile Errors ---");
+    let mut stmt = conn
+        .prepare(
+            "SELECT LEFT(error, 80) as msg, COUNT(*) as cnt
+             FROM transpile_results
+             WHERE NOT success AND error IS NOT NULL
+             GROUP BY LEFT(error, 80) ORDER BY cnt DESC LIMIT 20",
+        )
+        .into_diagnostic()?;
+
+    let rows = stmt
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+        })
+        .into_diagnostic()?;
+    for row in rows.flatten() {
+        let (msg, cnt) = row;
+        println!("  [{cnt}x] {msg}");
+    }
+    println!();
+
+    // Unsupported verbs
+    println!("--- Top Unsupported Verbs ---");
+    let mut stmt = conn
+        .prepare(
+            "SELECT verb, COUNT(*) as cnt
+             FROM (
+                 SELECT UNNEST(string_split(verbs_unsupported, ',')) as verb
+                 FROM transpile_results
+                 WHERE verbs_unsupported != '' AND success
+             )
+             WHERE verb != ''
+             GROUP BY verb ORDER BY cnt DESC LIMIT 20",
+        )
+        .into_diagnostic()?;
+
+    println!("{:<20} {:>10}", "Verb", "Files");
+    println!("{}", "-".repeat(33));
+    let rows = stmt
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+        })
+        .into_diagnostic()?;
+    for row in rows.flatten() {
+        let (verb, cnt) = row;
+        println!("{:<20} {:>10}", verb, cnt);
+    }
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // JSON / CSV formatters (generic query runner)
 // ---------------------------------------------------------------------------
 
@@ -674,3 +885,27 @@ const COMPLEXITY_QUERIES: &[(&str, &str)] = &[(
      WHERE pr.run_id = ? AND pr.valid = true
      ORDER BY score DESC LIMIT 30",
 )];
+
+const TRANSPILE_QUERIES: &[(&str, &str)] = &[
+    (
+        "success_rate",
+        "SELECT COUNT(*) as total,
+                SUM(CASE WHEN success THEN 1 ELSE 0 END) as succeeded,
+                SUM(CASE WHEN NOT success THEN 1 ELSE 0 END) as failed,
+                ROUND(100.0 * SUM(CASE WHEN success THEN 1 ELSE 0 END) / NULLIF(COUNT(*), 0), 1) as success_pct
+         FROM transpile_results WHERE ?>=0",
+    ),
+    (
+        "generated_code",
+        "SELECT MIN(rust_lines) as min_lines, MAX(rust_lines) as max_lines,
+                ROUND(AVG(rust_lines), 0) as avg_lines, SUM(rust_lines) as total_lines
+         FROM transpile_results WHERE success AND ?>=0",
+    ),
+    (
+        "top_errors",
+        "SELECT LEFT(error, 80) as msg, COUNT(*) as cnt
+         FROM transpile_results
+         WHERE NOT success AND error IS NOT NULL AND ?>=0
+         GROUP BY LEFT(error, 80) ORDER BY cnt DESC LIMIT 20",
+    ),
+];

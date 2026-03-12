@@ -352,7 +352,60 @@ parser infrastructure and achieves near-linear scaling with core count.
 
 ---
 
-## W-008: (Template for future workarounds)
+## W-008: Scan Phase 2 Redundantly Re-Parses All Files
+
+**Affected**: `cobol2rust scan` -- Phase 2 (coverage analysis) re-parses every
+file that already parsed successfully in Phase 1.
+
+**Root cause**: The scan pipeline is structured as two independent phases:
+- Phase 1 (Inventory): Parse all files, record parse results, filter out failures
+- Phase 2 (Coverage): Re-parse all files that passed Phase 1, then run transpiler
+  coverage analysis on the resulting AST
+
+Phase 2 receives only file paths from Phase 1, not the parsed ASTs. Each worker
+process re-reads the source file and re-runs the full ANTLR parse before
+proceeding to transpilation. This means every valid COBOL file is parsed twice:
+once in Phase 1 to check validity, once in Phase 2 to build the AST for coverage.
+
+**Symptom**: Total scan wall time is ~30-40% longer than necessary. On a 280K
+file corpus, Phase 1 parse time is entirely wasted for files that will also be
+processed in Phase 2. The redundant parse is especially costly for large files
+(10K+ lines) and files with pathological grammar patterns (W-004, W-005).
+
+**Workaround**: None applied. The two-phase architecture is retained for its
+operational benefits:
+- Phase 1 provides early visibility into parse success/failure rates
+- Phase 1 results enable resume without re-running coverage
+- Separating phases allows running Phase 1 only (`--phase1-only`, not yet implemented)
+- Phase 2 can be re-run independently after transpiler improvements
+
+**Proper fix**: Merge Phase 1 and Phase 2 into a single pass:
+
+1. Parse each file once
+2. If parse fails: record diagnostic, move on (current Phase 1 behavior)
+3. If parse succeeds: immediately run coverage analysis on the same AST
+   (current Phase 2 behavior) before moving to the next file
+4. Emit both parse_result and coverage records from the same worker pass
+
+This eliminates one full parse pass across the corpus. The worker protocol
+already supports emitting both `parse_result` and `coverage` record types
+in a single session (the `--with-coverage` flag already exists for Phase 2
+workers). The change would be:
+
+- Remove the separate Phase 2 orchestrator
+- Add `--with-coverage` to all Phase 1 workers
+- Phase 1 writer loop handles both parse_result and coverage records
+- Files that fail parsing naturally skip coverage (worker emits error, no coverage)
+
+The `load_parseable_files()` / `get_parseable_uncovered_files()` filtering
+logic becomes unnecessary since coverage runs inline with parsing.
+
+**Estimated savings**: ~30-40% reduction in total scan wall time (eliminates
+one full ANTLR parse pass). Memory usage unchanged. No impact on result quality.
+
+---
+
+## W-009: (Template for future workarounds)
 
 **Affected**:
 
@@ -380,3 +433,4 @@ parser infrastructure and achieves near-linear scaling with core count.
 | bad/NC246A.CBL | W-005: 7-dim table qualified refs, slow parse | 2026-03-11 |
 | (97 files in 280K scan) | W-006: Non-ASCII bytes cause parser panics | 2026-03-11 |
 | crates/cobol-cli/src/scan/*.rs | W-007: ANTLR RwLock DFA contention, multi-process fix | 2026-03-11 |
+| crates/cobol-cli/src/scan/phase{1,2}.rs | W-008: Redundant re-parse in Phase 2, merge to single pass | 2026-03-11 |

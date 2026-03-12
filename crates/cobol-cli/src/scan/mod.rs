@@ -12,7 +12,7 @@
 pub mod args;
 #[cfg(feature = "duckdb")]
 mod db;
-mod discover;
+pub mod discover;
 pub mod ndjson;
 mod phase1;
 mod phase2;
@@ -529,7 +529,7 @@ fn determine_report_run_id(conn: &duckdb::Connection) -> Result<i64> {
 }
 
 /// Get current timestamp as ISO 8601 string.
-fn chrono_now() -> String {
+pub fn chrono_now() -> String {
     use std::time::SystemTime;
     let now = SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

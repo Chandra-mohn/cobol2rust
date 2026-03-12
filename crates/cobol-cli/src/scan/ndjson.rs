@@ -89,6 +89,23 @@ pub struct CopybookRecord {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+pub struct TranspileResultRecord {
+    pub file_id: i64,
+    pub run_id: i64,
+    pub path: String,
+    pub success: bool,
+    pub output_path: String,
+    pub rust_lines: i32,
+    pub duration_ms: i32,
+    pub error: Option<String>,
+    pub coverage_pct: f64,
+    pub total_statements: i32,
+    pub mapped_statements: i32,
+    pub verbs_used: String,
+    pub verbs_unsupported: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
 pub struct ScanMeta {
     pub run_id: i64,
     pub started_at: String,
@@ -117,6 +134,7 @@ pub struct NdjsonWriter {
     diagnostics_writer: BufWriter<File>,
     coverage_writer: BufWriter<File>,
     copybooks_writer: BufWriter<File>,
+    transpile_results_writer: BufWriter<File>,
     next_file_id: i64,
 }
 
@@ -155,6 +173,7 @@ impl NdjsonWriter {
             diagnostics_writer: open("diagnostics.ndjson")?,
             coverage_writer: open("coverage.ndjson")?,
             copybooks_writer: open("copybooks.ndjson")?,
+            transpile_results_writer: open("transpile_results.ndjson")?,
             next_file_id,
         })
     }
@@ -389,6 +408,13 @@ impl NdjsonWriter {
         Ok(())
     }
 
+    /// Write a transpile result record.
+    pub fn write_transpile_result(&mut self, record: &TranspileResultRecord) -> Result<()> {
+        let line = serde_json::to_string(record).into_diagnostic()?;
+        writeln!(self.transpile_results_writer, "{}", line).into_diagnostic()?;
+        Ok(())
+    }
+
     /// Flush all writers.
     pub fn flush(&mut self) -> Result<()> {
         self.files_writer.flush().into_diagnostic()?;
@@ -396,6 +422,7 @@ impl NdjsonWriter {
         self.diagnostics_writer.flush().into_diagnostic()?;
         self.coverage_writer.flush().into_diagnostic()?;
         self.copybooks_writer.flush().into_diagnostic()?;
+        self.transpile_results_writer.flush().into_diagnostic()?;
         Ok(())
     }
 }
@@ -593,6 +620,7 @@ pub fn load_into_duckdb(output_dir: &Path) -> Result<duckdb::Connection> {
     load_ndjson_table(&conn, output_dir, "diagnostics", "diagnostics.ndjson")?;
     load_ndjson_table(&conn, output_dir, "coverage_results", "coverage.ndjson")?;
     load_ndjson_table(&conn, output_dir, "copybooks", "copybooks.ndjson")?;
+    load_ndjson_table(&conn, output_dir, "transpile_results", "transpile_results.ndjson")?;
 
     Ok(conn)
 }
@@ -666,6 +694,15 @@ fn create_empty_table(conn: &duckdb::Connection, table_name: &str) -> Result<()>
             "CREATE TABLE copybooks (
                 run_id INTEGER, name VARCHAR,
                 referenced_by INTEGER, resolved BOOLEAN
+            )"
+        }
+        "transpile_results" => {
+            "CREATE TABLE transpile_results (
+                file_id INTEGER, run_id INTEGER, path VARCHAR,
+                success BOOLEAN, output_path VARCHAR, rust_lines INTEGER,
+                duration_ms INTEGER, error VARCHAR, coverage_pct DOUBLE,
+                total_statements INTEGER, mapped_statements INTEGER,
+                verbs_used VARCHAR, verbs_unsupported VARCHAR
             )"
         }
         _ => return Ok(()),
