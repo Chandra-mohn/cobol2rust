@@ -582,6 +582,7 @@ dependencies = [
  "serde",
  "serde_json",
  "similar",
+ "toml",
 ]
 
 [[package]]

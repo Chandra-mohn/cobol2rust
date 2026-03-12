@@ -19,7 +19,8 @@ use cobol_transpiler::transpile::{transpile_with_config, transpile_with_config_a
 use crate::scan::ndjson::{self, NdjsonWriter, TranspileResultRecord};
 use crate::workspace::{
     analyze_workspace, build_manifest, cobol_name_to_crate, discover_copybook_files,
-    load_manifest_overrides, manifest_to_toml, ProgramType,
+    load_manifest_overrides, load_project_config, manifest_to_toml, resolve_copy_paths,
+    ProgramType,
 };
 use crate::Cli;
 
@@ -162,6 +163,17 @@ fn run_workspace(cli: &Cli, args: &TranspileArgs) -> Result<ExitCode> {
         );
     }
 
+    // Load .cobol2rust.toml if present in the input directory
+    let project_config = load_project_config(&args.input)?;
+    if let Some(ref pc) = project_config {
+        if !pc.workspace.copy_paths.is_empty() && !cli.quiet {
+            eprintln!(
+                "  Using copy_paths from .cobol2rust.toml: {:?}",
+                pc.workspace.copy_paths
+            );
+        }
+    }
+
     let analysis =
         analyze_workspace(&args.input, &overrides, args.continue_on_error)?;
 
@@ -176,7 +188,22 @@ fn run_workspace(cli: &Cli, args: &TranspileArgs) -> Result<ExitCode> {
         ));
     }
 
-    let config = build_config(cli, args)?;
+    // Build transpile config, merging copy_paths from .cobol2rust.toml
+    let mut config = build_config(cli, args)?;
+    if let Some(ref pc) = project_config {
+        let resolved = resolve_copy_paths(&args.input, pc);
+        for p in resolved {
+            if !config.copybook_paths.contains(&p) {
+                config.copybook_paths.push(p);
+            }
+        }
+    }
+    // Also add copybook dirs discovered during workspace analysis
+    for dir in &analysis.copybook_dirs {
+        if !config.copybook_paths.contains(dir) {
+            config.copybook_paths.push(dir.clone());
+        }
+    }
 
     // Create output directory structure
     fs::create_dir_all(output_dir)

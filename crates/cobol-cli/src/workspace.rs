@@ -11,6 +11,7 @@ use std::sync::Mutex;
 use miette::{miette, Context, IntoDiagnostic, Result};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
+use toml;
 
 use cobol_transpiler::ast::{Literal, Operand, Statement};
 use cobol_transpiler::parser::preprocess::preprocess;
@@ -90,6 +91,76 @@ pub struct WorkspaceAnalysis {
     pub copybook_dirs: Vec<PathBuf>,
     /// Files that failed to parse (path, error message).
     pub errors: Vec<(PathBuf, String)>,
+}
+
+/// Project configuration loaded from `.cobol2rust.toml`.
+///
+/// This file is placed in a repo root (by `discover_copybooks.sh` or manually)
+/// and provides per-project settings that `cobol2rust transpile --workspace`
+/// reads automatically.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct ProjectConfig {
+    /// Workspace-level settings.
+    #[serde(default)]
+    pub workspace: WorkspaceConfig,
+}
+
+/// Workspace configuration section of `.cobol2rust.toml`.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[allow(dead_code)]
+pub struct WorkspaceConfig {
+    /// Directories containing copybook files, relative to the project root.
+    #[serde(default)]
+    pub copy_paths: Vec<PathBuf>,
+
+    /// File extensions to scan (default: cbl, cob, cobol).
+    #[serde(default)]
+    pub extensions: Vec<String>,
+
+    /// Glob patterns to exclude.
+    #[serde(default)]
+    pub exclude: Vec<String>,
+}
+
+/// Default config file name.
+pub const PROJECT_CONFIG_FILE: &str = ".cobol2rust.toml";
+
+/// Load a `.cobol2rust.toml` from the given directory, if it exists.
+///
+/// Returns `None` if the file does not exist. Returns an error if the
+/// file exists but cannot be parsed.
+pub fn load_project_config(dir: &Path) -> Result<Option<ProjectConfig>> {
+    let config_path = dir.join(PROJECT_CONFIG_FILE);
+    if !config_path.exists() {
+        return Ok(None);
+    }
+
+    let content = fs::read_to_string(&config_path)
+        .into_diagnostic()
+        .wrap_err_with(|| format!("failed to read {}", config_path.display()))?;
+
+    let config: ProjectConfig = toml::from_str(&content)
+        .map_err(|e| miette!("failed to parse {}: {e}", config_path.display()))?;
+
+    Ok(Some(config))
+}
+
+/// Resolve copy_paths from a ProjectConfig relative to the project root,
+/// returning absolute PathBufs.
+pub fn resolve_copy_paths(dir: &Path, config: &ProjectConfig) -> Vec<PathBuf> {
+    config
+        .workspace
+        .copy_paths
+        .iter()
+        .map(|p| {
+            if p.is_absolute() {
+                p.clone()
+            } else {
+                dir.join(p)
+            }
+        })
+        .filter(|p| p.is_dir())
+        .collect()
 }
 
 /// Scan a directory for `.cbl` files and analyze the workspace.
