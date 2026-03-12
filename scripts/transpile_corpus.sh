@@ -160,7 +160,7 @@ for repo_dir in "${REPO_DIRS[@]}"; do
     ELAPSED=$(($(date +%s) - START_TIME))
     if [ "$COUNTER" -gt 0 ] && [ "$ELAPSED" -gt 0 ]; then
         RATE=$(echo "scale=1; $COUNTER / $ELAPSED" | bc 2>/dev/null || echo "?")
-        REMAINING=$(echo "scale=0; ($TOTAL_REPOS - $COUNTER) / ($COUNTER / $ELAPSED)" | bc 2>/dev/null || echo "?")
+        REMAINING=$(echo "scale=0; ($TOTAL_REPOS - $COUNTER) * $ELAPSED / $COUNTER" | bc 2>/dev/null || echo "?")
         log "  Progress: $COUNTER/$TOTAL_REPOS repos, ${RATE} repos/sec, ETA: ${REMAINING}s"
     fi
 done
