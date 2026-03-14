@@ -3,11 +3,15 @@
 //! Walks a repos directory (2 levels deep), discovers repos with COBOL files,
 //! and runs the pipeline on each. Merges all per-repo NDJSON into a single
 //! reports directory for aggregate reporting.
+//!
+//! Repos are processed concurrently using `--concurrent N` worker threads.
 
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Mutex;
 use std::time::Instant;
 
 use clap::Args;
@@ -29,9 +33,13 @@ pub struct CorpusArgs {
     #[arg(short, long)]
     pub output: Option<PathBuf>,
 
-    /// Override total parallel workers.
+    /// Rayon thread pool size for within-repo file parallelism.
     #[arg(short = 'j', long)]
     pub jobs: Option<usize>,
+
+    /// Number of repos to process concurrently (default: cpus/2, max 12).
+    #[arg(short = 'n', long)]
+    pub concurrent: Option<usize>,
 
     /// Run a specific phase per repo: 0,1,2,3,4,5.
     #[arg(long)]
@@ -53,6 +61,13 @@ struct RepoEntry {
     rel_path: String,
     /// Absolute path to the repo directory.
     abs_path: PathBuf,
+}
+
+/// Result from processing a single repo.
+struct RepoResult {
+    repo_output: PathBuf,
+    success: bool,
+    meta: Option<ScanMeta>,
 }
 
 /// Run the `corpus` subcommand.
@@ -79,19 +94,32 @@ pub fn run(cli: &Cli, args: &CorpusArgs) -> Result<ExitCode> {
     };
 
     let jobs = args.jobs.unwrap_or_else(num_cpus::get);
+    let concurrent = args
+        .concurrent
+        .unwrap_or_else(|| (num_cpus::get() / 2).max(1).min(12));
 
     if !cli.quiet {
         eprintln!("cobol2rust corpus: {}", args.repos_dir.display());
-        eprintln!("  output:  {}", output_root.display());
-        eprintln!("  jobs:    {}", jobs);
+        eprintln!("  output:     {}", output_root.display());
+        eprintln!("  jobs:       {} (rayon thread pool)", jobs);
+        eprintln!("  concurrent: {} repos in parallel", concurrent);
         eprintln!();
     }
+
+    // Set up rayon global pool BEFORE spawning repo threads
+    rayon::ThreadPoolBuilder::new()
+        .num_threads(jobs)
+        .build_global()
+        .ok();
 
     // Discover repos
     let repos = discover_repos(&args.repos_dir)?;
 
     if repos.is_empty() {
-        eprintln!("No repos with COBOL files found in {}", args.repos_dir.display());
+        eprintln!(
+            "No repos with COBOL files found in {}",
+            args.repos_dir.display()
+        );
         return Ok(ExitCode::SUCCESS);
     }
 
@@ -108,7 +136,7 @@ pub fn run(cli: &Cli, args: &CorpusArgs) -> Result<ExitCode> {
 
     // Set up log file
     let log_path = output_root.join("corpus.log");
-    let mut log_file = fs::File::create(&log_path)
+    let log_file = fs::File::create(&log_path)
         .into_diagnostic()
         .map_err(|e| miette!("failed to create log file: {e}"))?;
 
@@ -121,97 +149,154 @@ pub fn run(cli: &Cli, args: &CorpusArgs) -> Result<ExitCode> {
         }
     };
 
-    // Process each repo
+    // Shared state for parallel processing
     let total_repos = repos.len();
+    let next_repo = AtomicUsize::new(0);
+    let completed = AtomicUsize::new(0);
+    let results: Mutex<Vec<RepoResult>> = Mutex::new(Vec::with_capacity(total_repos));
+    let log_mutex: Mutex<fs::File> = Mutex::new(log_file);
+    let quiet = cli.quiet;
+    let verbose = cli.verbose;
+
+    // Cap concurrent to total repos
+    let concurrent = concurrent.min(total_repos);
+
+    // Process repos in parallel using scoped threads
+    std::thread::scope(|s| {
+        for _ in 0..concurrent {
+            s.spawn(|| {
+                loop {
+                    let idx = next_repo.fetch_add(1, Ordering::Relaxed);
+                    if idx >= total_repos {
+                        break;
+                    }
+                    let repo = &repos[idx];
+                    let repo_output = output_root.join(&repo.rel_path);
+
+                    // Load per-repo .cobol2rust.toml
+                    let project_config =
+                        load_project_config(&repo.abs_path).unwrap_or(None);
+
+                    // Build resolved config for this repo
+                    let config = ResolvedConfig {
+                        project_dir: repo.abs_path.clone(),
+                        output: repo_output.clone(),
+                        jobs,
+                        continue_on_error: true,
+                        incremental: true,
+                        runtime_path: None,
+                        copy_paths: project_config
+                            .as_ref()
+                            .map(|c| {
+                                crate::workspace::resolve_copy_paths(&repo.abs_path, c)
+                            })
+                            .unwrap_or_default(),
+                        extensions: project_config
+                            .as_ref()
+                            .and_then(|c| {
+                                if c.workspace.extensions.is_empty() {
+                                    None
+                                } else {
+                                    Some(c.workspace.extensions.clone())
+                                }
+                            })
+                            .unwrap_or_else(|| {
+                                vec!["cbl".into(), "cob".into(), "cobol".into()]
+                            }),
+                        exclude: project_config
+                            .as_ref()
+                            .map(|c| c.workspace.exclude.clone())
+                            .unwrap_or_default(),
+                        phase_range: phase_range.clone(),
+                        verbose,
+                        quiet: true,
+                        suppress_reports: true,
+                    };
+
+                    // Run pipeline for this repo
+                    let (success, error_msg) = match pipeline::run_pipeline(&config) {
+                        Ok(_) => (true, None),
+                        Err(e) => (false, Some(format!("{e}"))),
+                    };
+
+                    // Load meta from repo reports
+                    let repo_reports = repo_output.join("reports");
+                    let meta = if repo_reports.is_dir() {
+                        load_repo_meta(&repo_reports)
+                    } else {
+                        None
+                    };
+
+                    // Progress + log
+                    let done = completed.fetch_add(1, Ordering::Relaxed) + 1;
+                    let status = if success { "ok" } else { "FAIL" };
+
+                    if !quiet {
+                        let elapsed = start.elapsed().as_secs();
+                        let eta = if done > 0 && elapsed > 0 {
+                            (total_repos - done) as u64 * elapsed / done as u64
+                        } else {
+                            0
+                        };
+                        let eta_min = eta / 60;
+                        let eta_sec = eta % 60;
+                        eprintln!(
+                            "[{}/{}] {} [{}] ETA: {}m{}s",
+                            done, total_repos, repo.rel_path, status, eta_min, eta_sec
+                        );
+                    }
+
+                    if let Ok(mut log) = log_mutex.lock() {
+                        let _ = writeln!(
+                            log,
+                            "[{}/{}] {} [{}]",
+                            done, total_repos, repo.rel_path, status
+                        );
+                        if let Some(ref e) = error_msg {
+                            let _ = writeln!(log, "  ERROR: {}", e);
+                        }
+                    }
+
+                    // Store result for post-processing
+                    results.lock().unwrap().push(RepoResult {
+                        repo_output,
+                        success,
+                        meta,
+                    });
+                }
+            });
+        }
+    });
+
+    // -- All workers done. Merge results sequentially. --
+
+    let results = results.into_inner().unwrap();
+    let mut log_file = log_mutex.into_inner().unwrap();
+
     let mut succeeded_repos: u32 = 0;
     let mut failed_repos: u32 = 0;
-    let skipped_repos: u32 = 0;
     let mut total_files: u64 = 0;
     let mut total_succeeded: u64 = 0;
     let mut total_failed: u64 = 0;
 
-    for (idx, repo) in repos.iter().enumerate() {
-        let counter = idx + 1;
-        let repo_output = output_root.join(&repo.rel_path);
-
-        let msg = format!("[{}/{}] {}", counter, total_repos, repo.rel_path);
-        if !cli.quiet {
-            eprintln!("{}", msg);
-        }
-        let _ = writeln!(log_file, "{}", msg);
-
-        // Load per-repo .cobol2rust.toml
-        let project_config = load_project_config(&repo.abs_path).unwrap_or(None);
-
-        // Build resolved config for this repo
-        let config = ResolvedConfig {
-            project_dir: repo.abs_path.clone(),
-            output: repo_output.clone(),
-            jobs,
-            continue_on_error: true,
-            incremental: true,
-            runtime_path: None,
-            copy_paths: project_config
-                .as_ref()
-                .map(|c| {
-                    crate::workspace::resolve_copy_paths(&repo.abs_path, c)
-                })
-                .unwrap_or_default(),
-            extensions: project_config
-                .as_ref()
-                .and_then(|c| {
-                    if c.workspace.extensions.is_empty() {
-                        None
-                    } else {
-                        Some(c.workspace.extensions.clone())
-                    }
-                })
-                .unwrap_or_else(|| vec!["cbl".into(), "cob".into(), "cobol".into()]),
-            exclude: project_config
-                .as_ref()
-                .map(|c| c.workspace.exclude.clone())
-                .unwrap_or_default(),
-            phase_range: phase_range.clone(),
-            verbose: cli.verbose,
-            quiet: true, // suppress per-repo noise in corpus mode
-            suppress_reports: true, // reports only on merged data
-        };
-
-        // Run pipeline for this repo
-        match pipeline::run_pipeline(&config) {
-            Ok(_) => {
-                succeeded_repos += 1;
-            }
-            Err(e) => {
-                failed_repos += 1;
-                let err_msg = format!("  FAILED: {e}");
-                eprintln!("{}", err_msg);
-                let _ = writeln!(log_file, "{}", err_msg);
-            }
+    for result in &results {
+        if result.success {
+            succeeded_repos += 1;
+        } else {
+            failed_repos += 1;
         }
 
-        // Always merge NDJSON (even from failed repos)
-        let repo_reports = repo_output.join("reports");
+        // Merge NDJSON (even from failed repos)
+        let repo_reports = result.repo_output.join("reports");
         if repo_reports.is_dir() {
             merge_ndjson(&repo_reports, &merged_reports, &mut log_file);
-            // Extract counts from scan_meta.json
-            if let Some(meta) = load_repo_meta(&repo_reports) {
-                total_files += meta.total_files.max(0) as u64;
-                total_succeeded += meta.processed_files.max(0) as u64;
-                total_failed += meta.failed_files.max(0) as u64;
-            }
         }
 
-        // Progress estimate
-        if !cli.quiet {
-            let elapsed = start.elapsed().as_secs();
-            if counter > 0 && elapsed > 0 {
-                let remaining = (total_repos - counter) as u64 * elapsed / counter as u64;
-                eprintln!(
-                    "  Progress: {}/{} repos, ETA: {}s",
-                    counter, total_repos, remaining
-                );
-            }
+        // Accumulate counts from scan_meta.json
+        if let Some(ref meta) = result.meta {
+            total_files += meta.total_files.max(0) as u64;
+            total_succeeded += meta.processed_files.max(0) as u64;
+            total_failed += meta.failed_files.max(0) as u64;
         }
     }
 
@@ -232,12 +317,16 @@ pub fn run(cli: &Cli, args: &CorpusArgs) -> Result<ExitCode> {
         incremental: true,
     };
 
-    let meta_json = serde_json::to_string_pretty(&meta)
-        .unwrap_or_else(|_| "{}".to_string());
+    let meta_json =
+        serde_json::to_string_pretty(&meta).unwrap_or_else(|_| "{}".to_string());
     let _ = fs::write(merged_reports.join("scan_meta.json"), &meta_json);
 
     // Ensure empty NDJSON files exist for DuckDB loading
-    for name in &["parse_results.ndjson", "copybooks.ndjson", "transpile_results.ndjson"] {
+    for name in &[
+        "parse_results.ndjson",
+        "copybooks.ndjson",
+        "transpile_results.ndjson",
+    ] {
         let path = merged_reports.join(name);
         if !path.exists() {
             let _ = fs::File::create(&path);
@@ -253,8 +342,8 @@ pub fn run(cli: &Cli, args: &CorpusArgs) -> Result<ExitCode> {
         eprintln!("=========================================");
         eprintln!("Duration:        {:.1}s", elapsed.as_secs_f64());
         eprintln!(
-            "Repos:           {} total, {} succeeded, {} failed, {} skipped",
-            total_repos, succeeded_repos, failed_repos, skipped_repos
+            "Repos:           {} total, {} succeeded, {} failed",
+            total_repos, succeeded_repos, failed_repos
         );
         eprintln!(
             "Files:           {} total, {} succeeded, {} failed",
@@ -375,11 +464,7 @@ fn has_cobol_files(dir: &Path, depth: usize, max_depth: usize) -> bool {
 }
 
 /// Merge per-repo NDJSON files into the merged reports directory.
-fn merge_ndjson(
-    repo_reports: &Path,
-    merged_reports: &Path,
-    log_file: &mut fs::File,
-) {
+fn merge_ndjson(repo_reports: &Path, merged_reports: &Path, log_file: &mut fs::File) {
     let ndjson_files = [
         "transpile_results.ndjson",
         "files.ndjson",
@@ -405,23 +490,29 @@ fn merge_ndjson(
             .append(true)
             .open(&dst)
         {
-            Ok(mut dst_file) => {
-                match fs::File::open(&src) {
-                    Ok(src_file) => {
-                        let reader = BufReader::new(src_file);
-                        for line in reader.lines().flatten() {
-                            if !line.is_empty() {
-                                let _ = writeln!(dst_file, "{}", line);
-                            }
+            Ok(mut dst_file) => match fs::File::open(&src) {
+                Ok(src_file) => {
+                    let reader = BufReader::new(src_file);
+                    for line in reader.lines().flatten() {
+                        if !line.is_empty() {
+                            let _ = writeln!(dst_file, "{}", line);
                         }
                     }
-                    Err(e) => {
-                        let _ = writeln!(log_file, "  warning: failed to read {}: {e}", src.display());
-                    }
                 }
-            }
+                Err(e) => {
+                    let _ = writeln!(
+                        log_file,
+                        "  warning: failed to read {}: {e}",
+                        src.display()
+                    );
+                }
+            },
             Err(e) => {
-                let _ = writeln!(log_file, "  warning: failed to open {}: {e}", dst.display());
+                let _ = writeln!(
+                    log_file,
+                    "  warning: failed to open {}: {e}",
+                    dst.display()
+                );
             }
         }
     }
