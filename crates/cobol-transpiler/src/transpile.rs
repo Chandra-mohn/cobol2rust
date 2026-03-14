@@ -42,6 +42,20 @@ pub fn transpile_with_diagnostics(source: &str) -> Result<TranspileResult> {
         .filter(|d| d.category == crate::diagnostics::DiagCategory::UnhandledStatement)
         .count();
 
+    // Collect verb usage from the AST
+    let mut verbs_used = std::collections::HashSet::new();
+    collect_verbs(&program, &mut verbs_used);
+
+    // Extract unsupported verbs from diagnostics
+    let mut verbs_unsupported = std::collections::HashSet::new();
+    for d in &diagnostics {
+        if d.category == crate::diagnostics::DiagCategory::UnhandledStatement {
+            if let Some(verb) = d.message.strip_prefix("Unhandled COBOL statement: ") {
+                verbs_unsupported.insert(verb.to_string());
+            }
+        }
+    }
+
     let stats = TranspileStats {
         total_statements,
         mapped_statements: total_statements.saturating_sub(unhandled_count),
@@ -49,7 +63,8 @@ pub fn transpile_with_diagnostics(source: &str) -> Result<TranspileResult> {
             .data_division
             .as_ref()
             .map_or(0, |dd| count_data_entries(&dd.working_storage)),
-        ..Default::default()
+        verbs_used,
+        verbs_unsupported,
     };
 
     Ok(TranspileResult::success(code, diagnostics, stats))
@@ -107,6 +122,102 @@ fn count_data_entries(entries: &[crate::ast::DataEntry]) -> usize {
         .iter()
         .map(|e| 1 + count_data_entries(&e.children))
         .sum()
+}
+
+/// Collect verb names from the AST's procedure division.
+fn collect_verbs(
+    program: &crate::ast::CobolProgram,
+    verbs: &mut std::collections::HashSet<String>,
+) {
+    let Some(ref pd) = program.procedure_division else {
+        return;
+    };
+    for section in &pd.sections {
+        for para in &section.paragraphs {
+            for sentence in &para.sentences {
+                collect_verbs_recursive(&sentence.statements, verbs);
+            }
+        }
+    }
+    for para in &pd.paragraphs {
+        for sentence in &para.sentences {
+            collect_verbs_recursive(&sentence.statements, verbs);
+        }
+    }
+}
+
+/// Extract verb name from a Statement and recurse into nested bodies.
+fn collect_verbs_recursive(
+    stmts: &[crate::ast::Statement],
+    verbs: &mut std::collections::HashSet<String>,
+) {
+    use crate::ast::Statement;
+    for stmt in stmts {
+        let verb = match stmt {
+            Statement::Move(_) => "MOVE",
+            Statement::Display(_) => "DISPLAY",
+            Statement::Accept(_) => "ACCEPT",
+            Statement::Compute(_) => "COMPUTE",
+            Statement::Add(_) => "ADD",
+            Statement::Subtract(_) => "SUBTRACT",
+            Statement::Multiply(_) => "MULTIPLY",
+            Statement::Divide(_) => "DIVIDE",
+            Statement::If(_) => "IF",
+            Statement::Evaluate(_) => "EVALUATE",
+            Statement::Perform(_) => "PERFORM",
+            Statement::GoTo(_) => "GO TO",
+            Statement::Call(_) => "CALL",
+            Statement::Cancel(_) => "CANCEL",
+            Statement::Open(_) => "OPEN",
+            Statement::Close(_) => "CLOSE",
+            Statement::Read(_) => "READ",
+            Statement::Write(_) => "WRITE",
+            Statement::Rewrite(_) => "REWRITE",
+            Statement::Delete(_) => "DELETE",
+            Statement::Start(_) => "START",
+            Statement::Sort(_) => "SORT",
+            Statement::Merge(_) => "MERGE",
+            Statement::Release(_) => "RELEASE",
+            Statement::Return(_) => "RETURN",
+            Statement::String(_) => "STRING",
+            Statement::Unstring(_) => "UNSTRING",
+            Statement::Inspect(_) => "INSPECT",
+            Statement::Initialize(_) => "INITIALIZE",
+            Statement::Set(_) => "SET",
+            Statement::StopRun => "STOP RUN",
+            Statement::GoBack => "GOBACK",
+            Statement::Continue => "CONTINUE",
+            Statement::ExitProgram => "EXIT PROGRAM",
+            Statement::ExitParagraph => "EXIT PARAGRAPH",
+            Statement::ExitSection => "EXIT SECTION",
+            Statement::NextSentence => "NEXT SENTENCE",
+            Statement::ExecSql(_) => "EXEC SQL",
+            Statement::Alter(_) => "ALTER",
+        };
+        verbs.insert(verb.to_string());
+
+        // Recurse into nested bodies
+        match stmt {
+            Statement::If(s) => {
+                collect_verbs_recursive(&s.then_body, verbs);
+                collect_verbs_recursive(&s.else_body, verbs);
+            }
+            Statement::Evaluate(s) => {
+                for branch in &s.when_branches {
+                    collect_verbs_recursive(&branch.body, verbs);
+                }
+                collect_verbs_recursive(&s.when_other, verbs);
+            }
+            Statement::Perform(s) => {
+                collect_verbs_recursive(&s.body, verbs);
+            }
+            Statement::Call(s) => {
+                collect_verbs_recursive(&s.on_exception, verbs);
+                collect_verbs_recursive(&s.not_on_exception, verbs);
+            }
+            _ => {}
+        }
+    }
 }
 
 /// Configuration for COPY statement expansion and transpilation.
@@ -173,6 +284,20 @@ pub fn transpile_with_config_and_diagnostics(
         .filter(|d| d.category == crate::diagnostics::DiagCategory::UnhandledStatement)
         .count();
 
+    // Collect verb usage from the AST
+    let mut verbs_used = std::collections::HashSet::new();
+    collect_verbs(&program, &mut verbs_used);
+
+    // Extract unsupported verbs from diagnostics
+    let mut verbs_unsupported = std::collections::HashSet::new();
+    for d in &diagnostics {
+        if d.category == crate::diagnostics::DiagCategory::UnhandledStatement {
+            if let Some(verb) = d.message.strip_prefix("Unhandled COBOL statement: ") {
+                verbs_unsupported.insert(verb.to_string());
+            }
+        }
+    }
+
     let stats = TranspileStats {
         total_statements,
         mapped_statements: total_statements.saturating_sub(unhandled_count),
@@ -180,7 +305,8 @@ pub fn transpile_with_config_and_diagnostics(
             .data_division
             .as_ref()
             .map_or(0, |dd| count_data_entries(&dd.working_storage)),
-        ..Default::default()
+        verbs_used,
+        verbs_unsupported,
     };
 
     Ok(TranspileResult::success(code, diagnostics, stats))

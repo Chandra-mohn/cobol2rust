@@ -710,6 +710,41 @@ fn generate_program_cargo_toml(
     out
 }
 
+/// Run workspace transpilation from pipeline ResolvedConfig.
+///
+/// This adapts the pipeline config into the existing run_workspace flow.
+pub fn run_workspace_pipeline(
+    config: &crate::pipeline::config::ResolvedConfig,
+) -> Result<ExitCode> {
+    let cli = Cli {
+        command: crate::Command::Transpile(TranspileArgs {
+            input: config.project_dir.clone(),
+            output: Some(config.output.clone()),
+            main: false,
+            lib: false,
+            library_map: vec![],
+            workspace: true,
+            continue_on_error: config.continue_on_error,
+            manifest: None,
+            runtime_path: config.runtime_path.clone(),
+            parallel: true,
+            jobs: Some(config.jobs),
+            incremental: config.incremental,
+        }),
+        copybook_paths: config.copy_paths.clone(),
+        source_format: crate::SourceFormatArg::Auto,
+        verbose: config.verbose,
+        quiet: config.quiet,
+        color: crate::ColorArg::Auto,
+        config: None,
+    };
+    if let crate::Command::Transpile(ref args) = cli.command {
+        run_workspace(&cli, args)
+    } else {
+        unreachable!()
+    }
+}
+
 /// Create the copybooks crate with placeholder lib.rs.
 fn create_copybooks_crate(
     output_dir: &Path,

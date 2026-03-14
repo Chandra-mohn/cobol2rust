@@ -117,32 +117,6 @@ for repo_dir in "${REPO_DIRS[@]}"; do
         2>"$REPO_ERR"; then
 
         SUCCEEDED_REPOS=$((SUCCEEDED_REPOS + 1))
-
-        # Merge NDJSON results into the unified reports directory
-        repo_reports="${repo_output}/reports"
-        if [ -d "$repo_reports" ]; then
-            # Append transpile results with repo_name prefix
-            if [ -f "$repo_reports/transpile_results.ndjson" ]; then
-                cat "$repo_reports/transpile_results.ndjson" >> "$MERGED_REPORTS/transpile_results.ndjson"
-            fi
-            if [ -f "$repo_reports/files.ndjson" ]; then
-                cat "$repo_reports/files.ndjson" >> "$MERGED_REPORTS/files.ndjson"
-            fi
-            if [ -f "$repo_reports/diagnostics.ndjson" ]; then
-                cat "$repo_reports/diagnostics.ndjson" >> "$MERGED_REPORTS/diagnostics.ndjson"
-            fi
-            if [ -f "$repo_reports/coverage.ndjson" ]; then
-                cat "$repo_reports/coverage.ndjson" >> "$MERGED_REPORTS/coverage.ndjson"
-            fi
-        fi
-
-        # Extract counts from the repo's meta
-        if [ -f "$repo_reports/scan_meta.json" ]; then
-            repo_succeeded=$(grep -o '"processed_files":[0-9]*' "$repo_reports/scan_meta.json" 2>/dev/null | cut -d: -f2 || echo 0)
-            repo_failed=$(grep -o '"failed_files":[0-9]*' "$repo_reports/scan_meta.json" 2>/dev/null | cut -d: -f2 || echo 0)
-            TOTAL_SUCCEEDED=$((TOTAL_SUCCEEDED + repo_succeeded))
-            TOTAL_FAILED=$((TOTAL_FAILED + repo_failed))
-        fi
     else
         FAILED_REPOS=$((FAILED_REPOS + 1))
         log "  FAILED:"
@@ -151,6 +125,24 @@ for repo_dir in "${REPO_DIRS[@]}"; do
             tail -10 "$REPO_ERR" | while IFS= read -r line; do
                 log "    $line"
             done
+        fi
+    fi
+
+    # Always merge NDJSON results (even from repos with partial failures)
+    repo_reports="${repo_output}/reports"
+    if [ -d "$repo_reports" ]; then
+        for ndjson_file in transpile_results files diagnostics coverage; do
+            if [ -f "$repo_reports/${ndjson_file}.ndjson" ]; then
+                cat "$repo_reports/${ndjson_file}.ndjson" >> "$MERGED_REPORTS/${ndjson_file}.ndjson"
+            fi
+        done
+
+        # Extract counts from the repo's meta (handle JSON with spaces)
+        if [ -f "$repo_reports/scan_meta.json" ]; then
+            repo_succeeded=$(grep -o '"processed_files"[[:space:]]*:[[:space:]]*[0-9]*' "$repo_reports/scan_meta.json" 2>/dev/null | grep -o '[0-9]*$' || echo 0)
+            repo_failed=$(grep -o '"failed_files"[[:space:]]*:[[:space:]]*[0-9]*' "$repo_reports/scan_meta.json" 2>/dev/null | grep -o '[0-9]*$' || echo 0)
+            TOTAL_SUCCEEDED=$((TOTAL_SUCCEEDED + repo_succeeded))
+            TOTAL_FAILED=$((TOTAL_FAILED + repo_failed))
         fi
     fi
 

@@ -14,10 +14,10 @@ pub mod args;
 mod db;
 pub mod discover;
 pub mod ndjson;
-mod phase1;
-mod phase2;
+pub mod phase1;
+pub mod phase2;
 #[cfg(feature = "duckdb")]
-mod phase3;
+pub mod phase3;
 #[cfg(feature = "duckdb")]
 mod status;
 mod worker;

@@ -3,10 +3,13 @@
 mod analyze;
 mod check;
 mod compile_cmd;
+mod corpus_cmd;
 mod diff_cmd;
 mod init_cmd;
 mod parse_cmd;
+mod pipeline;
 mod preprocess;
+mod project_cmd;
 mod scan;
 mod transpile_cmd;
 mod workspace;
@@ -82,6 +85,10 @@ pub enum Command {
     Compile(compile_cmd::CompileArgs),
     /// Compare transpilation outputs between two COBOL files.
     Diff(diff_cmd::DiffArgs),
+    /// Run the full pipeline for a single COBOL project.
+    Project(project_cmd::ProjectArgs),
+    /// Run the pipeline across a multi-repo COBOL corpus.
+    Corpus(corpus_cmd::CorpusArgs),
     /// Scan an enterprise COBOL codebase with DuckDB persistence.
     Scan(scan::args::ScanArgs),
     /// Show scan progress and history from DuckDB.
@@ -122,6 +129,8 @@ fn main() -> ExitCode {
     }
 
     let result = match cli.command {
+        Command::Project(ref args) => project_cmd::run(&cli, args),
+        Command::Corpus(ref args) => corpus_cmd::run(&cli, args),
         Command::Transpile(ref args) => transpile_cmd::run(&cli, args),
         Command::Check(ref args) => check::run(&cli, args),
         Command::Preprocess(ref args) => preprocess::run(&cli, args),

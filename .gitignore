@@ -36,3 +36,5 @@ Thumbs.db
 *.profdata
 perf.data
 flamegraph.svg
+
+corpus-data/

@@ -96,13 +96,17 @@ pub struct WorkspaceAnalysis {
 /// Project configuration loaded from `.cobol2rust.toml`.
 ///
 /// This file is placed in a repo root (by `discover_copybooks.sh` or manually)
-/// and provides per-project settings that `cobol2rust transpile --workspace`
-/// reads automatically.
+/// and provides per-project settings that `cobol2rust project` and
+/// `cobol2rust transpile --workspace` read automatically.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct ProjectConfig {
     /// Workspace-level settings.
     #[serde(default)]
     pub workspace: WorkspaceConfig,
+
+    /// Pipeline execution settings.
+    #[serde(default)]
+    pub pipeline: PipelineConfig,
 }
 
 /// Workspace configuration section of `.cobol2rust.toml`.
@@ -120,6 +124,25 @@ pub struct WorkspaceConfig {
     /// Glob patterns to exclude.
     #[serde(default)]
     pub exclude: Vec<String>,
+}
+
+/// Pipeline execution configuration section of `.cobol2rust.toml`.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct PipelineConfig {
+    /// Rust output directory (default: ./rust-out).
+    pub output: Option<PathBuf>,
+
+    /// Number of parallel workers (default: num CPUs).
+    pub jobs: Option<usize>,
+
+    /// Skip files that fail, report at end (default: true).
+    pub continue_on_error: Option<bool>,
+
+    /// Skip unchanged files based on mtime (default: true).
+    pub incremental: Option<bool>,
+
+    /// Path to cobol-runtime crate (for path dependency).
+    pub runtime_path: Option<PathBuf>,
 }
 
 /// Default config file name.
