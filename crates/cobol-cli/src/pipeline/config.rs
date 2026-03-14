@@ -35,6 +35,57 @@ pub struct ResolvedConfig {
     pub quiet: bool,
     /// Suppress phase 3/5 report output (used in corpus mode).
     pub suppress_reports: bool,
+    /// Optional prefix for log messages (e.g. "github/repo-name").
+    /// When set, all phase progress messages include a timestamp and this prefix.
+    pub log_prefix: Option<String>,
+}
+
+/// Print a phase-progress message.
+///
+/// When `prefix` is `Some`, the message is formatted as:
+///   `2026-03-14T08:23:15 [github/repo-name] Discovering files...`
+///
+/// When `prefix` is `None`, the message is printed as-is via `eprintln!`.
+pub fn phase_log(prefix: &Option<String>, msg: &str) {
+    if let Some(pfx) = prefix {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        // Format as ISO 8601 (UTC approximate).
+        let secs_per_day = 86400u64;
+        let secs_per_hour = 3600u64;
+        let secs_per_min = 60u64;
+        let days_since_epoch = now / secs_per_day;
+        let time_of_day = now % secs_per_day;
+        let hours = time_of_day / secs_per_hour;
+        let minutes = (time_of_day % secs_per_hour) / secs_per_min;
+        let seconds = time_of_day % secs_per_min;
+        // Compute year/month/day from days since epoch.
+        let (year, month, day) = days_to_date(days_since_epoch);
+        eprintln!(
+            "{:04}-{:02}-{:02}T{:02}:{:02}:{:02} [{}] {}",
+            year, month, day, hours, minutes, seconds, pfx, msg
+        );
+    } else {
+        eprintln!("{}", msg);
+    }
+}
+
+/// Convert days since Unix epoch to (year, month, day).
+fn days_to_date(days: u64) -> (u64, u64, u64) {
+    // Civil calendar algorithm (Euclidean affine).
+    let z = days + 719468;
+    let era = z / 146097;
+    let doe = z - era * 146097;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    (y, m, d)
 }
 
 /// Which phases to run.
@@ -172,5 +223,6 @@ pub fn resolve_config(
         verbose: overrides.verbose,
         quiet: overrides.quiet,
         suppress_reports: false,
+        log_prefix: None,
     }
 }

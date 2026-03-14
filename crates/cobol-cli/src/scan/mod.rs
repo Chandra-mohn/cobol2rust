@@ -258,6 +258,7 @@ fn run_ndjson(cli: &Cli, scan_args: &ScanArgs) -> Result<ExitCode> {
                 &shutdown,
                 scan_args.batch_size,
                 is_resume,
+                None,
             ) {
                 eprintln!("  Phase 1 error: {e}");
                 had_error = true;
@@ -278,6 +279,7 @@ fn run_ndjson(cli: &Cli, scan_args: &ScanArgs) -> Result<ExitCode> {
                 &failed,
                 &shutdown,
                 scan_args.batch_size,
+                None,
             ) {
                 eprintln!("  Phase 2 error: {e}");
                 had_error = true;

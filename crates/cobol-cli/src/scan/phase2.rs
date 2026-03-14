@@ -184,29 +184,36 @@ pub fn run_phase2_ndjson(
     failed_counter: &Arc<AtomicU64>,
     shutdown: &Arc<AtomicBool>,
     _batch_size: usize,
+    log_prefix: Option<&str>,
 ) -> Result<()> {
+    let pfx = log_prefix.map(|s| s.to_string());
     // Get files that passed Phase 1 but have no coverage yet.
     let work_items = ndjson::load_parseable_files(output_dir)?;
 
     let total_work = work_items.len();
-    eprintln!("  Phase 2: {} files for coverage analysis", total_work);
+    crate::pipeline::config::phase_log(&pfx, &format!("Phase 2: {} files for coverage analysis", total_work));
 
     if total_work == 0 {
-        eprintln!("  No files to analyze (all covered or none parseable).");
+        crate::pipeline::config::phase_log(&pfx, "No files to analyze (all covered or none parseable).");
         return Ok(());
     }
 
     processed_counter.store(0, Ordering::Relaxed);
     failed_counter.store(0, Ordering::Relaxed);
 
-    let pb = ProgressBar::new(total_work as u64);
-    pb.set_style(
-        ProgressStyle::with_template(
-            "  Phase 2 [{bar:40}] {pos}/{len} ({per_sec}) ETA: {eta}",
-        )
-        .unwrap()
-        .progress_chars("=> "),
-    );
+    let pb = if log_prefix.is_some() {
+        ProgressBar::hidden()
+    } else {
+        let pb = ProgressBar::new(total_work as u64);
+        pb.set_style(
+            ProgressStyle::with_template(
+                "  Phase 2 [{bar:40}] {pos}/{len} ({per_sec}) ETA: {eta}",
+            )
+            .unwrap()
+            .progress_chars("=> "),
+        );
+        pb
+    };
 
     // Multi-process pipeline: N workers with --with-coverage.
     let num_workers = rayon::current_num_threads();
@@ -324,7 +331,7 @@ pub fn run_phase2_ndjson(
             "error" => {
                 let path = val.get("absolute_path").and_then(|v| v.as_str()).unwrap_or("?");
                 let msg = val.get("error").and_then(|v| v.as_str()).unwrap_or("unknown");
-                eprintln!("  [ERR] {path}: {msg}");
+                crate::pipeline::config::phase_log(&pfx, &format!("[ERR] {path}: {msg}"));
                 failed_counter.fetch_add(1, Ordering::Relaxed);
             }
             _ => {}
@@ -356,9 +363,9 @@ pub fn run_phase2_ndjson(
 
     let total_processed = processed_counter.load(Ordering::Relaxed) as usize;
     let total_failed = failed_counter.load(Ordering::Relaxed) as usize;
-    eprintln!(
-        "  Phase 2 complete: {} analyzed, {} failed",
-        total_processed, total_failed
+    crate::pipeline::config::phase_log(
+        &pfx,
+        &format!("Phase 2 complete: {} analyzed, {} failed", total_processed, total_failed),
     );
 
     Ok(())

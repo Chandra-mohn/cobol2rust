@@ -280,9 +280,11 @@ pub fn run_phase1_ndjson(
     shutdown: &Arc<AtomicBool>,
     _batch_size: usize,
     resume: bool,
+    log_prefix: Option<&str>,
 ) -> Result<()> {
+    let pfx = log_prefix.map(|s| s.to_string());
     // Register all files in NDJSON (fast: pure sequential I/O).
-    eprintln!("  Registering {} files...", files.len());
+    crate::pipeline::config::phase_log(&pfx, &format!("Registering {} files...", files.len()));
     let file_id_map = if resume {
         let mut existing = ndjson::load_file_id_map(output_dir)?;
         let mut new_files: Vec<&DiscoveredFile> = Vec::new();
@@ -302,7 +304,7 @@ pub fn run_phase1_ndjson(
     } else {
         writer.register_files(files, run_id)?
     };
-    eprintln!("  Registration complete ({} files indexed)", file_id_map.len());
+    crate::pipeline::config::phase_log(&pfx, &format!("Registration complete ({} files indexed)", file_id_map.len()));
 
     // Build work items (source files only, skip already-processed for resume).
     let processed_paths: HashSet<String> = if resume {
@@ -333,23 +335,28 @@ pub fn run_phase1_ndjson(
     }
 
     let total_work = work_items.len();
-    eprintln!(
-        "  Phase 1: {} files to parse ({} skipped)",
-        total_work, skipped
+    crate::pipeline::config::phase_log(
+        &pfx,
+        &format!("Phase 1: {} files to parse ({} skipped)", total_work, skipped),
     );
 
     if total_work == 0 {
         return Ok(());
     }
 
-    let pb = ProgressBar::new(total_work as u64);
-    pb.set_style(
-        ProgressStyle::with_template(
-            "  Phase 1 [{bar:40}] {pos}/{len} ({per_sec}) ETA: {eta}",
-        )
-        .unwrap()
-        .progress_chars("=> "),
-    );
+    let pb = if log_prefix.is_some() {
+        ProgressBar::hidden()
+    } else {
+        let pb = ProgressBar::new(total_work as u64);
+        pb.set_style(
+            ProgressStyle::with_template(
+                "  Phase 1 [{bar:40}] {pos}/{len} ({per_sec}) ETA: {eta}",
+            )
+            .unwrap()
+            .progress_chars("=> "),
+        );
+        pb
+    };
 
     // -----------------------------------------------------------------------
     // Multi-process pipeline: N worker processes, each with own ANTLR DFA
@@ -476,7 +483,7 @@ pub fn run_phase1_ndjson(
             "error" => {
                 let path = val.get("absolute_path").and_then(|v| v.as_str()).unwrap_or("?");
                 let msg = val.get("error").and_then(|v| v.as_str()).unwrap_or("unknown");
-                eprintln!("  [ERR] {path}: {msg}");
+                crate::pipeline::config::phase_log(&pfx, &format!("[ERR] {path}: {msg}"));
                 failed_counter.fetch_add(1, Ordering::Relaxed);
             }
             _ => {}
@@ -509,9 +516,9 @@ pub fn run_phase1_ndjson(
 
     let total_processed = processed_counter.load(Ordering::Relaxed) as usize;
     let total_failed = failed_counter.load(Ordering::Relaxed) as usize;
-    eprintln!(
-        "  Phase 1 complete: {} parsed, {} failed, {} skipped",
-        total_processed, total_failed, skipped
+    crate::pipeline::config::phase_log(
+        &pfx,
+        &format!("Phase 1 complete: {} parsed, {} failed, {} skipped", total_processed, total_failed, skipped),
     );
 
     Ok(())

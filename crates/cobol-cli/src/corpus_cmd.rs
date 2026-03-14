@@ -211,6 +211,7 @@ pub fn run(cli: &Cli, args: &CorpusArgs) -> Result<ExitCode> {
                         verbose,
                         quiet: true,
                         suppress_reports: true,
+                        log_prefix: Some(repo.rel_path.clone()),
                     };
 
                     // Run pipeline for this repo
@@ -240,9 +241,12 @@ pub fn run(cli: &Cli, args: &CorpusArgs) -> Result<ExitCode> {
                         };
                         let eta_min = eta / 60;
                         let eta_sec = eta % 60;
-                        eprintln!(
-                            "[{}/{}] {} [{}] ETA: {}m{}s",
-                            done, total_repos, repo.rel_path, status, eta_min, eta_sec
+                        crate::pipeline::config::phase_log(
+                            &Some(repo.rel_path.clone()),
+                            &format!(
+                                "[{}/{}] [{}] ETA: {}m{}s",
+                                done, total_repos, status, eta_min, eta_sec
+                            ),
                         );
                     }
 

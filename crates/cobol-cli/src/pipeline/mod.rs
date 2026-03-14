@@ -18,7 +18,7 @@ use crate::scan::args::{ReportFormat, ReportType};
 use crate::scan::discover::{self, FileType};
 use crate::scan::ndjson::{self, NdjsonWriter, ScanMeta};
 use crate::workspace::load_project_config;
-use config::ResolvedConfig;
+use config::{phase_log, ResolvedConfig};
 
 /// Run the full pipeline for a single project.
 pub fn run_pipeline(config: &ResolvedConfig) -> Result<ExitCode> {
@@ -159,7 +159,10 @@ where
     F: FnOnce(&ResolvedConfig) -> Result<()>,
 {
     if !config.quiet {
-        eprintln!("Phase {}: {} -- running", phase, name);
+        phase_log(
+            &config.log_prefix,
+            &format!("Phase {}: {} -- running", phase, name),
+        );
     }
     let start = Instant::now();
 
@@ -167,13 +170,10 @@ where
 
     if !config.quiet {
         let elapsed = start.elapsed();
-        eprintln!(
-            "Phase {}: {} -- done ({:.1}s)",
-            phase,
-            name,
-            elapsed.as_secs_f64()
+        phase_log(
+            &config.log_prefix,
+            &format!("Phase {}: {} -- done ({:.1}s)", phase, name, elapsed.as_secs_f64()),
         );
-        eprintln!();
     }
     Ok(())
 }
@@ -220,7 +220,7 @@ fn run_phase1_impl(
     shutdown: &Arc<AtomicBool>,
 ) -> Result<()> {
     // Discover files
-    eprintln!("  Discovering files...");
+    phase_log(&config.log_prefix, "Discovering files...");
     let files = discover::discover_files(
         &config.project_dir,
         &config.extensions,
@@ -229,11 +229,12 @@ fn run_phase1_impl(
 
     let source_count = files.iter().filter(|f| f.file_type == FileType::Source).count();
     let copybook_count = files.iter().filter(|f| f.file_type == FileType::Copybook).count();
-    eprintln!(
-        "  Found {} files ({} source, {} copybooks)",
-        files.len(),
-        source_count,
-        copybook_count
+    phase_log(
+        &config.log_prefix,
+        &format!(
+            "Found {} files ({} source, {} copybooks)",
+            files.len(), source_count, copybook_count
+        ),
     );
 
     let mut writer = NdjsonWriter::new(scan_dir, false)?;
@@ -267,6 +268,7 @@ fn run_phase1_impl(
         shutdown,
         100, // batch_size
         false, // resume
+        config.log_prefix.as_deref(),
     )?;
 
     writer.flush()?;
@@ -311,6 +313,7 @@ fn run_phase2_impl(
         &failed,
         shutdown,
         100, // batch_size
+        config.log_prefix.as_deref(),
     )?;
 
     writer.flush()?;
