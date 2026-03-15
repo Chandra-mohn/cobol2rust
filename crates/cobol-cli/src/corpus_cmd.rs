@@ -173,6 +173,36 @@ pub fn run(cli: &Cli, args: &CorpusArgs) -> Result<ExitCode> {
                     let repo = &repos[idx];
                     let repo_output = output_root.join(&repo.rel_path);
 
+                    // Skip repos that already completed (repo-level incremental).
+                    let repo_reports = repo_output.join("reports");
+                    let repo_done = repo_reports.join("parse_results.ndjson");
+                    let repo_cov = repo_reports.join("coverage.ndjson");
+                    if repo_done.exists()
+                        && fs::metadata(&repo_done).map(|m| m.len() > 0).unwrap_or(false)
+                        && repo_cov.exists()
+                        && fs::metadata(&repo_cov).map(|m| m.len() > 0).unwrap_or(false)
+                    {
+                        // Already processed -- count as success and skip.
+                        let done = completed.fetch_add(1, Ordering::Relaxed) + 1;
+                        if !quiet {
+                            crate::pipeline::config::phase_log(
+                                &Some(repo.rel_path.clone()),
+                                &format!("[{}/{}] [skip] (already complete)", done, total_repos),
+                            );
+                        }
+                        let meta = if repo_reports.is_dir() {
+                            load_repo_meta(&repo_reports)
+                        } else {
+                            None
+                        };
+                        results.lock().unwrap().push(RepoResult {
+                            repo_output,
+                            success: true,
+                            meta,
+                        });
+                        continue;
+                    }
+
                     // Load per-repo .cobol2rust.toml
                     let project_config =
                         load_project_config(&repo.abs_path).unwrap_or(None);
